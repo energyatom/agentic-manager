@@ -10,7 +10,7 @@ Each verdict links its runnable test or recorded demo.
 |---|---|---|---|
 | 1 | Provider port (Anthropic + OpenAI-compatible, streaming, tool calls, usage, cancel within 1 s) | **Pass (live).** Frontier half on the owner's Anthropic key (`claude-opus-5-5`). LM Studio half on `google/gemma-4-e4b`. A second local run on the reasoning model `qwen/qwen3.5-9b` streamed no answer text before the cancel; that is a finding for epic 2 (finding 8), not a failure of the criterion. | [`c1_providers.rs`](../crates/am-e2e/tests/spike/c1_providers.rs): recorded-fixture tests for both adapters, and the live tests `live_anthropic_c1` and `live_lm_studio_c1`. [Live run log below](#c1-live-run-2026-11-20). |
 | 2 | `kill -9` mid-run, resume on SQLite WAL | **Pass** | [`c2_crash_resume.rs`](../crates/am-e2e/tests/spike/c2_crash_resume.rs): SIGKILL lands while step 3's call is in flight. On restart the run resumes at step 3. Exactly one call is marked lost, settled at its reservation and re-issued. Every step completes exactly once, the ledger reconciles to the micro-dollar and the audit chain verifies. |
-| 3 | Cron + timezone + catch-up after sleep/wake | **Provisional: owner run pending (not yet a verdict).** The automated tests pass; the macOS sleep/wake lid demo, which the criterion names, has not been run. | [`c3_scheduler.rs`](../crates/am-e2e/tests/spike/c3_scheduler.rs): 09:30 Asia/Kolkata fires at 04:00Z. A three-day clock jump gives exactly one catch-up (`once`); the same holds across a restart from persisted `next_fire`. The `skip` and `all` policies are covered. Demo: `agentic spike c3`. |
+| 3 | Cron + timezone + catch-up after sleep/wake | **Provisional: sleep demo inconclusive (not yet a verdict).** The automated tests pass. Attempt 1 (2026-11-20, forced sleep) crossed the 20:05Z fire time by only about 8 s, inside the 60 s on-time grace, so the missed fire ran once on wake but was classed `on_time` and the catch-up path was not exercised. It needs a sleep that wakes more than 60 s after a fire time. | [`c3_scheduler.rs`](../crates/am-e2e/tests/spike/c3_scheduler.rs): 09:30 Asia/Kolkata fires at 04:00Z. A three-day clock jump gives exactly one catch-up (`once`); the same holds across a restart from persisted `next_fire`. The `skip` and `all` policies are covered. Demo: `agentic spike c3`; [attempt 1 log below](#c3-sleep-demo-attempt-1-2026-11-20). |
 | 4 | Files to models | **Provisional: owner run pending (not yet a verdict).** The synthetic-fixture tests pass; the recorded run on the owner's folder (`AM_SPIKE_DOCS_DIR`, set later by the owner's decision of 2026-11-19) has not been run. | [`c4_files_to_models.rs`](../crates/am-e2e/tests/spike/c4_files_to_models.rs) and [table below](#c4-on-synthetic-fixtures). Every refusal is worded and made before any request (zero bytes sent). The confinement cases pass: a symlink file and a symlinked folder leaving the root, `../`, an absolute path, and a write on a read-only root are all refused and audited. |
 | 5 | MCP (rmcp) over stdio and Streamable HTTP | **Pass (live)** | [`c5_mcp.rs`](../crates/am-e2e/tests/spike/c5_mcp.rs), [run log below](#c5-live-run-2026-11-19). `server-filesystem@2.4.0 --read-only` lists only read tools and `read_text_file` returns the fixture text. `server-everything@2.3.1 streamableHttp` returns `echo`. The HTTP transport runs over `am-net`, and an unlisted port is refused. |
 | 6 | Loopback server Host, Origin, token, WebSocket | **Pass** | [`c6_server.rs`](../crates/am-e2e/tests/spike/c6_server.rs). Refused with 403: a bad Host, a foreign Origin on fetch, a foreign Origin on the WebSocket upgrade, a missing CSRF header or subprotocol, and a POST with no Origin. No CORS headers are sent. The launch code is single-use, and a failed exchange invalidates every outstanding code. |
@@ -22,7 +22,7 @@ Each verdict links its runnable test or recorded demo.
 criteria, six have a verdict (1, 2, 5, 6, 7 and 9: all pass, 0 failures) and
 two are provisional until the owner's runs land:
 
-- criterion 3: the lid demo;
+- criterion 3: a sleep demo that wakes more than 60 s after a fire time (attempt 1 was inconclusive);
 - criterion 4: `AM_SPIKE_DOCS_DIR` with `.known-words`, plus a vision model in LM Studio.
 
 stack-spike.md allows "pending" only for criterion 5, so the count is not final
@@ -169,6 +169,41 @@ per local model:
 | LM Studio `google/gemma-4-e4b` | `lookup_word {"word":"otter"}` | 92 in / 77 out | 12 | 0.33 ms, `Cancelled` | none | PASS |
 | LM Studio `qwen/qwen3.5-9b` | `lookup_word {"word":"otter"}` | 301 in / 66 out | 0 | 0.28 ms, `Cancelled` | none | FAIL: no `content` deltas within 20 s (finding 8) |
 
+## C3 sleep demo, attempt 1 (2026-11-20)
+
+The owner's Mac runs in clamshell mode with external monitors, so it was put to
+sleep with Apple menu → Sleep instead of the lid; criterion 3 names macOS sleep,
+not the lid as such. `agentic spike c3 --db /tmp/c3.db --cron "*/5 * * * *"`
+(Asia/Kolkata):
+
+```text
+2026-11-19T19:42:02.224418Z scheduler started: cron `*/5 * * * *` in Asia/Kolkata
+2026-11-19T19:45:00.00618Z  FIRE scheduled_for=19:45:00Z kind=on_time
+2026-11-19T19:50:00.005436Z FIRE scheduled_for=19:50:00Z kind=on_time
+2026-11-19T19:55:00.008254Z FIRE scheduled_for=19:55:00Z kind=on_time
+2026-11-19T20:00:00.007557Z FIRE scheduled_for=20:00:00Z kind=on_time
+2026-11-19T20:05:08.755451Z FIRE scheduled_for=20:05:00Z kind=on_time (wall clock jumped 248s: sleep/wake)
+```
+
+`pmset -g log` for the same window (local time, +05:30):
+
+```text
+01:27:42 Sleep     Entering Sleep state due to 'Software Sleep'
+01:27:55 DarkWake  DarkWake from Deep Idle … 180 secs
+01:30:55 Sleep     Entering Sleep state due to 'Maintenance Sleep' … 261 secs
+01:35:16 Wake      Wake from Deep Idle
+```
+
+Reading: the Mac slept at 19:57:42Z, but macOS woke it 13 s later into a
+DarkWake (a maintenance wake with the screen off) until 20:00:55Z. The process
+ran during the DarkWake and fired 20:00 on time. The real sleep, 20:00:55Z to
+about 20:05:08Z, crossed one fire time (20:05:00Z) by about 8 s. The scheduler
+detected the 248 s jump and fired that slot exactly once on wake: no miss and
+no duplicate. Because the delay was inside `ON_TIME_GRACE` (60 s,
+`crates/am-engine/src/scheduler.rs`), the fire was classed `on_time`, so the
+`catch_up` path that criterion 3 names was not exercised. Verdict:
+inconclusive; repeat with a sleep that wakes more than 60 s after a fire time.
+
 ## C5 live run (2026-11-19)
 
 Both servers were started with `npx`. The run used Node from `/usr/local/bin`,
@@ -245,6 +280,6 @@ The code was committed unchanged (commit `7ead7ff`).
    appear in that file. Without it the run fails and says so. The run also
    fails when only one of the frontier and local models ran, when a file
    cannot be read, or when a type the model's flags allow is refused.
-4. **Lid demo (criterion 3).** Run `agentic spike c3 --db /tmp/c3.db --cron "*/5 * * * *"`,
+4. **Sleep demo (criterion 3; attempt 1 inconclusive).** Run `agentic spike c3 --db /tmp/c3.db --cron "*/5 * * * *"`,
    close the lid across a fire time, then reopen. The log shows one
    `kind=catch_up` fire, with "wall clock jumped …s: sleep/wake".
