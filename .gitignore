@@ -11,3 +11,10 @@ node_modules/
 
 # OS and editor noise
 .DS_Store
+
+# Python bytecode
+__pycache__/
+
+# Committed test fixtures are the exception to the image rule above.
+!fixtures/**/*.png
+!crates/am-desktop/icons/*.png

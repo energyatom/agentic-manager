@@ -1,0 +1,110 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/am-domain",
+    "crates/am-config",
+    "crates/am-store",
+    "crates/am-engine",
+    "crates/am-net",
+    "crates/am-providers",
+    "crates/am-tools",
+    "crates/am-connectors",
+    "crates/am-render",
+    "crates/am-services",
+    "crates/am-mcp",
+    "crates/am-extract",
+    "crates/am-secrets",
+    "crates/am-api",
+    "crates/am-server",
+    "crates/am-app",
+    "crates/am-desktop",
+    "crates/am-testkit",
+    "crates/am-e2e",
+    "xtask",
+]
+# am-desktop (Tauri) is built only in E11 and CI (AD-32, AD-47).
+default-members = [
+    "crates/am-domain",
+    "crates/am-config",
+    "crates/am-store",
+    "crates/am-engine",
+    "crates/am-net",
+    "crates/am-providers",
+    "crates/am-tools",
+    "crates/am-connectors",
+    "crates/am-render",
+    "crates/am-services",
+    "crates/am-mcp",
+    "crates/am-extract",
+    "crates/am-secrets",
+    "crates/am-api",
+    "crates/am-server",
+    "crates/am-app",
+    "crates/am-testkit",
+    "crates/am-e2e",
+    "xtask",
+]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+license = "MIT"
+rust-version = "1.100"
+publish = false
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+disallowed_methods = "deny"
+disallowed_types = "deny"
+
+# Exact pins (architecture § Stack). Crates not named in the Stack table are
+# pinned to the version current at E1 story 1 (2026-11-19).
+[workspace.dependencies]
+am-domain = { path = "crates/am-domain" }
+am-config = { path = "crates/am-config" }
+am-store = { path = "crates/am-store" }
+am-engine = { path = "crates/am-engine" }
+am-net = { path = "crates/am-net" }
+am-providers = { path = "crates/am-providers" }
+am-tools = { path = "crates/am-tools" }
+am-connectors = { path = "crates/am-connectors" }
+am-render = { path = "crates/am-render" }
+am-services = { path = "crates/am-services" }
+am-mcp = { path = "crates/am-mcp" }
+am-extract = { path = "crates/am-extract" }
+am-secrets = { path = "crates/am-secrets" }
+am-api = { path = "crates/am-api" }
+am-server = { path = "crates/am-server" }
+am-app = { path = "crates/am-app" }
+am-testkit = { path = "crates/am-testkit" }
+
+tokio = { version = "=1.54.1", features = ["rt-multi-thread", "macros", "process", "net", "time", "sync", "io-util", "fs", "signal"] }
+tokio-util = { version = "=0.7.20", features = ["rt"] }
+axum = { version = "=0.8.9", features = ["ws"] }
+reqwest = { version = "=0.13.5", default-features = false, features = ["rustls", "stream"] }
+rusqlite = { version = "=0.43.0", features = ["bundled"] }
+croner = { version = "=4.0.3", default-features = false, features = ["jiff"] }
+jiff = { version = "=1.0.0" }
+rmcp = { version = "=3.11.0", default-features = false, features = ["client", "transport-child-process", "transport-streamable-http-client"] }
+sse-stream = "=0.2.6"
+process-wrap = { version = "=10.0.1", default-features = false, features = ["tokio1", "process-group", "kill-on-drop"] }
+thiserror = "=2.0.21"
+tracing = "=0.1.44"
+sha2 = "=0.11.1"
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.154"
+uuid = { version = "=1.29.3", features = ["v7", "serde"] }
+base64 = "=0.23.1"
+futures-util = "=0.3.34"
+bytes = "=1.12.2"
+http = "=1.5.0"
+getrandom = "=0.4.3"
+hex = "=0.4.3"
+tempfile = "=3.27.0"
+# croner 4.0.3's jiff backend is built on jiff 0.2 (spike finding, see
+# docs/crate-notes/croner.md); the scheduler converts at that boundary only.
+jiff-croner = { package = "jiff", version = "=0.2.46" }
+keyring-core = "=1.0.1"
+apple-native-keyring-store = { version = "=1.0.2", features = ["keychain"] }

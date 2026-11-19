@@ -1,0 +1,14 @@
+# AD-12: am-net::EgressClient is the only HTTP client; nothing else constructs
+# a reqwest client (am-net allows it at its single construction site).
+# AD-39: chromiumoxide's WebSocket/HTTP launchers are banned.
+disallowed-methods = [
+    { path = "reqwest::Client::new", reason = "use am_net::EgressClient (AD-12)" },
+    { path = "reqwest::Client::builder", reason = "use am_net::EgressClient (AD-12)" },
+    { path = "reqwest::ClientBuilder::new", reason = "use am_net::EgressClient (AD-12)" },
+    { path = "reqwest::get", reason = "use am_net::EgressClient (AD-12)" },
+    { path = "chromiumoxide::Browser::launch", reason = "AD-39: CDP over a pipe only", allow-invalid = true },
+    { path = "chromiumoxide::Browser::connect", reason = "AD-39: CDP over a pipe only", allow-invalid = true },
+]
+disallowed-types = [
+    { path = "reqwest::blocking::Client", reason = "use am_net::EgressClient (AD-12)", allow-invalid = true },
+]

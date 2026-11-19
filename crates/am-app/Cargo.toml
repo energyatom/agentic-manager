@@ -1,0 +1,36 @@
+[package]
+name = "am-app"
+description = "Composition root and the `agentic` CLI (AD-32)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "agentic"
+path = "src/main.rs"
+
+[dependencies]
+am-domain.workspace = true
+am-config.workspace = true
+am-store.workspace = true
+am-engine.workspace = true
+am-net.workspace = true
+am-providers.workspace = true
+am-tools.workspace = true
+am-connectors.workspace = true
+am-render.workspace = true
+am-services.workspace = true
+am-mcp.workspace = true
+am-extract.workspace = true
+am-secrets.workspace = true
+am-api.workspace = true
+am-server.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+jiff.workspace = true
+tracing.workspace = true

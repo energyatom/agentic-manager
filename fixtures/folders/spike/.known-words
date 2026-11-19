@@ -1,0 +1,7 @@
+# relative path: known words (any one, case-insensitive)
+notes.txt: PELICAN
+table.csv: MARIGOLD
+report.pdf: ZEPHYR
+swatch.png: red
+sheet.xlsx: QUOKKA
+memo.docx: LANTERN

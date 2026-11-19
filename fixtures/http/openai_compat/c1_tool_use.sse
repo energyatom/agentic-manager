@@ -1,0 +1,14 @@
+data: {"id":"chatcmpl-fixture","object":"chat.completion.chunk","created":1795000000,"model":"local-vision","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-fixture","object":"chat.completion.chunk","created":1795000000,"model":"local-vision","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_fixture01","type":"function","function":{"name":"lookup_word","arguments":""}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-fixture","object":"chat.completion.chunk","created":1795000000,"model":"local-vision","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"word\""}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-fixture","object":"chat.completion.chunk","created":1795000000,"model":"local-vision","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":": \"otter\"}"}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-fixture","object":"chat.completion.chunk","created":1795000000,"model":"local-vision","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
+
+data: {"id":"chatcmpl-fixture","object":"chat.completion.chunk","created":1795000000,"model":"local-vision","choices":[],"usage":{"prompt_tokens":188,"completion_tokens":21,"total_tokens":209}}
+
+data: [DONE]
+

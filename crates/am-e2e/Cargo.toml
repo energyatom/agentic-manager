@@ -1,0 +1,32 @@
+[package]
+name = "am-e2e"
+description = "End-to-end and trust tests (AD-33). Spike: tests/spike/c1..c7."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[[test]]
+name = "spike"
+path = "tests/spike/main.rs"
+
+[dev-dependencies]
+am-app.workspace = true
+am-domain.workspace = true
+am-engine.workspace = true
+am-store.workspace = true
+am-net.workspace = true
+am-providers.workspace = true
+am-tools.workspace = true
+am-mcp.workspace = true
+am-secrets.workspace = true
+am-server.workspace = true
+am-testkit.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+jiff.workspace = true
+tempfile.workspace = true

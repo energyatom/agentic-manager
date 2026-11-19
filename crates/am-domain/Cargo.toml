@@ -1,0 +1,17 @@
+[package]
+name = "am-domain"
+description = "Pure domain: entities, value types, Actor, content parts, port traits (no IO, no async runtime)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+serde.workspace = true
+thiserror.workspace = true
+jiff.workspace = true
+uuid.workspace = true

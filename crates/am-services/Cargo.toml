@@ -1,0 +1,13 @@
+[package]
+name = "am-services"
+description = "Local service supervisor (AD-45). Empty in the spike."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
