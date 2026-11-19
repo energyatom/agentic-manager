@@ -36,6 +36,8 @@ jobs:
         run: just check
       - name: Build the agentic binary
         run: cargo build -p am-app --bin agentic
+      - name: Desktop shell (criterion 8 stand-in) lint and build
+        run: cargo clippy -p am-desktop --all-targets -- -D warnings
 
   linux:
     name: Linux portability (core build + tests)

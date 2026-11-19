@@ -1,5 +1,6 @@
 [package]
 name = "am-desktop"
+description = "Tauri 2 shell that links the core in-process (AD-32). macOS only in v1; built in E11 and CI. Spike: the criterion 8 stand-in."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,4 +10,13 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[[bin]]
+name = "agentic-desktop"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "=2.7.6", features = [] }
+
 [dependencies]
+am-server.workspace = true
+tauri = { version = "=2.12.6", features = [] }

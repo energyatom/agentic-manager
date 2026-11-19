@@ -220,6 +220,8 @@ async fn session(State(state): State<AppState>, body: axum::body::Bytes) -> Resp
     let csrf = random_hex(32);
     inner.sessions.insert(sid.clone(), csrf.clone());
     drop(inner);
+    tracing::info!(port = state.port, "session opened");
+    eprintln!("am-server: session opened on port {}", state.port);
     let cookie = format!(
         "{}={}; HttpOnly; SameSite=Strict; Path=/",
         state.cookie_name(),

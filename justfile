@@ -16,11 +16,12 @@ fmt-check:
 fmt:
     cargo fmt --all
 
+# Default members: every crate but am-desktop (built only in E11 and CI).
 clippy:
-    cargo clippy --workspace --all-targets -- -D warnings
+    cargo clippy --all-targets -- -D warnings
 
 test:
-    cargo nextest run --workspace
+    cargo nextest run
 
 # The spike's offline criteria tests (C1-C7).
 spike:
@@ -32,4 +33,9 @@ spike-live:
     AM_LIVE=1 cargo nextest run -p am-e2e spike --run-ignored only --no-capture
 
 build:
-    cargo build --workspace
+    cargo build
+
+# The desktop shell (CI and E11 only): lint it and build the ad-hoc-signed .app.
+desktop:
+    cargo clippy -p am-desktop --all-targets -- -D warnings
+    cd crates/am-desktop && npx -y @tauri-apps/cli@2.12.5 build --debug --bundles app
