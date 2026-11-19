@@ -11,7 +11,7 @@ Each verdict links its runnable test or recorded demo.
 | 1 | Provider port (Anthropic + OpenAI-compatible, streaming, tool calls, usage, cancel within 1 s) | **Pass (live).** Frontier half on the owner's Anthropic key (`claude-opus-5-5`). LM Studio half on `google/gemma-4-e4b`. A second local run on the reasoning model `qwen/qwen3.5-9b` streamed no answer text before the cancel; that is a finding for epic 2 (finding 8), not a failure of the criterion. | [`c1_providers.rs`](../crates/am-e2e/tests/spike/c1_providers.rs): recorded-fixture tests for both adapters, and the live tests `live_anthropic_c1` and `live_lm_studio_c1`. [Live run log below](#c1-live-run-2026-11-20). |
 | 2 | `kill -9` mid-run, resume on SQLite WAL | **Pass** | [`c2_crash_resume.rs`](../crates/am-e2e/tests/spike/c2_crash_resume.rs): SIGKILL lands while step 3's call is in flight. On restart the run resumes at step 3. Exactly one call is marked lost, settled at its reservation and re-issued. Every step completes exactly once, the ledger reconciles to the micro-dollar and the audit chain verifies. |
 | 3 | Cron + timezone + catch-up after sleep/wake | **Provisional: sleep demo inconclusive (not yet a verdict).** The automated tests pass. Attempt 1 (2026-11-20, forced sleep) crossed the 20:05Z fire time by only about 8 s, inside the 60 s on-time grace, so the missed fire ran once on wake but was classed `on_time` and the catch-up path was not exercised. It needs a sleep that wakes more than 60 s after a fire time. | [`c3_scheduler.rs`](../crates/am-e2e/tests/spike/c3_scheduler.rs): 09:30 Asia/Kolkata fires at 04:00Z. A three-day clock jump gives exactly one catch-up (`once`); the same holds across a restart from persisted `next_fire`. The `skip` and `all` policies are covered. Demo: `agentic spike c3`; [attempt 1 log below](#c3-sleep-demo-attempt-1-2026-11-20). |
-| 4 | Files to models | **Provisional: owner run pending (not yet a verdict).** The synthetic-fixture tests pass; the recorded run on the owner's folder (`AM_SPIKE_DOCS_DIR`, set later by the owner's decision of 2026-11-19) has not been run. | [`c4_files_to_models.rs`](../crates/am-e2e/tests/spike/c4_files_to_models.rs) and [table below](#c4-on-synthetic-fixtures). Every refusal is worded and made before any request (zero bytes sent). The confinement cases pass: a symlink file and a symlinked folder leaving the root, `../`, an absolute path, and a write on a read-only root are all refused and audited. |
+| 4 | Files to models | **Pass (live, verified answers; owner decision 2026-11-20).** Two runs on the owner's folder (`AM_SPIKE_DOCS_DIR`, 10 files of 7 types) with `claude-opus-5-5` and `google/gemma-4-e4b`. Every type the model's flags exclude was refused in words before any request (13 of 20 pairs per run, zero bytes sent). Every accepted answer (14 of 14 over both runs) is a word that appears in its file, checked by hand. The automated word match failed 2 rows per run only because the open question lets the model pick any distinctive word (finding 9). Confinement is covered by the offline tests. | [`c4_files_to_models.rs`](../crates/am-e2e/tests/spike/c4_files_to_models.rs) (`live_files_to_models_on_owner_folder`), [owner-folder runs below](#c4-live-runs-on-the-owners-folder-2026-11-20) and [synthetic-fixture table](#c4-on-synthetic-fixtures). The confinement cases pass offline: a symlink file and a symlinked folder leaving the root, `../`, an absolute path, a dangling outward symlink, a folder-link loop and a write on a read-only root are all refused and audited. |
 | 5 | MCP (rmcp) over stdio and Streamable HTTP | **Pass (live)** | [`c5_mcp.rs`](../crates/am-e2e/tests/spike/c5_mcp.rs), [run log below](#c5-live-run-2026-11-19). `server-filesystem@2.4.0 --read-only` lists only read tools and `read_text_file` returns the fixture text. `server-everything@2.3.1 streamableHttp` returns `echo`. The HTTP transport runs over `am-net`, and an unlisted port is refused. |
 | 6 | Loopback server Host, Origin, token, WebSocket | **Pass** | [`c6_server.rs`](../crates/am-e2e/tests/spike/c6_server.rs). Refused with 403: a bad Host, a foreign Origin on fetch, a foreign Origin on the WebSocket upgrade, a missing CSRF header or subprotocol, and a POST with no Origin. No CORS headers are sent. The launch code is single-use, and a failed exchange invalidates every outstanding code. |
 | 7 | macOS Keychain | **Pass** | [`c7_keychain.rs`](../crates/am-e2e/tests/spike/c7_keychain.rs): store, read, overwrite and delete with a canary under service `agentic-manager`, here and on the CI macOS runner. The Linux job builds the store and it answers "the OS keychain is not supported on this platform yet". |
@@ -19,15 +19,15 @@ Each verdict links its runnable test or recorded demo.
 | 9 | Agent productivity | **Pass** | A fresh Claude Code subagent built the ToolGate `max_uses_per_step` rule and its 7 tests ([`toolgate.rs`](../crates/am-engine/src/toolgate.rs)) with no human code edits. It wrote the tests failing first and passed `just check` on its second run. Summary [below](#c9-subagent-summary). |
 
 **REPLAN count (criteria 1–7 and 9): provisional.** Of the eight counted
-criteria, six have a verdict (1, 2, 5, 6, 7 and 9: all pass, 0 failures) and
-two are provisional until the owner's runs land:
+criteria, seven have a verdict (1, 2, 4, 5, 6, 7 and 9: all pass, 0 failures)
+and one is provisional until the owner's run lands:
 
-- criterion 3: a sleep demo that wakes more than 60 s after a fire time (attempt 1 was inconclusive);
-- criterion 4: `AM_SPIKE_DOCS_DIR` with `.known-words`, plus a vision model in LM Studio.
+- criterion 3: a sleep demo that wakes more than 60 s after a fire time (attempt 1 was inconclusive).
 
 stack-spike.md allows "pending" only for criterion 5, so the count is not final
-and no replan decision can be taken until these two runs report. A failure
-in either counts toward the threshold of two.
+and no replan decision can be taken until this run reports. Even a failure of
+criterion 3 would leave the count at one, below the threshold of two, so the
+stack holds either way; a single failure would get a local workaround here.
 
 CI on `spike/1-1`: run
 [44597696551](https://github.com/energyatom/agentic-manager/actions/runs/44597696551) (head `ec1c16f`, after the review fixes).
@@ -114,6 +114,15 @@ tests).
    should choose which from the model's `capabilities.reasoning`. No code was
    changed in the spike.
 
+9. **An open question makes the known-word check nondeterministic.** The C4
+   question asks the model to "name one distinctive word" in the file, and
+   Opus picked a different real word on each run ("Soccer", then "Gearbox";
+   "Lithography-free", then "Antibunching"). A fixed `.known-words` list
+   therefore misses correct answers at random. Later file-reading tests should
+   ask a closed question (which of these words, some of them decoys, appears
+   in the file) or check the answer against the file's own text where one
+   exists. The spike's verdict rests on the hand check recorded below.
+
 ## Test-first evidence (mutation runs)
 
 The tests were written in the same session as the code, not before it. To
@@ -168,6 +177,52 @@ per local model:
 | Anthropic `claude-opus-5-5` (run 2) | `lookup_word {"word": "otter"}` | 412 in / 50 out | 5 | 0.58 ms, `Cancelled` | none (partial seen: 41 in / 9 out) | PASS |
 | LM Studio `google/gemma-4-e4b` | `lookup_word {"word":"otter"}` | 92 in / 77 out | 12 | 0.33 ms, `Cancelled` | none | PASS |
 | LM Studio `qwen/qwen3.5-9b` | `lookup_word {"word":"otter"}` | 301 in / 66 out | 0 | 0.28 ms, `Cancelled` | none | FAIL: no `content` deltas within 20 s (finding 8) |
+
+## C4 live runs on the owner's folder (2026-11-20)
+
+`AM_LIVE=1 AM_SPIKE_DOCS_DIR=~/AM-spike-docs AM_SPIKE_LOCAL_MODEL=google/gemma-4-e4b cargo nextest run -p am-e2e spike::c4_files_to_models::live --run-ignored only`.
+The folder stays outside the repo. Files are described here by type, not by
+name, and personal names are left out, because the repository is to be
+published.
+
+**Refused before any request (both runs, identical): 13 of 20 pairs, zero bytes sent.**
+
+| File type | `claude-opus-5-5` | `google/gemma-4-e4b` |
+|---|---|---|
+| PDF (3 files, all with a text layer) | accepted | refused |
+| JPEG (2 scanned card images) | accepted | accepted |
+| xlsx (2 files) | refused | refused |
+| pptx | refused | refused |
+| doc (Word 97) | refused | refused |
+| 3mf (3D model) | refused | refused |
+
+Each refusal reads, for example: "The model claude-opus-5-5 cannot read
+<file> (application/msword). Choose a model that reads this file type, or
+route the file to another seat. Nothing was sent."
+
+**Accepted answers.** "In file" is the hand check: the word appears in the
+file's text layer (PDFs) or is printed on the image (JPEGs).
+
+| File | Model | Run 1 answer | Run 2 answer | In file | Tokens in/out (run 1) | Cost USD (run 1) |
+|---|---|---|---|---|---|---|
+| assembly guide, PDF, 82 pages | Opus | Soccer | Gearbox | yes, both (gearbox ×3) | 130811 / 6 | 0.523364 |
+| photon-counter datasheet, PDF, 15 pages | Opus | Excelitas | Excelitas | yes | 34173 / 7 | 0.136832 |
+| research paper, PDF, 7 pages | Opus | Lithography-free | Antibunching | yes, both (×4, ×5) | 23253 / 8 | 0.093172 |
+| card image, front | Opus | Bombay | Bombay | yes | 2144 / 6 | 0.008696 |
+| card image, front | gemma | Bombay | Bombay | yes | 172 / 327 | 0 (local) |
+| card image, back | Opus | Physics | Physics | yes | 2143 / 5 | 0.008672 |
+| card image, back | gemma | (a surname printed on the card) | Physics | yes, both | 169 / 475 | 0 (local) |
+
+Each run cost about USD 0.77, all on Anthropic. The automated check failed 2
+rows per run (run 1: "Lithography-free" and the surname; run 2: "Gearbox" and
+"Antibunching") because those words were not on the owner's `.known-words`
+list, not because a model failed to read a file (finding 9). gemma's output
+token counts are high for a one-word answer because the server counts its
+thinking. The owner decided on 2026-11-20 to settle criterion 4 on these
+verified answers rather than rewrite the check and run again.
+
+There was no PDF without a text layer in the folder, so that case rests on the
+two scanned JPEGs, which both models read.
 
 ## C3 sleep demo, attempt 1 (2026-11-20)
 
@@ -267,7 +322,7 @@ The code was committed unchanged (commit `7ead7ff`).
    `AM_SPIKE_LOCAL_MODEL=google/gemma-4-e4b`, the vision-capable model that
    passed criterion 1. Do not use a reasoning model such as `qwen/qwen3.5-9b`
    until finding 8 is handled.
-3. **Live tests (criterion 4 still to run):**
+3. **Live tests (criterion 4: done 2026-11-20, two runs):**
    `AM_SPIKE_DOCS_DIR=<folder> AM_SPIKE_C4_OUT=<file.md> just spike-live`.
    Each live test prints `skipped: <reason>` when its input is absent. Or use
    the commands:
