@@ -280,6 +280,30 @@ async fn failed_exchange_invalidates_outstanding_codes() {
     );
 }
 
+/// An `Upgrade` header does not exempt an API route from the session check.
+#[tokio::test]
+async fn upgrade_header_does_not_bypass_the_session_on_api_routes() {
+    let (_state, port) = start().await;
+    let host = format!("127.0.0.1:{port}");
+    let origin = format!("http://127.0.0.1:{port}");
+    let mut request = req(
+        "GET",
+        "/api/v1/health",
+        &[
+            ("Host", host),
+            ("Origin", origin),
+            ("Upgrade", "websocket".to_string()),
+            ("Sec-WebSocket-Version", "13".to_string()),
+            ("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==".to_string()),
+        ],
+        "",
+    );
+    request = request.replace("Connection: close", "Connection: Upgrade");
+    let r = raw(port, request).await;
+    assert_eq!(r.status, 401, "{}", r.head);
+    assert!(!r.body.contains("\"ok\""));
+}
+
 #[tokio::test]
 async fn binds_loopback_only() {
     let (listener, _port) = bind(0).await.unwrap();

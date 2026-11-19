@@ -160,7 +160,14 @@ impl Scheduler {
     ) -> Result<(), ScheduleError> {
         let existing = Reader::open(&self.db)?.trigger(id)?;
         let next_fire = match existing.as_ref().and_then(|t| t.next_fire.clone()) {
-            Some(n) if existing.as_ref().map(|t| t.cron.as_str()) == Some(cron) => n,
+            // Reuse the persisted fire time only for the same pattern in the same zone.
+            Some(n)
+                if existing
+                    .as_ref()
+                    .is_some_and(|t| t.cron == cron && t.tz == tz) =>
+            {
+                n
+            }
             _ => ts(next_after(cron, tz, self.clock.now())?),
         };
         let row = TriggerRow {
@@ -319,6 +326,21 @@ mod tests {
         // 09:00 in New York on a winter day is 14:00Z.
         let n = next_after("0 9 * * *", "America/New_York", t("2026-11-19T00:00:00Z")).unwrap();
         assert_eq!(n, t("2026-11-19T14:00:00Z"));
+    }
+
+    #[test]
+    fn changing_the_zone_recomputes_next_fire() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("state.db");
+        let store = am_store::Store::open(&db).unwrap();
+        let clock = am_testkit::FakeClock::at("2026-11-19T00:00:00Z");
+        let mut s = Scheduler::new(clock, store.writer(), db.clone());
+        s.add_trigger("t", "0 9 * * *", "UTC", CatchUp::Once)
+            .unwrap();
+        s.add_trigger("t", "0 9 * * *", "Asia/Kolkata", CatchUp::Once)
+            .unwrap();
+        let row = Reader::open(&db).unwrap().trigger("t").unwrap().unwrap();
+        assert_eq!(row.next_fire.as_deref(), Some("2026-11-19T03:30:00.000Z"));
     }
 
     #[test]

@@ -25,21 +25,21 @@ pub fn anthropic_key_present() -> bool {
     )
 }
 
-pub async fn lm_studio_model() -> Option<String> {
-    if let Ok(m) = std::env::var("AM_SPIKE_LOCAL_MODEL") {
-        return Some(m);
-    }
+/// The LM Studio model named by `AM_SPIKE_LOCAL_MODEL` (never guessed: the
+/// first listed model may be an embedding or text-only model), once LM Studio
+/// answers. `Err` is the skip reason.
+pub async fn lm_studio_model() -> Result<String, String> {
+    let model = std::env::var("AM_SPIKE_LOCAL_MODEL").map_err(|_| {
+        "AM_SPIKE_LOCAL_MODEL not set: name the LM Studio model (tool-capable for C1, vision-capable for C4)".to_string()
+    })?;
     let resp = egress()
         .send(HttpRequest::get("http://127.0.0.1:1234/v1/models"))
         .await
-        .ok()?;
-    let body = am_net::read_all(resp.body.as_ref()).await.ok()?;
-    let text = String::from_utf8_lossy(&body).to_string();
-    let i = text.find("\"id\"")?;
-    let rest = &text[i + 4..];
-    let a = rest.find('"')? + 1;
-    let b = rest[a..].find('"')? + a;
-    Some(rest[a..b].to_string())
+        .map_err(|_| "LM Studio is not answering on 127.0.0.1:1234".to_string())?;
+    if resp.status != 200 {
+        return Err(format!("LM Studio answered HTTP {}", resp.status));
+    }
+    Ok(model)
 }
 
 pub fn anthropic_model() -> String {

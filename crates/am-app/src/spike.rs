@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 
 use am_domain::{
     Access, Actor, AuditSink, BoxFuture, CancelSignal, ChatOutcome, ChatRequest, EventSink,
-    Instruction, LlmProvider, Message, ModelCapabilities, Part, ProviderError, Role, StopReason,
-    StreamEvent, ToolCall, ToolSpec, Usage,
+    FileKind, Instruction, LlmProvider, Message, ModelCapabilities, Part, ProviderError, Role,
+    StopReason, StreamEvent, ToolCall, ToolSpec, Usage,
 };
 use am_engine::TokenSignal;
 use am_engine::journal::{LinearWorkflow, Price, create_run, drive_run};
@@ -97,7 +97,16 @@ pub async fn spike_run(
             None => return Err("no unfinished run to resume".into()),
         }
     } else {
-        create_run(&writer, &wf, "manual").map_err(|e| e.to_string())?
+        create_run(
+            &writer,
+            Actor::Human {
+                person: "owner".into(),
+                hat: "Owner".into(),
+            },
+            &wf,
+            "manual",
+        )
+        .map_err(|e| e.to_string())?
     };
     let provider: Arc<dyn LlmProvider> = Arc::new(DelayProvider { delay });
     let status = drive_run(
@@ -139,6 +148,17 @@ impl Collect {
             })
             .unwrap_or(0)
     }
+    pub fn last_usage(&self) -> Option<Usage> {
+        self.events
+            .lock()
+            .ok()?
+            .iter()
+            .rev()
+            .find_map(|(_, ev)| match ev {
+                StreamEvent::Usage(u) => Some(*u),
+                _ => None,
+            })
+    }
     pub fn first_text_at(&self) -> Option<Instant> {
         self.events
             .lock()
@@ -159,7 +179,11 @@ pub struct C1Report {
     pub streamed_text_deltas: usize,
     pub cancel_latency: Duration,
     pub cancelled_stop: StopReason,
+    /// The outcome's usage after the cancel: `None` unless the provider had
+    /// reported final usage, so the call settles at its reservation (AD-9).
     pub usage_at_cancel: Option<Usage>,
+    /// The last (partial) usage the stream reported before the cancel.
+    pub usage_seen_before_cancel: Option<Usage>,
 }
 
 impl C1Report {
@@ -244,14 +268,23 @@ pub async fn c1_probe(
         cancel_latency,
         cancelled_stop: out.stop,
         usage_at_cancel: out.usage,
+        usage_seen_before_cancel: sink.last_usage(),
     })
 }
 
 // ------------------------------------------------------------------ C4
 
+/// Which half of criterion 4 a model stands for: both must run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelKind {
+    Frontier,
+    Local,
+}
+
 pub struct ModelUnderTest {
     /// e.g. "frontier: anthropic claude-opus-5-5"
     pub label: String,
+    pub kind: ModelKind,
     pub provider: Arc<dyn LlmProvider>,
     pub model: String,
     /// `None` for local models (cost 0, AD-9 conventions).
@@ -272,6 +305,11 @@ pub enum C4Outcome {
     Failed {
         error: String,
     },
+    /// The file could not be read from the linked folder (a cap, an IO error
+    /// or a confinement refusal): the run fails.
+    ReadError {
+        message: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -279,6 +317,9 @@ pub struct C4Row {
     pub file: String,
     pub media_type: String,
     pub model: String,
+    pub model_kind: ModelKind,
+    /// Whether the model's file-input flags allow this file's type (AD-31).
+    pub flags_allow: bool,
     pub outcome: C4Outcome,
     pub usage: Option<Usage>,
     pub cost_micro_usd: i64,
@@ -336,7 +377,12 @@ pub async fn files_to_models(
                         file: entry.relative_path.clone(),
                         media_type: entry.media_type.clone(),
                         model: m.label.clone(),
-                        outcome: C4Outcome::Refused {
+                        model_kind: m.kind,
+                        flags_allow: m
+                            .provider
+                            .capabilities(&m.model)
+                            .reads(FileKind::of(&entry.media_type)),
+                        outcome: C4Outcome::ReadError {
                             message: e.to_string(),
                         },
                         usage: None,
@@ -413,6 +459,11 @@ pub async fn files_to_models(
                 file: entry.relative_path.clone(),
                 media_type: entry.media_type.clone(),
                 model: m.label.clone(),
+                model_kind: m.kind,
+                flags_allow: m
+                    .provider
+                    .capabilities(&m.model)
+                    .reads(FileKind::of(&entry.media_type)),
                 outcome,
                 usage,
                 cost_micro_usd: cost,
@@ -443,6 +494,7 @@ pub fn c4_table(rows: &[C4Row]) -> String {
             ),
             C4Outcome::Refused { message } => ("refused", message.clone(), "-"),
             C4Outcome::Failed { error } => ("FAILED", error.replace('\n', " "), "-"),
+            C4Outcome::ReadError { message } => ("READ ERROR", message.clone(), "-"),
         };
         let tokens = r
             .usage
@@ -463,16 +515,72 @@ pub fn c4_table(rows: &[C4Row]) -> String {
     s
 }
 
-/// Pass rule for C4: every accepted answer names a known word (where one is
-/// given) and nothing failed.
-pub fn c4_passed(rows: &[C4Row]) -> bool {
-    rows.iter().all(|r| match &r.outcome {
-        C4Outcome::Accepted {
-            names_known_word, ..
-        } => *names_known_word != Some(false),
-        C4Outcome::Refused { .. } => true,
-        C4Outcome::Failed { .. } => false,
-    })
+/// How to give known words for a folder (the run fails without them).
+pub const KNOWN_WORDS_HELP: &str = "add a `.known-words` file to the folder with one line per file, `relative/path: word, other word`, naming words that appear in that file";
+
+/// The C4 verdict. Passes only when:
+/// - there are rows, and both a frontier and a local model ran;
+/// - every refusal is of a type the model's file-input flags exclude;
+/// - no file failed to read and no call failed;
+/// - every accepted answer names a known word of its file
+///   (`names_known_word == Some(true)`).
+///
+/// Otherwise returns every problem, worded.
+pub fn c4_verdict(rows: &[C4Row]) -> Result<(), String> {
+    let mut problems = Vec::new();
+    if rows.is_empty() {
+        problems.push("no results: the folder has no files, or no model ran".to_string());
+    }
+    for (kind, name) in [
+        (ModelKind::Frontier, "frontier"),
+        (ModelKind::Local, "local"),
+    ] {
+        if !rows.iter().any(|r| r.model_kind == kind) {
+            problems.push(format!("the {name} model did not run"));
+        }
+    }
+    let mut missing_known = false;
+    for r in rows {
+        match &r.outcome {
+            C4Outcome::Accepted {
+                names_known_word: Some(true),
+                ..
+            } => {}
+            C4Outcome::Accepted {
+                names_known_word: Some(false),
+                answer,
+            } => problems.push(format!(
+                "{} on {}: the answer \"{answer}\" names no known word",
+                r.file, r.model
+            )),
+            C4Outcome::Accepted {
+                names_known_word: None,
+                ..
+            } => {
+                missing_known = true;
+                problems.push(format!("{} on {}: no known word to check", r.file, r.model));
+            }
+            C4Outcome::Refused { .. } if !r.flags_allow => {}
+            C4Outcome::Refused { message } => problems.push(format!(
+                "{} on {}: refused although the model's flags allow {}: {message}",
+                r.file, r.model, r.media_type
+            )),
+            C4Outcome::Failed { error } => {
+                problems.push(format!("{} on {}: call failed: {error}", r.file, r.model))
+            }
+            C4Outcome::ReadError { message } => {
+                problems.push(format!("{} on {}: not read: {message}", r.file, r.model))
+            }
+        }
+    }
+    if missing_known {
+        problems.push(format!("to check answers, {KNOWN_WORDS_HELP}"));
+    }
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(problems.join("\n"))
+    }
 }
 
 /// Anthropic list prices for the spike's frontier model (USD per MTok, from

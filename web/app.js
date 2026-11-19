@@ -6,13 +6,13 @@
   const params = new URLSearchParams(location.hash.slice(1));
   const code = params.get("code");
   history.replaceState(null, "", location.pathname); // strip the fragment
-  if (!code) { status.textContent = "Open this page with `agentic open`."; return; }
+  if (!code) { status.textContent = "Open this page with `agentic serve`."; return; }
   const r = await fetch("/api/v1/session", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ code }),
   });
-  if (!r.ok) { status.textContent = "This link has expired. Run `agentic open` again."; return; }
+  if (!r.ok) { status.textContent = "This link has expired. Run `agentic serve` again."; return; }
   const { csrf } = await r.json(); // held in page memory only
   const h = await fetch("/api/v1/health", { headers: { "x-am-csrf": csrf } });
   status.textContent = h.ok ? "Connected to the local server." : "Not connected.";

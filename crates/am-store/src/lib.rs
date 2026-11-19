@@ -83,6 +83,16 @@ pub enum WriteCommand {
         status: String,
         output: Option<String>,
     },
+    /// Settle a call and finish its step in one transaction, so a crash can
+    /// never leave a settled (paid) call under an unfinished step (AD-8).
+    SettleAndFinishStep {
+        call_id: String,
+        usage: Option<Usage>,
+        cost_micro_usd: Option<i64>,
+        step_run_id: String,
+        status: String,
+        output: Option<String>,
+    },
     FinishRun {
         run_id: String,
         status: String,
@@ -118,6 +128,9 @@ impl WriteCommand {
             WriteCommand::MarkLost { call_id } => ("model_call.lost".into(), call_id.clone()),
             WriteCommand::FinishStep { step_run_id, .. } => {
                 ("step.finished".into(), step_run_id.clone())
+            }
+            WriteCommand::SettleAndFinishStep { call_id, .. } => {
+                ("model_call.settled+step.finished".into(), call_id.clone())
             }
             WriteCommand::FinishRun { run_id, .. } => ("run.finished".into(), run_id.clone()),
             WriteCommand::UpsertTrigger { trigger } => ("trigger.saved".into(), trigger.id.clone()),
@@ -259,48 +272,35 @@ fn apply(conn: &mut Connection, actor: &Actor, cmd: &WriteCommand) -> Result<(),
             call_id,
             usage,
             cost_micro_usd,
-        } => {
-            let n = tx.execute(
-                "UPDATE model_calls SET status = 'settled', settled = 1, input_tokens = ?2, output_tokens = ?3 WHERE id = ?1 AND settled = 0",
-                params![
-                    call_id,
-                    usage.map(|u| u.input_tokens as i64),
-                    usage.map(|u| u.output_tokens as i64)
-                ],
-            )?;
-            if n != 1 {
-                return Err(StoreError::Invalid(format!("call {call_id} is not open")));
-            }
-            match cost_micro_usd {
-                Some(c) => tx.execute(
-                    "UPDATE ledger SET settled_micro_usd = ?2, state = 'settled' WHERE model_call_id = ?1",
-                    params![call_id, c],
-                )?,
-                None => tx.execute(
-                    "UPDATE ledger SET settled_micro_usd = reserved_micro_usd, state = 'settled' WHERE model_call_id = ?1",
-                    params![call_id],
-                )?,
-            };
-        }
+        } => settle(&tx, call_id, *usage, *cost_micro_usd)?,
         WriteCommand::MarkLost { call_id } => {
-            tx.execute(
+            let n = tx.execute(
                 "UPDATE model_calls SET status = 'lost', settled = 1 WHERE id = ?1 AND settled = 0",
                 params![call_id],
             )?;
-            tx.execute(
-                "UPDATE ledger SET settled_micro_usd = reserved_micro_usd, state = 'settled' WHERE model_call_id = ?1",
-                params![call_id],
-            )?;
+            // Only an open call is marked lost; a settled call keeps its cost.
+            if n == 1 {
+                tx.execute(
+                    "UPDATE ledger SET settled_micro_usd = reserved_micro_usd, state = 'settled' WHERE model_call_id = ?1",
+                    params![call_id],
+                )?;
+            }
         }
         WriteCommand::FinishStep {
             step_run_id,
             status,
             output,
+        } => finish_step(&tx, step_run_id, status, output, &now)?,
+        WriteCommand::SettleAndFinishStep {
+            call_id,
+            usage,
+            cost_micro_usd,
+            step_run_id,
+            status,
+            output,
         } => {
-            tx.execute(
-                "UPDATE step_runs SET status = ?2, output = ?3, updated_at = ?4 WHERE id = ?1",
-                params![step_run_id, status, output, now],
-            )?;
+            settle(&tx, call_id, *usage, *cost_micro_usd)?;
+            finish_step(&tx, step_run_id, status, output, &now)?;
         }
         WriteCommand::FinishRun { run_id, status } => {
             tx.execute(
@@ -339,6 +339,53 @@ fn apply(conn: &mut Connection, actor: &Actor, cmd: &WriteCommand) -> Result<(),
     };
     append_audit(&tx, actor, &action, &target, &outcome, &now)?;
     tx.commit()?;
+    Ok(())
+}
+
+fn settle(
+    tx: &rusqlite::Transaction,
+    call_id: &str,
+    usage: Option<Usage>,
+    cost_micro_usd: Option<i64>,
+) -> Result<(), StoreError> {
+    let n = tx.execute(
+        "UPDATE model_calls SET status = 'settled', settled = 1, input_tokens = ?2, output_tokens = ?3 WHERE id = ?1 AND settled = 0",
+        params![
+            call_id,
+            usage.map(|u| u.input_tokens as i64),
+            usage.map(|u| u.output_tokens as i64)
+        ],
+    )?;
+    if n != 1 {
+        return Err(StoreError::Invalid(format!("call {call_id} is not open")));
+    }
+    match cost_micro_usd {
+        Some(c) => tx.execute(
+            "UPDATE ledger SET settled_micro_usd = ?2, state = 'settled' WHERE model_call_id = ?1",
+            params![call_id, c],
+        )?,
+        None => tx.execute(
+            "UPDATE ledger SET settled_micro_usd = reserved_micro_usd, state = 'settled' WHERE model_call_id = ?1",
+            params![call_id],
+        )?,
+    };
+    Ok(())
+}
+
+fn finish_step(
+    tx: &rusqlite::Transaction,
+    step_run_id: &str,
+    status: &str,
+    output: &Option<String>,
+    now: &str,
+) -> Result<(), StoreError> {
+    let n = tx.execute(
+        "UPDATE step_runs SET status = ?2, output = ?3, updated_at = ?4 WHERE id = ?1",
+        params![step_run_id, status, output, now],
+    )?;
+    if n != 1 {
+        return Err(StoreError::Invalid(format!("step {step_run_id} not found")));
+    }
     Ok(())
 }
 
@@ -663,6 +710,113 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn mark_lost_never_overwrites_a_settled_cost() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("state.db")).unwrap();
+        let w = store.writer();
+        w.exec(
+            sys(),
+            WriteCommand::CreateRun {
+                run_id: "r1".into(),
+                workflow: "wf".into(),
+                origin: "manual".into(),
+                steps: vec!["a".into()],
+            },
+        )
+        .unwrap();
+        let r = store.reader().unwrap();
+        let step = r.steps("r1").unwrap()[0].id.clone();
+        w.exec(
+            sys(),
+            WriteCommand::ReserveCall {
+                step_run_id: step,
+                call_id: "c1".into(),
+                call_seq: 1,
+                reserved_micro_usd: 1000,
+                rate_snapshot: "t".into(),
+            },
+        )
+        .unwrap();
+        w.exec(
+            sys(),
+            WriteCommand::SettleCall {
+                call_id: "c1".into(),
+                usage: None,
+                cost_micro_usd: Some(40),
+            },
+        )
+        .unwrap();
+        w.exec(
+            sys(),
+            WriteCommand::MarkLost {
+                call_id: "c1".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            r.ledger_for_run("r1").unwrap()[0].settled_micro_usd,
+            Some(40)
+        );
+        assert_eq!(r.calls_for_run("r1").unwrap()[0].status, "settled");
+    }
+
+    /// The crash window between settling a call and finishing its step is
+    /// closed: both commit together or neither does.
+    #[test]
+    fn settle_and_finish_step_is_atomic() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("state.db")).unwrap();
+        let w = store.writer();
+        w.exec(
+            sys(),
+            WriteCommand::CreateRun {
+                run_id: "r1".into(),
+                workflow: "wf".into(),
+                origin: "manual".into(),
+                steps: vec!["a".into()],
+            },
+        )
+        .unwrap();
+        let r = store.reader().unwrap();
+        let step = r.steps("r1").unwrap()[0].id.clone();
+        w.exec(
+            sys(),
+            WriteCommand::ReserveCall {
+                step_run_id: step.clone(),
+                call_id: "c1".into(),
+                call_seq: 1,
+                reserved_micro_usd: 1000,
+                rate_snapshot: "t".into(),
+            },
+        )
+        .unwrap();
+        // The step half fails: the settle half must roll back with it.
+        let bad = WriteCommand::SettleAndFinishStep {
+            call_id: "c1".into(),
+            usage: None,
+            cost_micro_usd: Some(40),
+            step_run_id: "no-such-step".into(),
+            status: "succeeded".into(),
+            output: Some("x".into()),
+        };
+        assert!(w.exec(sys(), bad).is_err());
+        assert!(!r.calls_for_run("r1").unwrap()[0].settled);
+        assert_eq!(r.ledger_for_run("r1").unwrap()[0].state, "reserved");
+        let good = WriteCommand::SettleAndFinishStep {
+            call_id: "c1".into(),
+            usage: None,
+            cost_micro_usd: Some(40),
+            step_run_id: step,
+            status: "succeeded".into(),
+            output: Some("x".into()),
+        };
+        w.exec(sys(), good).unwrap();
+        assert!(r.calls_for_run("r1").unwrap()[0].settled);
+        assert_eq!(r.steps("r1").unwrap()[0].status, "succeeded");
+        assert_eq!(r.steps("r1").unwrap()[0].output.as_deref(), Some("x"));
     }
 
     #[test]

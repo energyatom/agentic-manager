@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use am_app::spike::{
-    C4Outcome, ModelUnderTest, anthropic_price, c4_passed, c4_table, files_to_models,
+    C4Outcome, ModelKind, ModelUnderTest, anthropic_price, c4_table, c4_verdict, files_to_models,
 };
 use am_domain::{Access, Actor, PathError};
 use am_providers::{AnthropicProvider, OpenAiCompatProvider};
@@ -33,12 +33,14 @@ fn models(egress: &Arc<FakeEgress>) -> Vec<ModelUnderTest> {
     vec![
         ModelUnderTest {
             label: "frontier".into(),
+            kind: ModelKind::Frontier,
             provider: Arc::new(AnthropicProvider::new(egress.clone(), "spike-anthropic")),
             model: "claude-opus-5-5".into(),
             price: Some(anthropic_price("claude-opus-5-5")),
         },
         ModelUnderTest {
             label: "local".into(),
+            kind: ModelKind::Local,
             provider: Arc::new(OpenAiCompatProvider::lm_studio(egress.clone()).with_vision(true)),
             model: "local-vision".into(),
             price: None,
@@ -114,7 +116,7 @@ async fn mixed_folder_to_frontier_and_local_models() {
         }
         other => panic!("{other:?}"),
     }
-    assert!(c4_passed(&rows));
+    c4_verdict(&rows).unwrap();
     // Zero bytes sent for every refused file and model.
     let reqs = egress.requests();
     assert_eq!(reqs.len(), 7, "one request per accepted file and model");
@@ -229,6 +231,110 @@ fn confinement_refuses_symlink_escape_parent_path_and_writes() {
     assert!(rw.write_file("rw", "../x.txt", b"no").is_err());
 }
 
+#[cfg(unix)]
+#[test]
+fn write_through_a_dangling_outward_symlink_is_refused() {
+    let (tmp, dir) = copy_fixture_folder();
+    let outside = tmp.path().join("created-outside.txt");
+    std::os::unix::fs::symlink(&outside, dir.join("dangling.txt")).unwrap();
+    let audit = CollectAudit::new();
+    let rw = FolderAccess::new(
+        vec![link_folder("rw", &dir, Access::ReadWrite).unwrap()],
+        audit.clone(),
+        Actor::System {
+            component: "test".into(),
+        },
+    );
+    assert!(matches!(
+        rw.write_file("rw", "dangling.txt", b"leak"),
+        Err(FolderError::Path(PathError::Escapes(_)))
+    ));
+    assert!(!outside.exists(), "nothing was written outside the root");
+    assert!(
+        audit
+            .events()
+            .iter()
+            .any(|e| e.action == "folder.refused" && e.target.ends_with("dangling.txt"))
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_folder_link_loop_is_listed_once() {
+    let (_tmp, dir) = copy_fixture_folder();
+    std::fs::create_dir(dir.join("sub")).unwrap();
+    std::fs::write(dir.join("sub/inner.txt"), "inner").unwrap();
+    std::os::unix::fs::symlink(dir.join("sub"), dir.join("sub/loop")).unwrap();
+    let audit = CollectAudit::new();
+    let folder = FolderAccess::new(
+        vec![link_folder("docs", &dir, Access::Read).unwrap()],
+        audit.clone(),
+        Actor::System {
+            component: "test".into(),
+        },
+    );
+    let listed: Vec<String> = folder
+        .list_files("docs")
+        .unwrap()
+        .into_iter()
+        .map(|e| e.relative_path)
+        .collect();
+    let inner: Vec<&String> = listed.iter().filter(|p| p.ends_with("inner.txt")).collect();
+    assert_eq!(inner, vec!["sub/inner.txt"], "{listed:?}");
+    assert!(
+        audit
+            .events()
+            .iter()
+            .any(|e| e.action == "folder.refused" && e.target.ends_with("sub/loop"))
+    );
+}
+
+#[test]
+fn verdict_fails_on_gaps() {
+    use am_app::spike::C4Row;
+    let row = |kind, flags_allow, outcome| C4Row {
+        file: "f".into(),
+        media_type: "application/pdf".into(),
+        model: format!("{kind:?}"),
+        model_kind: kind,
+        flags_allow,
+        outcome,
+        usage: None,
+        cost_micro_usd: 0,
+    };
+    let ok = |known| C4Outcome::Accepted {
+        answer: "w".into(),
+        names_known_word: known,
+    };
+    let refused = || C4Outcome::Refused {
+        message: "no".into(),
+    };
+    let both = |a, b| {
+        vec![
+            row(ModelKind::Frontier, true, a),
+            row(ModelKind::Local, false, b),
+        ]
+    };
+
+    assert!(c4_verdict(&both(ok(Some(true)), refused())).is_ok());
+    assert!(c4_verdict(&[]).is_err(), "no rows");
+    assert!(
+        c4_verdict(&[row(ModelKind::Frontier, true, ok(Some(true)))]).is_err(),
+        "only one model ran"
+    );
+    assert!(
+        c4_verdict(&both(refused(), refused())).is_err(),
+        "refused a type its flags allow"
+    );
+    let read = C4Outcome::ReadError {
+        message: "too large".into(),
+    };
+    assert!(c4_verdict(&both(read, refused())).is_err(), "read error");
+    let why = c4_verdict(&both(ok(None), refused())).unwrap_err();
+    assert!(why.contains(".known-words"), "{why}");
+    assert!(c4_verdict(&both(ok(Some(false)), refused())).is_err());
+}
+
 #[test]
 fn linking_refuses_root_and_home() {
     assert!(link_folder("root", Path::new("/"), Access::Read).is_err());
@@ -256,6 +362,7 @@ async fn live_files_to_models_on_owner_folder() {
         let m = live::anthropic_model();
         models.push(ModelUnderTest {
             label: format!("frontier: anthropic {m}"),
+            kind: ModelKind::Frontier,
             provider: Arc::new(AnthropicProvider::new(
                 egress.clone(),
                 am_app::SPIKE_ANTHROPIC_ACCOUNT,
@@ -267,13 +374,14 @@ async fn live_files_to_models_on_owner_folder() {
         eprintln!("frontier half skipped: no Anthropic key in the Keychain");
     }
     match live::lm_studio_model().await {
-        Some(m) => models.push(ModelUnderTest {
+        Ok(m) => models.push(ModelUnderTest {
             label: format!("local: lmstudio {m}"),
+            kind: ModelKind::Local,
             provider: Arc::new(OpenAiCompatProvider::lm_studio(egress.clone()).with_vision(true)),
             price: None,
             model: m,
         }),
-        None => eprintln!("local half skipped: LM Studio is not answering"),
+        Err(why) => eprintln!("local half not run: {why}"),
     }
     if models.is_empty() {
         return live::skip("no model available (no key, no LM Studio)");
@@ -286,5 +394,7 @@ async fn live_files_to_models_on_owner_folder() {
     if let Ok(out) = std::env::var("AM_SPIKE_C4_OUT") {
         std::fs::write(out, &table).unwrap();
     }
-    assert!(c4_passed(&rows), "{table}");
+    if let Err(why) = c4_verdict(&rows) {
+        panic!("C4 on the owner's folder failed:\n{why}\n{table}");
+    }
 }

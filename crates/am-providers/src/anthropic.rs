@@ -164,6 +164,8 @@ struct StreamState {
     /// (block index, id, name, json so far)
     open_tool: Option<(u64, String, String, String)>,
     usage: Option<Usage>,
+    /// True once `message_delta` reported the final output tokens.
+    final_usage: bool,
     stop: Option<StopReason>,
 }
 
@@ -253,6 +255,7 @@ fn on_event(
                     u.input_tokens = inp;
                 }
                 st.usage = Some(u);
+                st.final_usage = true;
                 sink.on_event(StreamEvent::Usage(u));
             }
             if let Some(reason) = v["delta"]["stop_reason"].as_str() {
@@ -375,11 +378,14 @@ impl LlmProvider for AnthropicProvider {
     }
 }
 
+/// A cancelled stream that never reported its final usage reports usage as
+/// missing, so the call settles at its reservation (AD-9, AD-20); the partial
+/// usage still reached the sink.
 fn cancelled_outcome(st: StreamState) -> ChatOutcome {
     ChatOutcome {
         text: st.text,
         tool_calls: st.tool_calls,
-        usage: st.usage,
+        usage: if st.final_usage { st.usage } else { None },
         stop: StopReason::Cancelled,
     }
 }

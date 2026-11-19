@@ -146,10 +146,16 @@ async fn guard(State(state): State<AppState>, req: Request, next: Next) -> Respo
         _ => {}
     }
     let path = req.uri().path().to_string();
-    if path.starts_with("/api/v1/") && path != "/api/v1/session" && !is_upgrade {
+    if path.starts_with("/api/v1/") && path != "/api/v1/session" {
         let Some(expected) = state.session_csrf(req.headers()) else {
             return (StatusCode::UNAUTHORIZED, "no session").into_response();
         };
+        // The event stream carries its CSRF value as a WebSocket subprotocol,
+        // checked by its handler; every other path needs the header, whatever
+        // other headers (Upgrade included) the request carries.
+        if path == EVENTS_PATH {
+            return finish(&state, next.run(req).await);
+        }
         let presented = req
             .headers()
             .get(CSRF_HEADER)
@@ -159,7 +165,13 @@ async fn guard(State(state): State<AppState>, req: Request, next: Next) -> Respo
             return forbidden("csrf value missing or wrong");
         }
     }
-    let mut resp = next.run(req).await;
+    finish(&state, next.run(req).await)
+}
+
+const EVENTS_PATH: &str = "/api/v1/events";
+
+/// Security headers on every response.
+fn finish(state: &AppState, mut resp: Response) -> Response {
     let h = resp.headers_mut();
     h.insert(
         header::CONTENT_SECURITY_POLICY,
@@ -279,7 +291,7 @@ pub fn router(state: AppState) -> Router {
         .route("/app.js", get(app_js))
         .route("/api/v1/session", post(session))
         .route("/api/v1/health", get(health))
-        .route("/api/v1/events", get(events))
+        .route(EVENTS_PATH, get(events))
         .layer(middleware::from_fn_with_state(state.clone(), guard))
         .with_state(state)
 }

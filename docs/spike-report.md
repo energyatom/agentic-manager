@@ -8,28 +8,30 @@ Each verdict links its runnable test or recorded demo.
 
 | # | Criterion | Verdict | Evidence |
 |---|---|---|---|
-| 1 | Provider port (Anthropic + OpenAI-compatible, streaming, tool calls, usage, cancel within 1 s) | **Pass on recorded fixtures. Live run pending owner input:** no Anthropic key in the Keychain and LM Studio not running on this Mac on 2026-11-19. | [`c1_providers.rs`](../crates/am-e2e/tests/spike/c1_providers.rs): both adapters return the tool call with usage, stream text, and stop well within the 1 s deadline after cancel. Live: `live_anthropic_c1`, `live_lm_studio_c1` (see "Owner runs"). |
+| 1 | Provider port (Anthropic + OpenAI-compatible, streaming, tool calls, usage, cancel within 1 s) | **Provisional: owner run pending (not yet a verdict).** AD-1 requires the frontier half live; on 2026-11-19 there was no Anthropic key in the Keychain and LM Studio was not running. The recorded-fixture tests pass. | [`c1_providers.rs`](../crates/am-e2e/tests/spike/c1_providers.rs): both adapters return the tool call with usage, stream text, and stop well within the 1 s deadline after cancel. Live: `live_anthropic_c1`, `live_lm_studio_c1` (see "Owner runs"). |
 | 2 | `kill -9` mid-run, resume on SQLite WAL | **Pass** | [`c2_crash_resume.rs`](../crates/am-e2e/tests/spike/c2_crash_resume.rs): SIGKILL lands while step 3's call is in flight. On restart the run resumes at step 3. Exactly one call is marked lost, settled at its reservation and re-issued. Every step completes exactly once, the ledger reconciles to the micro-dollar and the audit chain verifies. |
-| 3 | Cron + timezone + catch-up after sleep/wake | **Pass (automated).** The lid demo is the owner's manual check and is pending. | [`c3_scheduler.rs`](../crates/am-e2e/tests/spike/c3_scheduler.rs): 09:30 Asia/Kolkata fires at 04:00Z. A three-day clock jump gives exactly one catch-up (`once`); the same holds across a restart from persisted `next_fire`. The `skip` and `all` policies are covered. Demo: `agentic spike c3`. |
-| 4 | Files to models | **Pass on synthetic fixtures.** The recorded run on the owner's folder (`AM_SPIKE_DOCS_DIR`) is pending; the owner sets it later (decision of 2026-11-19). | [`c4_files_to_models.rs`](../crates/am-e2e/tests/spike/c4_files_to_models.rs) and [table below](#c4-on-synthetic-fixtures). Every refusal is worded and made before any request (zero bytes sent). The confinement cases pass: a symlink file and a symlinked folder leaving the root, `../`, an absolute path, and a write on a read-only root are all refused and audited. |
+| 3 | Cron + timezone + catch-up after sleep/wake | **Provisional: owner run pending (not yet a verdict).** The automated tests pass; the macOS sleep/wake lid demo, which the criterion names, has not been run. | [`c3_scheduler.rs`](../crates/am-e2e/tests/spike/c3_scheduler.rs): 09:30 Asia/Kolkata fires at 04:00Z. A three-day clock jump gives exactly one catch-up (`once`); the same holds across a restart from persisted `next_fire`. The `skip` and `all` policies are covered. Demo: `agentic spike c3`. |
+| 4 | Files to models | **Provisional: owner run pending (not yet a verdict).** The synthetic-fixture tests pass; the recorded run on the owner's folder (`AM_SPIKE_DOCS_DIR`, set later by the owner's decision of 2026-11-19) has not been run. | [`c4_files_to_models.rs`](../crates/am-e2e/tests/spike/c4_files_to_models.rs) and [table below](#c4-on-synthetic-fixtures). Every refusal is worded and made before any request (zero bytes sent). The confinement cases pass: a symlink file and a symlinked folder leaving the root, `../`, an absolute path, and a write on a read-only root are all refused and audited. |
 | 5 | MCP (rmcp) over stdio and Streamable HTTP | **Pass (live)** | [`c5_mcp.rs`](../crates/am-e2e/tests/spike/c5_mcp.rs), [run log below](#c5-live-run-2026-11-19). `server-filesystem@2.4.0 --read-only` lists only read tools and `read_text_file` returns the fixture text. `server-everything@2.3.1 streamableHttp` returns `echo`. The HTTP transport runs over `am-net`, and an unlisted port is refused. |
 | 6 | Loopback server Host, Origin, token, WebSocket | **Pass** | [`c6_server.rs`](../crates/am-e2e/tests/spike/c6_server.rs). Refused with 403: a bad Host, a foreign Origin on fetch, a foreign Origin on the WebSocket upgrade, a missing CSRF header or subprotocol, and a POST with no Origin. No CORS headers are sent. The launch code is single-use, and a failed exchange invalidates every outstanding code. |
 | 7 | macOS Keychain | **Pass** | [`c7_keychain.rs`](../crates/am-e2e/tests/spike/c7_keychain.rs): store, read, overwrite and delete with a canary under service `agentic-manager`, here and on the CI macOS runner. The Linux job builds the store and it answers "the OS keychain is not supported on this platform yet". |
 | 8 | Signed + notarised Tauri build on a clean Mac | **Deferred: Apple Developer account.** The gate is epic 11 story 3, before v0.9-rc. Not counted. | Stand-in: [`am-desktop`](../crates/am-desktop/src/main.rs), an ad-hoc-signed `.app` (`Signature=adhoc`, hardened runtime flag). It links the core in-process, launches, serves the UI, and the webview exchanged its launch code ([log](#c8-stand-in-2026-11-19)). |
 | 9 | Agent productivity | **Pass** | A fresh Claude Code subagent built the ToolGate `max_uses_per_step` rule and its 7 tests ([`toolgate.rs`](../crates/am-engine/src/toolgate.rs)) with no human code edits. It wrote the tests failing first and passed `just check` on its second run. Summary [below](#c9-subagent-summary). |
 
-**REPLAN count (criteria 1–7 and 9): 0 failures.** No replan. Three items still
-need the owner's live runs before every acceptance line of the ticket holds:
+**REPLAN count (criteria 1–7 and 9): provisional.** Of the eight counted
+criteria, five have a verdict (2, 5, 6, 7 and 9: all pass, 0 failures) and
+three are provisional until the owner's runs land:
 
-- criterion 1 live: the Anthropic key in the Keychain, and LM Studio with a tool-capable model;
-- criterion 4 live: `AM_SPIKE_DOCS_DIR`, plus a vision model in LM Studio;
-- criterion 3: the lid demo.
+- criterion 1: the Anthropic key in the Keychain, and LM Studio with a tool-capable model;
+- criterion 3: the lid demo;
+- criterion 4: `AM_SPIKE_DOCS_DIR` with `.known-words`, plus a vision model in LM Studio.
 
-None of them is a failure. A failure in any live run counts toward the REPLAN
-threshold once it is run.
+stack-spike.md allows "pending" only for criterion 5, so the count is not final
+and no replan decision can be taken until these three runs report. A failure
+in any of them counts toward the threshold of two.
 
 CI on `spike/1-1`: run
-[44587037865](https://github.com/energyatom/agentic-manager/actions/runs/44587037865).
+[44588243540](https://github.com/energyatom/agentic-manager/actions/runs/44588243540).
 Both jobs passed: macOS arm64 `just check`, and Linux portability (build and
 tests).
 
@@ -81,10 +83,11 @@ tests).
    re-checked redirects (at most 3) land with the egress story.
 5. **Cancellation lives in the stream loop.** Both adapters race the body
    against the cancel signal, and dropping the body ends the connection.
-   - Anthropic reports input tokens in `message_start`, so usage up to the
-     cancel is known.
-   - OpenAI-compatible servers report usage only at the end, so a cancelled
-     call settles at its reservation (AD-9; the `am-engine` journal test).
+   - Partial usage (Anthropic's `message_start` input tokens) reaches the
+     event sink, but a stream cancelled before its final usage reports usage
+     as missing, so the call settles at its reservation (AD-9, AD-20; the C1
+     cancel test and the `am-engine` journal test). OpenAI-compatible servers
+     report usage only at the end, with the same result.
 6. **Anthropic API version `2026-10-21`.** It forbids `temperature`, `top_p`
    and `top_k`; the adapter sends none.
    - It ignores `thinking` blocks: `claude-opus-5-5` always thinks.
@@ -198,19 +201,24 @@ The code was committed unchanged (commit `7ead7ff`).
    Run `security add-generic-password -s agentic-manager -a spike-anthropic -w`;
    it prompts for the key, so the key never lands in shell history. The model
    defaults to `claude-opus-5-5`; `AM_SPIKE_ANTHROPIC_MODEL` changes it.
-2. **LM Studio** on 127.0.0.1:1234 with a tool-capable model, and a vision model
-   for criterion 4. `AM_SPIKE_LOCAL_MODEL` picks one; otherwise the first
-   listed model is used.
+2. **LM Studio** on 127.0.0.1:1234. Name the model in `AM_SPIKE_LOCAL_MODEL`
+   (required; the first listed model is never guessed, since it may be an
+   embedding or text-only model): a tool-capable model for criterion 1 and a
+   vision-capable model for criterion 4. If one model does not do both, run the
+   two live tests separately with different values.
 3. **Live tests:**
    `AM_SPIKE_DOCS_DIR=<folder> AM_SPIKE_C4_OUT=<file.md> just spike-live`.
    Each live test prints `skipped: <reason>` when its input is absent. Or use
    the commands:
-   - `agentic spike c1 --provider anthropic|lmstudio`
-   - `agentic spike c4 --out c4.md`
+   - `agentic spike c1 --provider anthropic|lmstudio [--model <id>]`
+   - `agentic spike c4 --local-model <id> --out c4.md`
    - `agentic spike local-context`
 
-   For per-file known words, put a `.known-words` file in the folder with lines
-   of the form `file: word, word`. Files without one show "unchecked".
+   Criterion 4 needs known words: put a `.known-words` file in the folder with
+   one line per file, `relative/path: word, other word`, naming words that
+   appear in that file. Without it the run fails and says so. The run also
+   fails when only one of the frontier and local models ran, when a file
+   cannot be read, or when a type the model's flags allow is refused.
 4. **Lid demo (criterion 3).** Run `agentic spike c3 --db /tmp/c3.db --cron "*/5 * * * *"`,
    close the lid across a fire time, then reopen. The log shows one
    `kind=catch_up` fire, with "wall clock jumped …s: sleep/wake".

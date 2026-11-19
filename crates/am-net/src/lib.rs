@@ -300,7 +300,14 @@ impl NetEgress {
         tokio::spawn(async move {
             let mut total: u64 = 0;
             loop {
-                match resp.chunk().await {
+                // Race the next chunk against the reader going away, so an
+                // idle stream is dropped as soon as its body is (cancellation).
+                let next = tokio::select! {
+                    biased;
+                    _ = tx.closed() => return,
+                    c = resp.chunk() => c,
+                };
+                match next {
                     Ok(Some(bytes)) => {
                         total += bytes.len() as u64;
                         if total > max {
@@ -308,7 +315,6 @@ impl NetEgress {
                             return;
                         }
                         if tx.send(Ok(bytes.to_vec())).await.is_err() {
-                            // Receiver dropped: the caller cancelled; drop the connection.
                             return;
                         }
                     }
@@ -359,6 +365,68 @@ mod tests {
             allowed_hosts: vec!["api.anthropic.com".into()],
             ..EgressPolicy::default()
         }
+    }
+
+    /// Dropping the body of an idle stream closes the connection at once.
+    #[tokio::test]
+    async fn dropping_an_idle_body_closes_the_connection() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        struct NoSecrets;
+        impl SecretStore for NoSecrets {
+            fn get(
+                &self,
+                _: &str,
+            ) -> Result<Option<am_domain::SecretString>, am_domain::SecretError> {
+                Ok(None)
+            }
+            fn set(
+                &self,
+                _: &str,
+                _: am_domain::SecretString,
+            ) -> Result<(), am_domain::SecretError> {
+                Ok(())
+            }
+            fn delete(&self, _: &str) -> Result<(), am_domain::SecretError> {
+                Ok(())
+            }
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = sock.read(&mut buf).await.unwrap();
+            sock.write_all(b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n5\r\nhello\r\n")
+                .await
+                .unwrap();
+            // Idle: send nothing more. Report how long until the client hangs up.
+            let start = std::time::Instant::now();
+            let n =
+                tokio::time::timeout(std::time::Duration::from_secs(5), sock.read(&mut buf)).await;
+            (n.map(|r| r.unwrap_or(0)).ok(), start.elapsed())
+        });
+        let egress = NetEgress::new(
+            EgressPolicy {
+                loopback_ports: vec![port],
+                ..EgressPolicy::default()
+            },
+            Arc::new(NoSecrets),
+            None,
+        );
+        let resp = egress
+            .send(am_domain::HttpRequest::get(format!(
+                "http://127.0.0.1:{port}/"
+            )))
+            .await
+            .unwrap();
+        assert_eq!(resp.body.next().await.unwrap().unwrap(), b"hello".to_vec());
+        drop(resp);
+        let (read, waited) = server.await.unwrap();
+        assert_eq!(read, Some(0), "the client closed the connection");
+        assert!(
+            waited < std::time::Duration::from_secs(1),
+            "closed after {waited:?}"
+        );
     }
 
     #[test]

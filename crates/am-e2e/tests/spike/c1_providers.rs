@@ -64,8 +64,11 @@ async fn anthropic_streams_tool_call_with_usage_and_cancels_within_1s() {
         "stopped in {:?}",
         r.cancel_latency
     );
-    // Usage up to the cancel is captured (message_start carried the input tokens).
-    assert_eq!(r.usage_at_cancel.map(|u| u.input_tokens), Some(31));
+    // Partial usage up to the cancel reached the sink (message_start carried
+    // the input tokens), but the stream never reported its final usage, so the
+    // outcome's usage is missing and the call settles at its reservation.
+    assert_eq!(r.usage_seen_before_cancel.map(|u| u.input_tokens), Some(31));
+    assert_eq!(r.usage_at_cancel, None);
     assert!(r.passed());
     // The aborted stream's body was dropped (the connection is closed).
     tokio::time::sleep(Duration::from_millis(150)).await;
@@ -184,8 +187,9 @@ async fn live_lm_studio_c1() {
     if !live::live_enabled() {
         return live::skip("AM_LIVE is not 1");
     }
-    let Some(model) = live::lm_studio_model().await else {
-        return live::skip("LM Studio is not answering on 127.0.0.1:1234");
+    let model = match live::lm_studio_model().await {
+        Ok(m) => m,
+        Err(why) => return live::skip(&why),
     };
     let provider = Arc::new(OpenAiCompatProvider::lm_studio(live::egress()));
     let r = c1_probe(provider, &model, 2048).await.unwrap();

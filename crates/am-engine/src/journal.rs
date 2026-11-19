@@ -57,14 +57,17 @@ fn system(component: &str) -> Actor {
     }
 }
 
-/// Create a run with its steps queued. Returns the run id.
-pub fn create_run(writer: &Writer, wf: &LinearWorkflow, origin: &str) -> Result<String, RunError> {
+/// Create a run with its steps queued, as `actor` (AD-24: no default).
+/// Returns the run id.
+pub fn create_run(
+    writer: &Writer,
+    actor: Actor,
+    wf: &LinearWorkflow,
+    origin: &str,
+) -> Result<String, RunError> {
     let run_id = new_id();
     writer.exec(
-        Actor::Human {
-            person: "owner".into(),
-            hat: "Owner".into(),
-        },
+        actor,
         WriteCommand::CreateRun {
             run_id: run_id.clone(),
             workflow: wf.workflow.clone(),
@@ -164,18 +167,13 @@ pub async fn drive_run(
                 let cost = out
                     .usage
                     .map(|u: Usage| wf.price.cost(u.input_tokens, u.output_tokens));
-                writer.exec(
-                    system("engine"),
-                    WriteCommand::SettleCall {
-                        call_id,
-                        usage: out.usage,
-                        cost_micro_usd: cost,
-                    },
-                )?;
                 if out.stop == StopReason::Cancelled {
                     writer.exec(
                         system("engine"),
-                        WriteCommand::FinishStep {
+                        WriteCommand::SettleAndFinishStep {
+                            call_id,
+                            usage: out.usage,
+                            cost_micro_usd: cost,
                             step_run_id: step.id.clone(),
                             status: "cancelled".into(),
                             output: None,
@@ -191,9 +189,14 @@ pub async fn drive_run(
                     return Ok("cancelled".into());
                 }
                 previous_outputs.push(out.text.clone());
+                // Settle and finish in one transaction: no crash window in
+                // which a paid call sits under an unfinished step (AD-8).
                 writer.exec(
                     system("engine"),
-                    WriteCommand::FinishStep {
+                    WriteCommand::SettleAndFinishStep {
+                        call_id,
+                        usage: out.usage,
+                        cost_micro_usd: cost,
                         step_run_id: step.id.clone(),
                         status: "succeeded".into(),
                         output: Some(out.text),
@@ -203,15 +206,10 @@ pub async fn drive_run(
             Err(e) => {
                 writer.exec(
                     system("engine"),
-                    WriteCommand::SettleCall {
+                    WriteCommand::SettleAndFinishStep {
                         call_id,
                         usage: None,
                         cost_micro_usd: None,
-                    },
-                )?;
-                writer.exec(
-                    system("engine"),
-                    WriteCommand::FinishStep {
                         step_run_id: step.id.clone(),
                         status: "failed".into(),
                         output: Some(e.to_string()),
@@ -272,7 +270,7 @@ mod tests {
             }),
             delay: Duration::from_millis(1),
         }]));
-        let run = create_run(&w, &wf(), "manual").unwrap();
+        let run = create_run(&w, system("test"), &wf(), "manual").unwrap();
         let status = drive_run(&db, &w, llm.clone(), &wf(), &run, CancellationToken::new())
             .await
             .unwrap();
@@ -293,7 +291,7 @@ mod tests {
             usage: None,
             delay: Duration::from_secs(30),
         }]));
-        let run = create_run(&w, &wf(), "manual").unwrap();
+        let run = create_run(&w, system("test"), &wf(), "manual").unwrap();
         let token = CancellationToken::new();
         let t2 = token.clone();
         tokio::spawn(async move {

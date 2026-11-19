@@ -180,9 +180,11 @@ pub trait LlmProvider: Send + Sync {
     fn capabilities(&self, model: &str) -> ModelCapabilities;
     /// Refuse, before any request, every file part the model cannot read natively.
     fn check_file_parts(&self, request: &ChatRequest) -> Result<(), ProviderError>;
-    /// Stream one model call. Events go to `sink` as they arrive; on cancel the
-    /// stream is aborted and the outcome has `StopReason::Cancelled` with the
-    /// usage seen so far. Implementations call `check_file_parts` first.
+    /// Stream one model call. Events go to `sink` as they arrive (partial usage
+    /// included); on cancel the stream is aborted and the outcome has
+    /// `StopReason::Cancelled`, with `usage` set only if the provider had
+    /// reported its final usage, so a cut-off call settles at its reservation.
+    /// Implementations call `check_file_parts` first.
     fn stream(
         &self,
         request: ChatRequest,

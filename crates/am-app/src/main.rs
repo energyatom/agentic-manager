@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use am_app::spike;
-use am_domain::{EgressClient, HttpRequest, LlmProvider, SecretString};
+use am_domain::{HttpRequest, LlmProvider, SecretString};
 use am_providers::{AnthropicProvider, OpenAiCompatProvider};
 
 struct Args(Vec<String>);
@@ -117,23 +117,15 @@ fn anthropic_model(args: &Args) -> String {
         .unwrap_or_else(|| "claude-opus-5-5".into())
 }
 
-/// The first model LM Studio lists, unless one is named.
-async fn local_model(egress: &Arc<dyn EgressClient>, named: Option<String>) -> Option<String> {
-    if named.is_some() {
-        return named;
-    }
-    let resp = egress
-        .send(HttpRequest::get("http://127.0.0.1:1234/v1/models"))
-        .await
-        .ok()?;
-    let body = am_net::read_all(resp.body.as_ref()).await.ok()?;
-    let text = String::from_utf8_lossy(&body).to_string();
-    let start = text.find("\"id\"")?;
-    let rest = &text[start + 4..];
-    let q1 = rest.find('"')?;
-    let rest = &rest[q1 + 1..];
-    let q2 = rest.find('"')?;
-    Some(rest[..q2].to_string())
+/// The LM Studio model to use: named with the flag or `AM_SPIKE_LOCAL_MODEL`.
+/// It is never guessed (the first listed model may be an embedding or a
+/// text-only model).
+fn local_model(named: Option<String>) -> Result<String, String> {
+    named
+        .or_else(|| std::env::var("AM_SPIKE_LOCAL_MODEL").ok())
+        .ok_or_else(|| {
+            "name the LM Studio model with --local-model (c4), --model (c1) or AM_SPIKE_LOCAL_MODEL: a tool-capable model for C1, a vision-capable model for C4".to_string()
+        })
 }
 
 async fn c1(args: &Args) {
@@ -151,9 +143,7 @@ async fn c1(args: &Args) {
             anthropic_model(args),
         ),
         "lmstudio" => {
-            let m = local_model(&egress, args.value("--model"))
-                .await
-                .unwrap_or_else(|| fail("LM Studio is not answering on 127.0.0.1:1234"));
+            let m = local_model(args.value("--model")).unwrap_or_else(|e| fail(&e));
             (Arc::new(OpenAiCompatProvider::lm_studio(egress.clone())), m)
         }
         "ollama" => (
@@ -235,6 +225,7 @@ async fn c4(args: &Args) {
         let m = anthropic_model(args);
         models.push(spike::ModelUnderTest {
             label: format!("frontier: anthropic {m}"),
+            kind: spike::ModelKind::Frontier,
             provider: Arc::new(AnthropicProvider::new(
                 egress.clone(),
                 am_app::SPIKE_ANTHROPIC_ACCOUNT,
@@ -244,16 +235,17 @@ async fn c4(args: &Args) {
         });
     }
     if !args.flag("--no-local") {
-        match local_model(&egress, args.value("--local-model")).await {
-            Some(m) => models.push(spike::ModelUnderTest {
+        match local_model(args.value("--local-model")) {
+            Ok(m) => models.push(spike::ModelUnderTest {
                 label: format!("local: lmstudio {m} (vision)"),
+                kind: spike::ModelKind::Local,
                 provider: Arc::new(
                     OpenAiCompatProvider::lm_studio(egress.clone()).with_vision(true),
                 ),
                 price: None,
                 model: m,
             }),
-            None => eprintln!("agentic: LM Studio is not answering; local half skipped"),
+            Err(e) => eprintln!("agentic: local half not run: {e}"),
         }
     }
     let audit = Arc::new(PrintAudit);
@@ -262,14 +254,10 @@ async fn c4(args: &Args) {
         .unwrap_or_else(|e| fail(&e));
     let table = spike::c4_table(&rows);
     println!("{table}");
-    println!(
-        "C4: {}",
-        if spike::c4_passed(&rows) {
-            "PASS"
-        } else {
-            "FAIL"
-        }
-    );
+    match spike::c4_verdict(&rows) {
+        Ok(()) => println!("C4: PASS"),
+        Err(why) => println!("C4: FAIL\n{why}"),
+    }
     if let Some(out) = args.value("--out") {
         std::fs::write(&out, &table).unwrap_or_else(|e| fail(&e.to_string()));
     }

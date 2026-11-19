@@ -214,6 +214,10 @@ impl FolderAccess {
         let root = self.root(root_id)?.clone();
         let mut out = Vec::new();
         let mut stack = vec![String::new()];
+        // Canonical folders already listed: a symlinked folder that leads back
+        // to one (a link loop, or a second path to the same folder) is skipped.
+        let mut visited = std::collections::HashSet::new();
+        visited.insert(root.path().to_path_buf());
         while let Some(dir_rel) = stack.pop() {
             let dir = root.path().join(&dir_rel);
             let entries = std::fs::read_dir(&dir)
@@ -240,7 +244,17 @@ impl FolderAccess {
                 let meta = std::fs::metadata(wp.absolute())
                     .map_err(|e| FolderError::Io(rel.clone(), e.to_string()))?;
                 if meta.is_dir() {
-                    stack.push(rel);
+                    if visited.insert(wp.absolute().to_path_buf()) {
+                        stack.push(rel);
+                    } else {
+                        self.audit(
+                            "folder.refused",
+                            root.id(),
+                            &rel,
+                            "folder already listed (link loop or second path); skipped",
+                            None,
+                        );
+                    }
                     continue;
                 }
                 let head = read_head(wp.absolute());
@@ -348,9 +362,22 @@ impl FolderAccess {
             .file_name()
             .ok_or_else(|| FolderError::Path(PathError::Invalid(rel.to_string())))?;
         let mut candidate = parent_c.join(file_name);
-        // An existing symlink at the target is resolved and must stay inside.
-        if let Ok(c) = candidate.canonicalize() {
-            candidate = c;
+        // An existing symlink at the target is resolved and must stay inside;
+        // one that does not resolve (dangling) is refused, because writing
+        // through it would create its target wherever it points.
+        let is_link = std::fs::symlink_metadata(&candidate)
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false);
+        match candidate.canonicalize() {
+            Ok(c) => candidate = c,
+            Err(_) if is_link => {
+                return self.refuse(
+                    root.id(),
+                    rel,
+                    FolderError::Path(PathError::Escapes(rel.to_string())),
+                );
+            }
+            Err(_) => {}
         }
         let wp = match WorkspacePath::confine(&root, rel, candidate) {
             Ok(wp) => wp,
