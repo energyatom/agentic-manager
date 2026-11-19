@@ -1,0 +1,3 @@
+- source_plan: `_bmad-output/initiative-agentic-manager/tickets/epic-foundations-rust-spike/tickets/spike-stack-spike-nine-criteria-and-a-verdict-plan.md`
+  summary: Builds run outside `just` (plain `cargo check`/`cargo nextest`) write `target/` inside the OneDrive-synced project folder, because `CARGO_TARGET_DIR` is exported only by the justfile.
+  evidence: The justfile exports `CARGO_TARGET_DIR` (default ~/Library/Caches/agentic-manager/target); there is no shell or cargo config doing the same, and AGENTS.md tells agents to iterate with plain `cargo check`. The fix is per-machine (shell profile) or a project-context note.
