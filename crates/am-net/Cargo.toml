@@ -1,0 +1,18 @@
+[package]
+name = "am-net"
+description = "EgressClient: the only HTTP client, with allow-lists and loopback exceptions (AD-12)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+am-domain.workspace = true
+reqwest.workspace = true
+tokio.workspace = true
+futures-util.workspace = true
+tracing.workspace = true

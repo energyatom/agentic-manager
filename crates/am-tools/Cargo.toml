@@ -1,0 +1,21 @@
+[package]
+name = "am-tools"
+description = "Agent-facing tools: folder access list_files, read_file, write_file (AD-30)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+am-domain.workspace = true
+sha2.workspace = true
+hex.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+am-testkit.workspace = true
+tempfile.workspace = true

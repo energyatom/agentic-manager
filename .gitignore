@@ -14,3 +14,6 @@ node_modules/
 
 # Python bytecode
 __pycache__/
+
+# Committed test fixtures are the exception to the image rule above.
+!fixtures/**/*.png
