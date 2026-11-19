@@ -1,0 +1,172 @@
+# Agentic Manager — epics in build order (decisions.md "Epic order"; arch Capability → Architecture Map).
+# Table order is build order. `id` is permanent, never reused. Epic 12 (split from epic 9 on 2026-11-18) builds between epics 8 and 9.
+# `constraints` (ignored by tickets.py) names the initiative Constraints each epic owns.
+# `covers` here cites initiative ids (R1-R84; R83-R84 added 2026-11-19 for folder access; R78-R82 added 2026-11-18 for Open by default and the built-in capabilities; R73-R77 added 2026-11-18 for the owner REPLAN (cross-department work); R58-R63 added 2026-11-18 for the owner's seat anatomy; R64-R71 added 2026-11-18 for the owner's connector direction; R72 added 2026-11-18 for rendering); each epic's own tickets.toml `covers` cites that epic's local ids, which name their 'parent R<m>'.
+# Global constraints, owned by no single epic and binding every epic they touch:
+#   Narrow scope (RULE-1); Generic engine (RULE-2: denylist scan from epic 1, fixture-through-grant proof in epic 7);
+#   Propose, then approve (RULE-3); Local and private (RULE-5); Failing-first tests (each RULE-8..19 test lands in its owning epic);
+#   Accessibility (RULE-19: every UI epic; audit in epic 10); AI never-do; Look and feel; Mockups gate UI; Platforms (macOS Apple Silicon only in v1, portable core: Linux portability job in epic 1, owner 2026-11-19);
+#   Release shape; Build discipline; Personal data; Cross-department work (owner REPLAN 2026-11-18: engine in epics 3 and 4, UI in epics 5 and 6);
+#   Open by default (RULE-20, 2026-11-18: zero-key golden run in epic 12, wizard in epic 5, clean-machine check in epic 11).
+
+[[epic]]
+id = 1
+slug = "epic-foundations-rust-spike"
+title = "Foundations and Rust spike"
+description = "The nine-criterion Rust spike has a recorded verdict, and the workspace builds one `agentic` binary whose store, config loader and History validate the Blank department, the role templates and the Company A sample in CI."
+covers = ["R1", "R2", "R3", "R5", "R26", "R81"]
+constraints = ["Stack", "Licence", "Files are truth", "Audit (RULE-16)", "Developer quality"]
+risk = "high"
+
+[[epic]]
+id = 2
+slug = "epic-accounts-model-routing"
+title = "Accounts and model routing"
+description = "The owner adds a cloud Account once with its key in the keychain, local LM Studio and Ollama appear on their own, and a seat's model and fallback resolve with known or tested capabilities."
+covers = ["R6", "R7", "R8", "R9"]
+constraints = ["Secrets (RULE-12)", "Egress (RULE-9)"]
+risk = "high"
+after = [{ epic = 1, needs = "spike verdict (AD-2), am-domain ports, store writer with Actor and audit, config loader for models/" }]
+
+[[epic]]
+id = 3
+slug = "epic-workflow-engine-cli"
+title = "Workflow engine and CLI with the CLI gate"
+description = "Company A's flow F1 runs end to end from the terminal on the fake provider and one real local model — a cross-department hand-off into a parallel fan-out, a fan-in, a review gate from the other department and a CLI Owner gate — writes rows with provenance, rolls cost up per call and per branch, prints its lineage, and survives kill -9, even mid-fan-out."
+covers = ["R10", "R11", "R12", "R13", "R14", "R15", "R16", "R38", "R73", "R74", "R75", "R76"]
+constraints = ["Local server (RULE-15)", "One user (RULE-6)", "AI fallback", "Cross-department work"]
+risk = "high"
+after = [
+  { epic = 1, needs = "store writer, journal tables, audit log, config snapshot, the Company A sample template" },
+  { epic = 2, needs = "LlmProvider adapters, Account resolution, model fallback, loaded context window read" },
+]
+
+[[epic]]
+id = 4
+slug = "epic-triggers-budgets-safety-floor"
+title = "Triggers, inputs, budgets and safety floor (v0.1)"
+description = "Schedules and event triggers fire runs across departments with sleep catch-up and loop protection, and keeps firing from a macOS login item without a terminal, drop files are processed once under caps, caps reserve before every call and stop on breach, Stop everything halts all, tainted steps cannot carry table data out through read tools, imports arrive as diffs, and v0.1 is tagged."
+covers = ["R4", "R17", "R18", "R19", "R20", "R21", "R77"]
+constraints = ["Untrusted content (RULE-8)", "Actions (RULE-10)", "Spend caps (RULE-11)", "Files (RULE-14)", "AI ship and rollback", "Child isolation"]
+risk = "high"
+after = [
+  { epic = 1, needs = "seat and capability schema (1.12) and the Reload path (1.9) for the widening classifier and its Reload and startup hold (4.17, 4.18; added 2026-11-19)" },
+  { epic = 2, needs = "native file parts and file chips for drop-folder file records (2.9; added 2026-11-19, folder access)" },
+  { epic = 3, needs = "run journal, step state machine, Inbox items, ToolGate call path, ledger settle, API server" },
+]
+
+[[epic]]
+id = 5
+slug = "epic-org-seats-ui"
+title = "Org and Seats UI with live cost meter and first-run wizard"
+description = "In browser mode the owner goes from the wizard to a populated org chart, edits seats and teams by mouse or keyboard in the full Agent card, and watches the meter and estimate against real caps."
+covers = ["R22", "R23", "R24", "R25", "R27", "R28", "R29", "R30", "R56", "R58", "R59", "R73", "R75", "R78", "R81", "R82"]
+constraints = ["Spend visible (RULE-7)"]
+risk = "medium"
+after = [
+  { epic = 1, needs = "config writer, History and Undo, changed-on-disk event (1.8, 1.9)" },
+  { epic = 2, needs = "agentic accounts commands, seat resolution and Test this model probe (2.4, 2.5, 2.6, 2.7)" },
+  { epic = 3, needs = "/api/v1 + WebSocket with AD-13 auth, a short test run for the wizard" },
+  { epic = 4, needs = "caps and reservations for the meter, stop and run-start commands, confirm token, import-as-Proposal for template choice" },
+]
+
+[[epic]]
+id = 6
+slug = "epic-runs-inbox-documents-ui"
+title = "Runs, Inbox and Documents UI (v0.2)"
+description = "The owner edits a workflow, sees each seat's tasks on its Agent card, watches a live run with drill-down, sees fan-out lanes, hand-offs and review gates in the editor and run view, answers the Owner's gate in the Inbox and reads a cited document with its lineage; v0.2 is tagged."
+covers = ["R31", "R32", "R33", "R34", "R35", "R36", "R63", "R73", "R74", "R75", "R76", "R77"]
+risk = "medium"
+after = [
+  { epic = 3, needs = "Human resolve command, journal events, stored document versions, cancellation (3.2, 3.4, 3.6, 3.9, 3.11)" },
+  { epic = 4, needs = "schedule read-back, run-start, Budget asks, Approval items, the Proposal shape and confirm token (4.3, 4.5, 4.8, 4.10)" },
+  { epic = 5, needs = "app shell, sidebar, toolbar, ⌘K, design tokens, estimate line, privilege-widening dialog and the Agent card's section layout (5.17)" },
+]
+
+[[epic]]
+id = 7
+slug = "epic-tables-grants-views"
+title = "Tables, grants and saved views"
+description = "Any table's rows live in a grid with reasons on every status change, round-trip through CSV and xlsx and open in the table's default saved view; on the Company A fixture, D1 reads D2's Table T1 through a grant (slug renamed 2026-11-18, owner REPLAN)."
+covers = ["R37", "R39", "R40", "R41", "R42"]
+risk = "medium"
+after = [
+  { epic = 3, needs = "generic row store, table_write and row history with provenance" },
+  { epic = 5, needs = "shell routes and ⌘K (5.13), estimate line and Run now (5.7), privilege-widening dialog (5.9), org chart (5.2)" },
+  { epic = 6, needs = "run view for row-history links (6.1), document pages the Team sheet opens (6.9)" },
+]
+
+[[epic]]
+id = 8
+slug = "epic-assistant-dashboards"
+title = "Assistant and dashboards"
+description = "The Assistant answers from a jailed read-only connection with its query and citations, its changes arrive as proposal cards, and its charts pin to refreshing dashboards."
+covers = ["R43", "R44", "R45"]
+risk = "medium"
+after = [
+  { epic = 4, needs = "the one Proposal shape, its human apply command and confirm token (AD-15), Assistant spend scope, the injection pack" },
+  { epic = 5, needs = "the privilege-widening dialog (5.9)" },
+  { epic = 6, needs = "the Inbox proposal card component this epic extends (6.8)" },
+  { epic = 7, needs = "per-table read-only v_* views (AD-21)" },
+]
+
+[[epic]]
+id = 12
+slug = "epic-connectors-sources"
+title = "Connectors and Sources"
+description = "Seats use web search through the bundled Local search (SearXNG), free and keyless, or an optional keyed provider, switch built-in capabilities on per seat with a Built-in or Account provider, link folders whose files their models read natively (or refuse), fan out over a folder by file pattern into a gathering seat, use readers, and departments load web pages, feeds, APIs and local files through generic connectors configured as Sources (built-in crawler with optional rendering in a locally installed browser and one Firecrawl-compatible crawl endpoint, self-hosted by default, API and Feed with field mapping, Local Repository into tables with an ingest report and cleanup after a successful load, searchable Knowledge), each capped, with paid use as ledger spend, robots.txt respected, nothing processed twice, health and Test connector in the Connectors surface, every record untrusted, and the Company A sample's Source and the fixture Sources loading green."
+covers = ["R46", "R61", "R62", "R64", "R65", "R66", "R67", "R68", "R69", "R70", "R71", "R72", "R78", "R79", "R80", "R81", "R82", "R83", "R84"]
+constraints = ["Robots and terms", "Rendered pages", "Connector caps", "Incremental state", "Local search service"]
+risk = "high"
+after = [
+  { epic = 1, needs = "the Source schema in agentic validate (1.12) and the Company A sample's Source files (1.5)" },
+  { epic = 2, needs = "keychain-only keys for crawl-service and API Accounts (2.5), the owner-typed loopback pin a self-hosted crawl endpoint reuses (2.3), and native file parts with tested file chips (2.9, added 2026-11-19)" },
+  { epic = 3, needs = "the fan-out and fan-in run graph a folder fan-out extends (3.14; added 2026-11-19, folder access)" },
+  { epic = 4, needs = "the Local Repository core, Connector and Source ports and cleanup after commit (4.7), ToolGate classes, taint and the tainted-read rule (4.8, 4.9), the extract child (4.6), ledger reservation (4.2)" },
+  { epic = 5, needs = "the Tools library and privilege-widening dialog (5.9), the wizard's Accounts screen (5.12), palette and routes (5.13), the Agent card (5.17)" },
+  { epic = 6, needs = "the run view for load runs (6.1) and the drill-down's untrusted well (6.2)" },
+]
+
+[[epic]]
+id = 9
+slug = "epic-tools-mcp-search-doctor"
+title = "MCP, Doctor and backups"
+description = "An MCP server is added only after its exact spec is shown, skills are created and imported as reviewed diffs that never widen a seat, Doctor is green with one-click fixes and reports every Account, MCP server and Source, and the database backs up daily, encrypted; the official four-week dogfood clock starts on a frozen build after it that includes every connector. Retitled from 'Tools, MCP, search and Doctor' on 2026-11-18 when its search and reader stories moved to epic 12 (slug kept)."
+covers = ["R47", "R48", "R49", "R60", "R80"]
+constraints = ["MCP (RULE-13)", "Seat anatomy safety"]
+risk = "high"
+after = [
+  { epic = 4, needs = "ToolGate classes, taint and reader/actor separation, capped extract child, the v0.1 gate (4.13)" },
+  { epic = 5, needs = "Settings surfaces, the privilege-widening dialog, the wizard's Accounts screen, the Agent card's Skills section and the import dialog (5.9, 5.11, 5.12, 5.13, 5.17)" },
+  { epic = 6, needs = "the Inbox Proposal and Approval details for MCP re-approval (6.8)" },
+  { epic = 12, needs = "the Source health API and connector Accounts for Doctor (12.14), the crawl-service facts for the About page (12.12), every connector merged before the freeze (12.16), Local search and OCR status, a Local OCR service's health included (12.18, 12.20, 12.21), the capability expansion and switches (12.19)" },
+  { epic = 7, needs = "the table grid and v_* views over granted tables for query_table (7.1)" },
+  { epic = 8, needs = "the jailed read-only reader query_table reuses (8.1)" },
+]
+
+[[epic]]
+id = 10
+slug = "epic-polish-dry-run-learning"
+title = "Polish, dry-run, learning loop and design/a11y QA"
+description = "Dry-runs stay apart from real data, the Coordinator seat's learning loop proposes changes with source rows, the Developer hat approves its subtree, Ask a seat works, and the UI passes design, accessibility and performance QA."
+covers = ["R50", "R51", "R52", "R53"]
+constraints = ["Performance (RULE-18)"]
+risk = "medium"
+after = [
+  { epic = 8, needs = "proposal cards in the UI" },
+  { epic = 7, needs = "outcome reasons in rows and v_* views that exclude dry-run data" },
+  { epic = 9, needs = "the frozen dogfood build with the full tool and connector set (epics 9 and 12) for the dry-run and the QA pass" },
+]
+
+[[epic]]
+id = 11
+slug = "epic-desktop-release-trust-gate"
+title = "Desktop, release and trust gate (v0.9-rc)"
+description = "The signed, notarised macOS Apple Silicon installer with a consent-gated updater reaches first run in under 5 minutes (Windows and Linux are v1.x, owner 2026-11-19), the trust gate is green, the docs ship, and v0.9-rc is tagged; v1.0 follows the four clean dogfood weeks."
+covers = ["R54", "R55", "R57", "R79", "R80"]
+constraints = ["Desktop (RULE-17)", "Trust gate"]
+risk = "high"
+after = [
+  { epic = 10, needs = "a feature-complete, QA-passed v1 build" },
+  { epic = 12, needs = "the bundle-services trees and manifest for Local search and OCR (12.18, 12.20)" },
+]

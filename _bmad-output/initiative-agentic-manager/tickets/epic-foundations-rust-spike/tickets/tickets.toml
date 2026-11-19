@@ -1,0 +1,136 @@
+# Epic 1 — Foundations and Rust spike. Table order is build order; `id` is permanent.
+# `covers` cites this epic's own requirement ids (its epic file's Requirements), not the initiative's: per BMad, every container numbers its own R<n>
+# and each epic line names its source as 'parent R<m>'. Outside the initiative file, write initiative ids as 'init R<m>' (final review coverage F8).
+# Story 1 is the owner-directed two-week spike; every later entry waits on its verdict (directly or through its lane).
+
+[[entry]]
+id = 1
+type = "spike"
+title = "Stack spike: nine criteria and a verdict"
+description = "Answers whether the Rust-first stack holds: proves the nine stack-spike criteria inside the real workspace behind the real ports (every Structural Seed crate scaffolded, justfile, minimal CI on macOS arm64 with the Linux portability build of the core, arch AD-47), each as a runnable test or recorded demo, and writes the spike report (repo docs/spike-report.md, summarised as a dated Decision in this epic's Notes) with a verdict per criterion plus the pinned toolchain, the OpenAI cloud API choice, Ollama loaded-context field and any unsafe exception; every later story, epic 2 and epic 3 wait on it, and two or more failures among criteria 1-7 and 9 open the REPLAN (arch AD-2). What the owner provides for the spike (START-HERE 'What you provide for the spike'; restated 2026-11-19, final review 2 consistency H1): (1) an empty GitHub repository and push access; (2) an Anthropic API key (criterion 1: proves frontier-model streaming, tool calls and cancellation; an OpenAI key or any other OpenAI-compatible cloud key is an accepted alternative, owner 2026-11-19, in which case the Anthropic adapter passes on recorded fixtures and runs live in epic 2 story 5); (3) LM Studio and/or Ollama on the Mac with one tool-capable model loaded (criteria 1 and 9); (4) Node.js (for npx) and uv (for uvx) installed, and nothing else for criterion 5: Claude Code launches two official MCP reference servers, free and with no account (owner, 2026-11-19; stack-spike.md 'Criterion 5'): over stdio `npx -y @modelcontextprotocol/server-filesystem@2.4.0 --read-only <throwaway test folder>` (a folder the spike creates under the system temp directory with one fixture file; alternative `uvx mcp-server-fetch@2026.11.18`), and over Streamable HTTP `npx -y @modelcontextprotocol/server-everything@2.3.1 streamableHttp` at http://127.0.0.1:3001/mcp; (5) a local folder outside the repo holding a few of the owner's files of mixed types (for example a PDF with a text layer, a scanned PDF, an image, a spreadsheet, a Word or PowerPoint file and a csv), its path set in the environment variable AM_SPIKE_DOCS_DIR, and, for criterion 4's local half, one vision-capable model loaded in LM Studio or Ollama (criterion 4; owner decisions 2026-11-18 and 2026-11-19, folder access); (6) the sleep/wake demo, closing the lid across a scheduled fire (criterion 3); (7) not for the spike: the Apple Developer ID certificate and notarisation credentials and a clean Mac come later, when the owner readies the app for outside use (criterion 8). Criterion 8 is deferred (owner, 2026-11-19): the spike records it 'deferred: Apple Developer account', keeps an ad-hoc-signed Tauri build that links the core and launches and serves the UI as stand-in evidence, and leaves it out of AD-2's two-failure count, which is judged on criteria 1-7 and 9; the signed and notarised clean-Mac demo becomes a gate before v0.9-rc, run at the start of epic 11 story 3. Criterion 5 may be recorded 'pending owner input' only while Node.js or uv is not installed; a pending criterion is not a fail, and Claude Code continues with the other criteria instead of stalling. Criterion 4 (rewritten 2026-11-19, owner folder-access direction: 'Files to models'): the folder-access tool links AM_SPIKE_DOCS_DIR read-only, lists it and reads every file under the confinement rules (a canonicalised grant root, symlink escapes refused, no write), and attaches each file through LlmProvider file parts to (a) a frontier model (the Anthropic key's model, or the OpenAI Responses API on an OpenAI key) and (b) the local vision-capable model; the report records per file type and model whether it was accepted natively or refused (with the worded refusal, made before any request), tokens and cost; it is skipped in CI when the path is not set, and CI runs it on small synthetic fixtures under fixtures/ against recorded provider responses; no per-format parser and no OCR is part of the spike (arch AD-1, AD-30, AD-31)."
+verify = "The spike report lists all nine criteria, each with pass or fail (criterion 5 may read 'pending owner input', criterion 8 reads 'deferred: Apple Developer account') and a link to its test or recorded demo; the spike creates a minimal `just check` (cargo fmt --check, clippy -D warnings, cargo nextest run) and it is green on the spike workspace, story 2 hardening it into the full gate (green before story 2 means exactly this minimal `just check`); with two or more fails a REPLAN entry is in the initiative's Notes before epic 2 starts; criterion 4 shows the owner's recorded run over every file in AM_SPIKE_DOCS_DIR with a per-file, per-model table (accepted natively or refused, tokens, cost), every accepted type's answer naming a known word from the file, every excluded type refused with zero bytes sent, and the confinement cases (a symlink leaving the folder, a ../ path, a write attempt) refused, its test reports 'skipped: AM_SPIKE_DOCS_DIR not set' in CI, and the committed fixtures are synthetic or public domain (none of his documents is in the repo). Criterion 5 shows rmcp listing tools on both servers, `read_text_file` on the stdio server returning the throwaway folder's fixture text and `echo` on the Streamable HTTP server returning its message, or is recorded 'pending owner input' naming the missing Node.js or uv; criterion 8 is recorded 'deferred: Apple Developer account' with the ad-hoc-signed launch as stand-in evidence and epic 11 story 3 named as its gate, and the REPLAN count lists criteria 1-7 and 9 only."
+covers = ["R6"]
+after = []
+hitl = true
+risk = "high"
+
+[[entry]]
+id = 2
+type = "story"
+title = "CI baseline and the just check gate"
+description = "Hardens the spike's CI into the platform baseline: `just check` (fmt, clippy -D warnings with the disallowed-methods list, nextest), `cargo xtask check-deps` against the AD-4 matrix, cargo-deny licence policy and cargo-audit, `#![forbid(unsafe_code)]` in every crate, the department-noun denylist scan over crates/ and web/src, SHA-pinned least-privilege Actions running all of it on macOS arm64 and building the `agentic` binary there, a Linux portability job (ubuntu) that builds every crate but am-desktop and runs the unit tests with macOS-only tests gated by target (arch AD-47; no Windows job in v1), and the build hook that refuses a story without green `just check`. Owner step: turn on branch protection with the CI check required."
+verify = "Throwaway PRs that add a GPL crate, an adapter-to-adapter crate edge, `unsafe` code, or a sample-company template id under crates/ each fail CI with a named reason; a clean PR passes on macOS and in the Linux portability job and publishes the macOS `agentic` binary as a CI artifact; a throwaway PR that calls a macOS-only API from am-engine without a cfg gate fails the Linux job; a commit with a failing `just check` is refused by the hook."
+covers = ["R7"]
+after = [1]
+hitl = true
+risk = "medium"
+
+[[entry]]
+id = 3
+type = "story"
+title = "Test kit fakes"
+description = "Builds am-testkit on the spike's ports: FakeLlm behind LlmProvider (scripted turns, streamed text, usage, tool calls, timeouts and faults), FakeClock behind Clock (including jumps the size of a sleep), FakeSecretStore behind SecretStore and a recorded HTTP fixture player; every later story tests through these."
+verify = "`cargo nextest run -p am-testkit` passes, with the network disabled, tests that script FakeLlm to stream text, emit two tool calls with usage, time out and fail; advance FakeClock across a multi-hour jump; and store, read and delete a key in FakeSecretStore."
+covers = ["R8"]
+after = [2]
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 4
+type = "story"
+title = "Config loader and agentic validate"
+description = "am-config loads every file kind of the project layout (company, models/, tools, seats/*.md, workflows, tables, schemas, dashboards) into an immutable ConfigSnapshot keyed by content hash; every file carries schema_version; ids are checked across files; secret-looking values are rejected; YAML comments in app-owned files are warned about; tool ids resolve against the shipped tool manifests; `agentic validate` prints file, line and fix and exits non-zero; `just check` runs it over templates/ and fixtures/."
+verify = "`agentic validate` on a valid fixture project exits 0; on a broken fixture set (unknown seat id, bad cron, secret-looking value, missing schema_version, unknown tool id) it prints each problem as file:line with a fix and exits non-zero, and a commented YAML file gets a warning."
+covers = ["R1"]
+after = [2]
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 12
+type = "story"
+title = "Seat anatomy in the config schema"
+description = "Extends am-config for the owner's seat anatomy (owner statement B, 2026-11-18; arch AD-38, AD-35, AD-46): seat frontmatter gains capabilities (web_search, browse, crawl, folder_access, files, tables, memory, handoff_ask, calculate, each { on, provider: builtin | <account-id> }; missing entries default to folder_access on and the rest off; added 2026-11-18, owner addition on built-ins; documents renamed folder_access 2026-11-19, a legacy documents key read as folder_access), folders ({ id, path, access: read | read_write (default read), include, exclude }; a project- or ~/-relative path to an existing directory, never the app data dir, a .agentic/ folder, /, ~ or ~/Library, a missing path being a warning; added 2026-11-19, owner folder-access direction) and text_fallback (default false) expanded at load by one fixed table into built-in tool grants, which become the seat's built-in tool list (validate rejects a built-in tool listed while its capability is off and a provider Account of the wrong kind), name, role, goal (at most 500 characters), backstory (at most 2,000), avatar ({ tint } from the six DESIGN avatar tints), skills (skill ids), knowledge (file names relative to .agentic/knowledge/<seat-id>/, each with an optional note) and links ({ title, url, group }); a skill loader reads skills/<id>/ as an Agent Skills folder (SKILL.md frontmatter name and description required, license, metadata and allowed-tools optional; body at most 64 KB; references/ holding only md, txt, csv, json or yaml files of at most 256 KB, at most 20) into the ConfigSnapshot; agentic validate reports file, line and fix for an unknown skill id, a SKILL.md without name or description, a scripts/ folder, an executable or unsupported file in a skill folder, a cap exceeded, a goal or backstory over its cap and a link that is not http or https, and warns on a link host outside the seat's allow-list and on a missing reference file; allowed-tools is stored as 'asks for' information and the snapshot exposes no path from a skill to a tool grant; the config schema doc in docs/ gains the fields; epic 3 story 5 (prompt parts), epic 5 story 17 (Agent card), epic 6 story 12 (Tasks) and epic 12 stories 10 and 11 (link lists, reference files and saved links) and epic 9 story 16 (skills) consume these fields and this loader. Also validates Source files sources/<id>.yaml (owner connector direction, 2026-11-18; arch AD-39): connector type known, owner seat exists, Account exists when the type needs one, scope globs compile, URLs are http or https, limits within their caps, output table, key and mapped fields exist, `render: true` only on http-reader and crawler Sources, and a crawl-service Account's base_url is https or http on a loopback port (owner decision 2026-11-18); a host outside the owner seat's allow-list and an empty terms_checked on a website Source are warnings; the schema doc gains the Source fields."
+verify = "Written first, failing: a fixture seat with no capabilities block expands to list_files, read_file and search_knowledge only (Folder access); a folders entry with access: read_write adds write_file, one naming ~/Library or the app data dir fails with file:line and fix, a missing folder path is a warning with exit 0, and a legacy documents key loads as folder_access; one with web_search on expands to web_search too, one listing read_url while browse is off fails with file:line and fix, and one naming a crawl-service Account as its Web search provider fails; `agentic validate` on a fixture seat with goal, backstory, avatar tint, one skill, two knowledge entries and three links exits 0 and the snapshot holds every field; on a broken fixture set (skill id not found, SKILL.md missing description, skills/x/scripts/run.sh, skills/x/tool.py, a 70 KB SKILL.md body, a 2,500-character backstory, an ftp:// link) it prints each as file:line with a fix and exits non-zero; a link whose host is not on the seat's allow-list and a missing reference file are warnings with exit 0; a unit test shows the grant set computed for a seat is identical with and without a skill whose allowed-tools names read_website; the denylist scan stays green. A fixture Source set validates: a crawler Source with an unknown output table, a bad glob and an ftp:// seed fails with file:line and fix for each; a website Source with empty terms_checked and a host outside its owner's allow-list passes with two warnings; `render: true` on a feed Source and a crawl-service base_url of http://10.0.0.5 each fail with file:line and fix."
+covers = ["R11", "R14"]
+after = [4]
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 5
+type = "story"
+title = "Blank department, role templates and the Company A sample"
+description = "Writes templates/departments/blank and the eight generic role templates (Head, Coordinator, Analyst, Researcher, Reviewer, Writer, Specialist, Human seat; the Coordinator template carries the learning workflow, paused, and is the default seat for Ask a seat; restated 2026-11-18, reconcile: instructions, goal, backstory, default tools, default budget, required capabilities, preferred models, a capabilities block (Folder access on; each role switches on what it needs, e.g. Researcher Web search and Browse & read pages, Analyst Tables and Calculate & analyse, Coordinator Hand-off & ask and Memory; added 2026-11-18), and empty skills, knowledge and links lists), plus the optional sample company templates/samples/company-a/ labelled \"Sample company: Company A (two departments)\" exactly as reference-workload.md defines it (owner REPLAN and Amendment 2, 2026-11-18): the Owner (human; CEO, Vision Creator, Reviewer and Developer hats, restated 2026-11-19), D1 (D1-Head, D1-E1, D1-E2, D1-E3) and D2 (D2-Head, D2-E1 to D2-E4) with goals, backstories, avatar tints, a local and frontier model mix (D1-E2 the local seat in D1) and the capabilities flows F1 and F2 need (D1-E1 to D1-E3 Web search and Browse & read pages, D2 seats Tables), all on Built-in providers so the sample runs with zero keys on a local model; Document A, Report R1, the D1 documents and Table T1 with its status transitions; the read grant D2 → D1 on Table T1; each department's accepts list; flow F1 (fan-out to D1-E1..E3, fan-in at D1-Head with quorum 3 of 3, timeout 30 min and on_branch_failure ask, hand-offs D2 → D1 and D1 → D2, D1-Head's review gate, the Owner's gate) and flow F2 (D2's weekly f2-update, D1's f2-d1 on workflow_completed, f2-d1 completing triggers f1); flow F3 (added 2026-11-19, owner folder-access direction): D1's f3-folder, a fan-out over the sample folder files/d1-inputs/ (synthetic PDFs, csv files, PNGs and one docx) routing *.pdf to D1-E1, *.csv to D1-E2 (text fallback on) and *.png and *.jpg to D1-E3, gathered by D1-Head into d1-folder-digest, the folder linked read-only to D1-E1 to D1-E3 and D1-Head; the skills structured-review (attached to D1-E1..E3) and plain-report (D2-Head), no scripts; the t1-drop Local Repository Source (delete after a committed load; archive and keep stay user options) and D1's team Knowledge; the placeholder caps from the parent assumption (₹150 per scheduled run, ₹250 per manual run, ₹600 per week per workflow and for the company; seat caps from the role templates' default budgets, until prd OQ-8). Every name is abstract and every row synthetic; no domain department template ships. Fan-out, fan-in, hand-off, review-gate and event-trigger fields validate only once stories 3.14 to 3.16 and 4.15 extend the schema: until then this story writes them and story 12's validator accepts them as declared-but-unchecked keys, which those stories turn into checked ones; all validate in CI and no sample name leaks into crates/ or web/."
+verify = "`agentic validate` exits 0 on templates/departments/blank, every role template and templates/samples/company-a in CI; a reviewer comparing the sample with reference-workload.md finds its seats, departments, documents, Table T1, grant, accepts lists, flows F1, F2 and F3, the sample folder and its links, skills, Sources and caps; every role template file has a non-empty goal and backstory and the fields skills, knowledge and links; the skill folders validate as Agent Skills folders; the denylist scan, extended with the sample's seat ids, artefact ids and template id, finds none of them in crates/ or web/; no role template or sample name carries a domain word."
+covers = ["R5"]
+after = [4, 12]
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 6
+type = "story"
+title = "Single-writer store, migrations and project lock"
+description = "am-store's writer task owns the only read-write connection (WAL, synchronous=FULL, foreign_keys=ON) and runs typed commands that each take a mandatory Actor; readers open read-only; forward-only migrations are embedded and applied after a VACUUM INTO backup and reported, and a newer database is refused; the project's `.agentic/` folder is created git-ignored and owner-only, and a lock file refuses a second process naming the holder."
+verify = "An older-version database fixture opens with a backup file in `.agentic/backups/` and the migration printed; a newer-version database is refused in plain words; a second process on the same project is refused naming the holder; loose permissions on `.agentic/` are refused; a writer command without an Actor does not compile."
+covers = ["R9", "R4"]
+after = [3, 4]
+hitl = false
+risk = "high"
+
+[[entry]]
+id = 7
+type = "story"
+title = "Hash-chained audit log"
+description = "Adds audit_log written by the writer in the same transaction as each change: each entry carries the previous entry's hash, triggers block UPDATE and DELETE, entries hold ids, hashes and redacted arguments only, migrations are audited, and the log exports as JSON Lines with a chain check; the RULE-16 trust test is written to fail first."
+verify = "The rule_16 trust test fails before and passes after: an UPDATE and a DELETE on audit_log through raw SQL are refused; altering one line of the JSON Lines export makes the chain check name that entry; no entry holds row content or a canary secret."
+covers = ["R10"]
+after = [6]
+hitl = false
+risk = "high"
+
+[[entry]]
+id = 8
+type = "story"
+title = "Config writer, History and Undo"
+description = "A ConfigEdit command writes a file atomically (temp file, fsync, rename) with canonical key order and Markdown bodies kept byte for byte, records a History entry (diff, Actor, hat) with its audit entry and a self-write fingerprint, and Undo applies the inverse diff as a new History entry; Restore re-applies an older entry the same way. epic-org-seats-ui binds ⌘Z and the toast to these commands."
+verify = "A test edits a seat file through the command path: the file is replaced atomically with canonical key order and an unchanged Markdown body, History shows the diff with the Actor and hat in words, Undo restores the previous bytes as a new entry, Restore of an older entry works, and each step has an audit entry."
+covers = ["R3"]
+after = [4, 7]
+hitl = false
+risk = "high"
+
+[[entry]]
+id = 9
+type = "story"
+title = "Outside edits wait for Reload"
+description = "A notify watcher raises ConfigChangedOnDisk with the file's diff when a project file changes outside the app, ignores the app's own writes by their fingerprint, keeps the current snapshot until a Reload command applies the new one (recorded in History as an outside edit), and reports an invalid outside edit with file, line and fix instead of applying it. epic-org-seats-ui renders the banner and Show diff. Epic 4 story 18 (2026-11-19, final review 2 security H4) holds a Reload or startup load that widens access until the two-step confirmation; this story's single-click Reload stays for every non-widening edit."
+verify = "Editing a seat file in another editor raises exactly one changed-on-disk event with its diff and the snapshot hash is unchanged until Reload; after Reload the new hash is live and History shows the outside edit; the app's own write raises no event; an invalid outside edit is reported and not applied."
+covers = ["R2"]
+after = [8]
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 10
+type = "story"
+title = "Config versions migrate on accept"
+description = "Config migrations step an older schema_version forward: on load the change is offered as a diff, no file is written until the owner accepts, and the accepted write goes through the writer with a History entry; an older-project fixture (database and config one version back) opens on the new binary end to end."
+verify = "A project fixture one schema_version back opens on the new binary: the database migrates after a backup, the config migration is offered as a diff and no file changes until accept, after accept `agentic validate` passes and History records the migration."
+covers = ["R4"]
+after = [9]
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 11
+type = "story"
+title = "Refactor sweep"
+description = "Cleanup only, scoped at its start from the plans and review findings this epic deferred: no new behaviour; scope pushed out of another story becomes a new story."
+verify = "`just check` and CI on main are green, and every deferred finding from this epic's plans and reviews is closed or named in a new story."
+covers = []
+after = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12]
+hitl = false
+risk = "low"

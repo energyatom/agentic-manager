@@ -1,0 +1,108 @@
+---
+type: epic
+title: "Workflow engine and CLI with the CLI gate"
+parent: initiative-agentic-manager
+covers: [R10, R11, R12, R13, R14, R15, R16, R38, R73, R74, R75, R76]
+sources:
+  - _bmad-output/initiative-agentic-manager/initiative-agentic-manager.md
+  - _bmad-output/initiative-agentic-manager/architecture-agentic-manager/architecture-agentic-manager.md
+  - _bmad-output/initiative-agentic-manager/reference-workload.md
+  - _bmad-output/initiative-agentic-manager/ux-agentic-manager/EXPERIENCE.md
+  - _bmad-output/initiative-agentic-manager/prd-agentic-manager/prd-agentic-manager.md
+  - _bmad-output/initiative-agentic-manager/party-decisions/decisions.md
+  - _bmad-output/initiative-agentic-manager/reference-company-spec-2026-11-18.md
+companions:
+  - _bmad-output/initiative-agentic-manager/architecture-agentic-manager/architecture-agentic-manager.md
+  - _bmad-output/initiative-agentic-manager/reference-workload.md
+  - _bmad-output/initiative-agentic-manager/ux-agentic-manager/EXPERIENCE.md
+after: []
+risk: high
+---
+
+# Workflow engine and CLI with the CLI gate
+
+## Description
+
+The run journal and step state machine; the bounded agent loop calling tools only through ToolGate (table_write first); fixed, labelled prompt assembly; schema validation with one repair; next, loop-back and gate hand-offs with return counting; retries, timeouts, per-Account rate limits, the circuit breaker and the fallback chain ending in a Failure Inbox item; the Inbox item entity; the generic row store with row history and provenance; document versions stored as Markdown; per-call cost settled and rolled up in the company currency and USD from the price file; the context-overflow pause; and the `agentic` CLI (validate, run, status, serve, stop, gate) with the loopback server's authentication. The generic row store, table_write and stored documents built here are what epic-tables-grants-views and epic-runs-inbox-documents-ui extend. Since the owner REPLAN of 2026-11-18 it also builds the generic cross-department primitives in the engine: parallel fan-out and fan-in, cross-department hand-offs carrying taint and provenance, review gates by a seat of another department, and lineage derived from the journal (arch AD-40 to AD-43).
+
+## Outcome
+
+The owner runs Company A's flow F1 from the terminal — fan-out across departments, fan-in, hand-back, a review gate from the other department — approves or returns Report R1 at the Owner's gate, prints its lineage, and a crash, even mid-fan-out, loses no work and spends nothing twice.
+
+## Requirements
+
+- R1 (parent R10; arch AD-27, AD-31): A local model's loaded context window (read in epic 2) is set explicitly on every call; a prompt that would exceed it sends no call and pauses the step with a Question offering Split input or Use fallback; nothing is truncated.
+- R2 (parent R11; arch AD-9; D2): Every model call has a ledger entry reserved before and settled after the call from provider usage (missing usage settles at the reservation), in i64 micro-units of USD and the company currency with the price file's rate snapshot; spend rolls up by step, run, seat, team and week (ISO week in company time) with the price file's updated date; local calls show tokens and time at ₹0. Cap checks at reserve arrive in epic 4.
+- R3 (parent R12; arch AD-8, AD-36): A workflow runs its steps in order through the AD-8 step state machine, each a bounded agent loop (iterations, tool calls, wall-clock); hand-offs are next, loop-back (target step, maximum default 2, reasons passed as trusted input) and human gate; past a maximum the step fails with a Failure Inbox item.
+- R4 (parent R13; arch AD-36): A step's final message is validated against its declared output schema, repaired at most once, then the step fails with the validation error in words.
+- R5 (parent R14; arch AD-8): After kill -9 or a restart an interrupted run resumes at its last committed transition, re-issuing only an unsettled model call settled at its reservation; local-write tool calls are idempotent by run, step and call sequence; ledger totals reconcile.
+- R6 (parent R15; arch AD-19; parent constraint AI fallback): Only transient errors retry, with jittered backoff up to a maximum; every step has a timeout; per-Account rate limits and circuit breakers hold across all runs; a workflow has at most one active run and a manual start queues behind it; when the fallback also fails the step fails with a Failure Inbox item naming the next action.
+- R7 (parent R16; arch AD-14, AD-15, AD-20, AD-28; C4): The `agentic` CLI validates, runs, reports status with the cost roll-up, serves and stops; `agentic stop` cancels running steps at the next safe point; `agentic gate` resolves Inbox items on an interactive TTY (approve, return with note, reject, answer a Question) through the same Human-only command the API uses, as a CLI-class decision (arch AD-15, amended 2026-11-18).
+- R8 (parent R38; arch AD-21, AD-24): Rows change only through `table_write` during a step, bound to the step's declared table owned by the seat's team, and each change appends a row-history after-image with run, step and seat (or a Human or Import actor) in the same transaction.
+- R9 (arch AD-10 types, AD-27, AD-38; parent R25, R30, R32, R59, R60): Every prompt is assembled in the fixed order (role instructions, the seat's goal and backstory, each attached skill's instructions labelled `skill:<id>` with its reference-file names, CEO goals, unexpired guidance notes, memory notes, the names of the seat's reference files and saved links, step instruction, trusted inputs, then untrusted data in a labelled fence) with a source label per part stored in the journal; untrusted data is its own type with no conversion to instructions (restated 2026-11-18, owner statement B).
+- R10 (arch AD-28, AD-29 storage; reference-workload flow F1 step 5): A document step stores its validated Markdown output as a document version per run, and its drafts arrive as Draft Inbox items; rendering, export and citation resolution belong to epic 6.
+- R11 (arch AD-33; party record D11; parent constraint Developer quality; restated 2026-11-18, owner REPLAN and Amendment 2): The golden run of Company A's flow F1 through the generic loader on FakeLlm (one script per seat) completes every step — the D2 → D1 hand-off into a 3-branch fan-out, the fan-in at D1-Head, the hand-back to D2, D1-Head's review gate with one return, and the Owner's gate answered by `agentic gate` — and its snapshot of tables, documents, ledger per branch, Inbox and lineage matches; the same run on one real local model is runnable on demand; CI fails under 80% coverage on am-engine or am-store.
+- R12 (parent constraint Local server; prd RULE-15; arch AD-13; parent Decision 2026-11-18): `agentic serve` binds 127.0.0.1 only with a 256-bit per-launch session secret held in memory and never written to disk; browser mode opens with a single-use launch code valid 60 s in the URL fragment, exchanged for an HttpOnly SameSite=Strict cookie named for the port and a per-session CSRF value kept in page memory; every API request, GET included, needs `X-AM-CSRF` and the WebSocket upgrade carries it as a subprotocol; the terminal pairing code (8 base32 characters) is rate-limited and locks after 10 failures; the CLI uses a separate per-launch CLI token that grants only the CLI class (arch AD-15); Host and Origin allow-lists apply to every request including the WebSocket upgrade; no CORS headers; loose permissions stop the server (amended 2026-11-18, final review F2, F3). Threshold: the rebinding, CSRF, cookie-only, WebSocket, launch-code replay and expiry and pairing-lockout suite passes and no file holds the session secret.
+- R13 (parent R74; arch AD-40, AD-8, AD-9, AD-19, AD-20, AD-27; added 2026-11-18, owner REPLAN): A fan-out step runs one shared instruction and input on 2 to 8 seats in parallel, each branch its own step run labelled by seat with its own budget reservation and cancellation; its fan-in step waits in `waiting_branches` for all branches or its quorum or timeout, receives every finished branch output labelled `branch:<seat-id>` with missing branches named, and on a branch failure fails the run, continues at quorum or asks with a Question, as configured; a run killed mid-fan-out resumes every unfinished branch, losing at most each branch's in-flight call, and never re-runs a finished branch.
+- R14 (parent R73; arch AD-41, AD-10, AD-22, AD-35; added 2026-11-18): A cross-department hand-off delivers an immutable payload (a step output, a document version or a row snapshot) into a step or a workflow of another department only when declared by the sender and accepted in the receiver's `accepts` list (else `agentic validate` and the run refuse it); the delivery is journaled with the sending step's commit and re-delivered exactly once after a crash; the payload's taint and provenance travel with it, a receiving step that reads a tainted payload is tainted, and the receiver gains no write access to the sender's tables.
+- R15 (parent R75; arch AD-42, AD-28, AD-24, AD-36; added 2026-11-18): A hand-off may carry a review gate whose reviewer is a seat of any department that accepts the review: a human reviewer gets a Review Inbox item, an AI reviewer runs a review step whose output must match the verdict schema; approve releases the hand-off, return loops back with the note counted against `max_returns`, reject fails it with a Failure item; every verdict is recorded with its actor and hat, a review timeout never approves, and an AI reviewer resolves nothing else.
+- R16 (parent R76; arch AD-43; added 2026-11-18): Every step run records its inputs as lineage edges in the same transaction that starts it; the lineage of any document version or Inbox item — seats, departments, steps, branches, models (fallback marked), inputs with taint, output versions, tokens, time, cost and review verdicts, across hand-offs — is computed from the journal on read, served at `/api/v1/lineage/<kind>/<id>`, printed by `agentic lineage <id>` and exported as JSON and Markdown through the redaction layer.
+
+## Constraints
+
+- One user (parent; prd RULE-6; D5; arch AD-24): loopback only with no LAN option; every Human action records its actor.
+- Propose, then approve (parent; prd RULE-3; arch AD-15, AD-28): only a Human command through the API or CLI resolves an Inbox item; no engine path approves; CLI approvals need an interactive TTY.
+- AI fallback (parent; owned here): refusal, timeout or tool failure goes to the fallback model, then to a failed step with an Inbox item naming the next action.
+- Generic engine (parent; prd RULE-2): the Company A sample runs through the generic loader; no department-specific code path; the cross-department primitives are generic.
+- Cross-department work (parent; owned here with epic 4): grants, budgets, reader/actor separation and approvals apply unchanged across departments; branches reserve atomically against shared scopes; an unaccepted hand-off starts nothing.
+- Failing-first tests (parent; D11): the RULE-15 suite lands here as `crates/am-e2e/tests/trust/rule_15_*.rs`, written to fail first; the kill-and-resume and golden tests run in CI on FakeLlm.
+
+## Done when
+
+- `agentic run` of Company A's flow F1 on the fake provider completes every step across both departments, pausing at the Owner's gate where `agentic gate` approves or returns with a note; the golden snapshot of tables, documents, ledger per branch, Inbox and lineage matches.
+- A fan-in waits for all branches or its quorum and timeout, a failing branch follows its configured policy, kill -9 mid-fan-out resumes every branch, a tainted payload taints the receiving department's step, a review gate in the other department blocks until it decides, and `agentic lineage` prints a chain that matches the journal.
+- kill -9 mid-step and a restart resume the run, re-issuing at most the in-flight model call, and ledger totals reconcile.
+- Every model call settles in the ledger and rolls up by step, run, seat, team and week in the company currency and USD with the price file's date; local calls show tokens and time at ₹0; every row change carries its run, step and seat.
+- A prompt that would overflow a local model's loaded window pauses the step with a Question offering Split input or Use fallback; nothing is truncated.
+- `agentic serve` binds loopback only, and the rebinding, CSRF, WebSocket, launch-code replay and expiry tests pass.
+- Merged with `just check` green and coverage of at least 80% on am-engine and am-store.
+
+## Boundaries
+
+- Out: schedules, drop folders, caps and reservations against caps (epic-triggers-budgets-safety-floor). This epic's `agentic stop` cancels running runs through the cancellation tree; R21 there adds the schedule pause and the persisted stop flag.
+- Out: status-transition reasons, the grid, saved views, v_* views and grants (epic-tables-grants-views); document rendering, export and citation resolution (epic-runs-inbox-documents-ui, R36); re-run from a step, pause and the UI run controls (R33, epic-runs-inbox-documents-ui); all UI, including the lineage, fan-out and hand-off views (epics 5 and 6).
+- Out: event triggers and trigger chains (R77, epic-triggers-budgets-safety-floor story 15).
+- Out: taint, action classes and external-effect approvals in ToolGate (epic-triggers-budgets-safety-floor); web and search tools and Source connectors (epic-connectors-sources) and MCP tools (epic-tools-mcp-search-doctor).
+- Out: the golden run on a real local model as a release gate (epic-triggers-budgets-safety-floor, AI ship and rollback).
+
+## References
+
+- parent — _bmad-output/initiative-agentic-manager/initiative-agentic-manager.md, Requirements R10, R11, R12, R13, R14, R15, R16, R38, R73, R74, R75, R76; Constraints (Local server, One user, AI fallback; its Assistant clause is delivered by R43 in epic-assistant-dashboards, its citation clause by R36 in epic-runs-inbox-documents-ui)
+- architecture — _bmad-output/initiative-agentic-manager/architecture-agentic-manager/architecture-agentic-manager.md, AD-8, AD-9, AD-10 (types), AD-11, AD-13, AD-14, AD-15, AD-19, AD-20, AD-21, AD-24, AD-27, AD-28, AD-29 (storage), AD-33, AD-36, AD-40, AD-41, AD-42, AD-43, Consistency Conventions (Money, Time, Errors)
+- reference company — _bmad-output/initiative-agentic-manager/reference-workload.md, Company A, flow F1
+- design — _bmad-output/initiative-agentic-manager/ux-agentic-manager/EXPERIENCE.md, State Patterns (Context overflow, Fallback used, Schema repair, Step failed, Run resumed after crash), Review gate, Voice and Tone
+- party — _bmad-output/initiative-agentic-manager/party-decisions/decisions.md, D11 (golden e2e, kill-and-resume test)
+
+## Notes
+
+- Waits on epic-foundations-rust-spike because: the store writer, journal tables, audit log, config snapshot and the Company A sample template.
+- Waits on epic-accounts-model-routing because: LlmProvider adapters, Account resolution, model fallback and the loaded context window read.
+- Decision: R10 moved here from E2 because its overflow path pauses the step as a Question Inbox item (arch AD-27, AD-28, AD-8), which this epic builds (2026-11-18).
+- Decision: R11 moved here from E2 because each ledger entry settles against a model call of a step run (arch AD-8, AD-9), so roll-up by step and run starts here (2026-11-18).
+- Decision: R38 moved here from E7 because rows change only through table_write during a step and every row write appends its provenance in the same transaction (arch AD-21, AD-24, AD-36); this epic's golden run writes rows (2026-11-18).
+- Decision: the single-use 60-second launch code in the URL fragment meets RULE-15, with the terminal pairing code as the fallback; Rhea's security tests cover replay and expiry (owner delegated, 2026-11-18).
+- Decision: Refined (owner delegated, 2026-11-18): settled by the assumptions below; no spike beyond 1.1, whose criteria 1, 2 and 6 seed the adapters, resume and server auth; route shapes inside AD-14's envelope and the Question and Failure wording within EXPERIENCE.md are left to the stories.
+- Decision: Tracer bullet is story 1, a one-step fixture workflow run with `agentic run` on FakeLlm and shown by `agentic status`: config snapshot, journal, engine loop, provider port and CLI in one thin path (2026-11-18).
+- Decision: Sequencing (2026-11-18): the loopback server comes second as the least certain part (a delegated security decision gated by Rhea's suite); then steps and hand-offs, the CLI gate, prompt assembly, rows, cost, retries and fallback, resume, overflow and stop, mostly one lane because they share the agent loop and am-store migrations; the refactor sweep, then the golden Company A run as the closing end-to-end suite (AD-33).
+- Assumption: This epic's ledger reserves and settles every call without checking caps; epic 4 adds the atomic cap check at reserve without changing the ledger shape.
+- Assumption: `agentic run`, `status`, `gate` and `stop` talk to the running server over `/api/v1` using the session secret file when a server holds the project lock; with no server, `agentic run` runs the engine in the foreground holding the lock and prompts the gate inline, and `agentic stop` says nothing is running (epic 4 adds the persisted stop flag).
+- Assumption: A loop-back fires when the producing step's validated output carries a non-empty reasons list in the field its hand-off names.
+- Assumption: Until epics 4 and 9 implement them, the template's other tools are manifest-only and unavailable to runs; the golden FakeLlm script calls only `table_write`, and later epics update the golden snapshot as tools land, each change reviewed.
+- Assumption: Prompt size for the overflow check is counted with an approximate tokenizer plus a safety margin, labelled approximate for local models.
+- Assumption: The real-local-model golden run is a `just golden-local` command the owner runs on the owner's Mac; epic 4 makes it a nightly and pre-tag gate.
+- Decision: REPLAN consistency pass (2026-11-18): epic 6 now waits on this epic directly (6.1 on 3.2, 6.3 on 3.9 and 3.11, 6.7 on 3.4, 6.9 on 3.6); Assistant calls (epic 8) settle in this epic's ledger as Assistant spend with no seat or run, through epic 4's Assistant spend scope (4.2), so the ledger shape is unchanged; no entry change here.
+- Assumption: 13 entries stay in one epic; a split into an engine half and a CLI-and-server half was considered and not taken because both ship in v0.1 under one Done when.
+- Decision: Final review F2 and F3 (owner delegated, 2026-11-18): the session secret lives in memory only; the CLI gets its own per-launch token limited to the CLI class; the cookie is named for the port and a CSRF value from page memory is required on every request and the WebSocket upgrade; story 2 carries the tests; R7 and R12 restated (arch AD-13, AD-15 amended).
+- Decision: Seat anatomy (owner statement B, 2026-11-18; initiative Notes): story 5 is extended in place with the seat's goal, backstory and attached skills as labelled instruction parts and the names (never content) of its reference files and saved links, per arch AD-27 as amended; R9 restated; reading skill references and importing skills are epic 9 story 16.
+- Decision: Owner REPLAN (owner, 2026-11-18, reference-company spec and Amendment 2; initiative Notes): R13 to R16 added (parent R73 to R76) and R11 restated; new stories 14 "Parallel fan-out and fan-in with quorum and timeout", 15 "Cross-department hand-offs carry taint and provenance", 16 "Review gates by a seat of another department" and 17 "Lineage from the journal and agentic lineage" build after story 11 and before the sweep; story 13 retitled "Golden Company A run" and rescoped to flow F1. The engine lane stays one lane: the new stories share the run graph in am-engine and the am-store migration sequence. 17 entries now; a split was considered and not taken because the primitives ship together in v0.1.
+- Decision: Final review 2 (owner delegated, 2026-11-19; initiative Notes): story 4 is renamed 'CLI Owner gate'; story 7 settles in USD and the company currency; story 14's cap test moves to epic 4 story 2 (this epic checks no cap) and story 15's Source-taint case uses a fixture-tainted row (Source origin proven in 12.1); story 16 gains gate hardening (payload-only reviewer prompt, validated branch, tainted notes fenced, human→AI swap is widening); story 13's golden runs offer only table_write and write_document until epic 4.

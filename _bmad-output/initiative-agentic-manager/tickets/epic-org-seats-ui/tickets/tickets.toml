@@ -1,0 +1,209 @@
+# Epic 5 — Org and Seats UI with live cost meter and first-run wizard. Table order is build order; `id` is permanent.
+# `covers` cites this epic's own requirement ids (its epic file's Requirements), not the initiative's: per BMad, every container numbers its own R<n>
+# and each epic line names its source as 'parent R<m>'. Outside the initiative file, write initiative ids as 'init R<m>' (final review coverage F8).
+# One lane to the picker (Accounts follows the seat sheet because both register routes in the shell); then the seat-sheet lane (8, 9, 10)
+# and the toolbar lane (6, 7) run beside each other and join at the import dialog and wizard.
+# Every UI story names the mockup it matches; acceptance tests (Playwright, vitest, axe) are written from the ticket first.
+# Definition of Done for every UI story (final review UX M3), whether or not its verify repeats it: axe clean in light and dark,
+# the story's path completed keyboard-only, and reduced motion honoured.
+# The first-run wizard is split (final review UX high 3): story 16 (company and Accounts) follows the picker and, because it registers the first-launch route in the shell,
+# the toolbar lane (6) and the seat-sheet lane (8) now start after it; story 12 (template, test, org chart) closes the lane.
+# 2026-11-19 owner folder-access direction: 4 shows file chips, 9 adds What leaves this Mac, 16 lists Folder access, 17 draws the Folder access chip (linked folders, file-type badges, text fallback, write switch).
+
+[[entry]]
+id = 1
+type = "story"
+title = "App shell signed in from agentic serve"
+description = "Tracer bullet: scaffolds web/ (React, TypeScript, Vite, Radix-style primitives, vitest, Playwright) embedded in the binary and served by `agentic serve` under a strict CSP (connect-src the loopback origin only, no remote fonts, images or scripts); DESIGN.md tokens become CSS variables for light and dark following the OS; ts-rs types generate into web/src/api/generated with a CI drift check; the shell shows the sidebar and the toolbar with company name and breadcrumb, and the Org route lists teams from /api/v1 after the launch-code sign-in; Playwright runs in CI on Chromium, WebKit and Firefox engines plus Edge. Adds a token-contrast unit test that checks every text and icon foreground/background pair DESIGN.md names against WCAG 2.2 AA in light and dark (the amber status dot included, final review UX M3). Decides the TypeScript version (arch Open Questions) as a Decision. Matches key-org.html §1 (sidebar and toolbar). Owner step: run `agentic serve` (or `agentic open` with the login item from epic 4 story 14) on the owner's Mac and open the app."
+verify = "`agentic serve` opens the browser signed in and the Org route lists the project's teams in light and dark; the token-contrast test passes and fails when a DESIGN.md pair is lowered below AA; Playwright in CI loads the shell on every engine with no CSP violation and no request off the loopback origin; changing an am-api type without regenerating fails CI; the owner confirms the shell opens on the owner's Mac."
+covers = ["R15", "R13"]
+after = ["3.2"]
+hitl = true
+risk = "medium"
+
+[[entry]]
+id = 2
+type = "story"
+title = "Org chart in teams and seats"
+description = "Renders the org chart from config as a top-down ARIA tree: collapsed team boxes (name, status sentence, weekly cost, avatar strip with seat count and how many are you) and expanded seat cards (avatar, name, role, occupant and model, status, this week's spend) toggled per team with Space and globally with the Teams/Seats control and ⇧⌘E; arrows move selection and Return opens the sheet route; Fit ⌘0 and zoom ⌘+/⌘−; more than 5 reports wrap in rows of 5; expand state persists per team; solid reporting lines; live status and spend from the WebSocket with a 1 Hz pulse (static under reduced motion); picks the renderer (own tidy tree or @xyflow/react) by measuring 60 fps at 30 seats and records it as a Decision. Matches key-org.html §1–2."
+verify = "Playwright on the Company A fixture toggles one team and all teams by mouse and by keys, walks the tree with arrows, and the accessibility tree announces each seat with name, role, model, status and spend; a 30-seat fixture renders at 60 fps in a recorded trace and Fit shows it whole at 1440×900; a FakeLlm run pulses the running seat's dot and the dot is static under reduced motion."
+covers = ["R2"]
+after = [1]
+hitl = false
+risk = "high"
+
+[[entry]]
+id = 3
+type = "story"
+title = "Seat sheet saves on blur with Undo"
+description = "Opens the seat sheet as a side sheet (header, Instructions with 'Also receives', Drop folder with files waiting and policy, Memory notes, More); fields save on blur or Return through a ConfigEdit API command that writes the seat file with History; an Undo toast shows for 6 s and ⌘Z / ⇧⌘Z undo and redo the last config edit; Settings › History lists entries with Undo and Restore; an outside edit shows the 'changed outside the app' banner with Reload and Show diff (unsaved edits kept as a conflict) and an invalid file shows its file:line fix banner. Matches key-seat-sheet.html §1, key-states-keyboard.html §1 (Config changed on disk) and key-models-doctor-history.html (History)."
+verify = "Playwright edits a seat's instructions, sees the file change and a History entry reading 'You', presses ⌘Z and gets the old bytes back; editing the seat file outside the app shows the banner, Show diff shows the change and Reload applies it; an invalid outside edit shows its file:line fix; Esc closes the sheet and returns focus to the seat card."
+covers = ["R4"]
+after = [2, "1.8", "1.9"]
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 5
+type = "story"
+title = "Accounts in Models & Costs"
+description = "Models & Costs › Accounts: LM Studio and Ollama cards appear on their own badged On this Mac; cloud Accounts are added once with the key sent over the authenticated loopback API straight to the keychain through epic 2's commands and only ever shown masked (never returned, logged or kept in browser storage); each card shows health, models, egress host and the seats using it; a local server that is running with no model loaded reads 'LM Studio is running, but no model is loaded. Load one in LM Studio, then Check again.' (Ollama: 'Ollama is running, but no model is pulled. Run ollama pull <model>, then Check again.') with Check again; '+ OpenAI-compatible URL' (vLLM, llama.cpp, OpenRouter) takes a base URL and optional key, shows the host plainly before Add ('Calls will go to openrouter.ai' or 'On this Mac · 127.0.0.1:8080'), lists the models it reports and adds the host through story 9's privilege-widening confirmation once that exists (until then through epic 4's confirm token); a revoked key turns the card red with 'Anthropic refused this key. Seats using it are on their fallback. Replace key…'; removing one names the seats that will fall back; the company default model and the price file's updated date show. Matches key-models-doctor-history.html §1 (Accounts), key-first-run.html step 2 card states and EXPERIENCE.md State Patterns (Local server: no model loaded; Adding an OpenAI-compatible URL; Account key revoked)."
+verify = "Playwright adds an Anthropic Account with a canary key on FakeSecretStore: the card shows it masked, and the leak scan finds the canary in no response body, log, journal or browser storage; LM Studio's card shows On this Mac from a recorded fixture; a refused key shows 'That key was refused…' and is not stored; removing an Account lists the seats that will fall back before confirming; an LM Studio fixture reporting no loaded model shows the no-model sentence and Check again picks up a loaded model; an OpenAI-compatible URL on a recorded fixture shows its host before Add and lists its models, a URL on the app's own port or a LAN address is refused in words; a fixture 401 on a stored key shows the revoked state with the exact sentence."
+covers = ["R6"]
+after = [3, "2.4", "2.5"]
+hitl = false
+risk = "high"
+
+[[entry]]
+id = 4
+type = "story"
+title = "Account › Model picker and Test this model"
+description = "The seat sheet's Model and Fallback: one grouped picker (local Accounts first, type to filter) with chips marked known ○ or tested ✓ and their source on hover, price or 'Free (local)', a 'Recommended for <role>' pill, worded warnings on rows that stay selectable, the loaded context window as a chip for local models and 'Add Account…' opening story 5's flow; file chips 'reads PDF · images · office files · audio' sit beside the other chips, known ○ or tested ✓ (epic 2 story 9; added 2026-11-19, owner folder-access direction); Test this model shows its cost up front, probes each claimed file chip with its fixture, and flips chips to ✓ with the date only after the probe passes; new seats pre-fill the company default; API routes wrap epic 2's resolution and probe. Matches key-seat-sheet.html §2."
+verify = "Playwright picks a local model lacking tested tool calls and sees the warning in words with the row still selectable; a FakeLlm-passing probe flips chips to ✓ with the date for that Account and model only; a failing probe keeps ○ and shows the failure sentence; a fixture vision model's 'reads images' chip flips to ✓ only after its image probe passes, while a local text model shows no file chip but text; a new seat pre-fills the company default; axe finds no violation in the open picker."
+covers = ["R5"]
+after = [3, 5, "2.6", "2.7", "2.9"]
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 16
+type = "story"
+title = "First-run wizard: company and Accounts, local models made easy"
+description = "Pulled forward so the most important experience is built early (final review UX high 3): with no company.yaml in the served folder the app opens the wizard; step 1 takes the company name, with timezone and currency pre-filled from the Mac's system locale for the owner to confirm (no hard-coded locale; final review 2 M6, 2026-11-19), and shows the saved path; step 2 is drawn zero-key first (final review 2 UX high 3, owner delegated 2026-11-19): it shows story 5's Account cards with local servers detected and, under them, the built-in list; keys sit in one collapsed, optional 'Add a key later' row; with no server found it shows 'No model server found on this Mac.' and a guided one-click path: two buttons, Get LM Studio and Get Ollama, each opening the official download page in the system browser (host shown), then Detect again, which re-probes both ports and moves on by itself once a model is loaded; nothing on this step asks for a terminal, the running-but-no-model state with Check again, Add API key with the key-refused state, and '+ OpenAI-compatible URL' with its host shown plainly; Continue is enabled once any Account works, and a local model server alone is enough (Open by default, RULE-20, 2026-11-18): under the Account cards a 'Built in, no key needed' list shows Web search 'Local search (SearXNG) · free, no key' with its status from epic 12 story 18 (or 'Starting…'), Browse & read pages, Crawl and Folder access (renamed 2026-11-19) as ready, cloud keys are labelled optional and nothing is pre-selected; with no local server and no Account the step states the one choice ('Get a free local model app, or add a key.') above the guided path and Continue stays disabled; quitting resumes at the same step; step 1 writes company.yaml through a config edit; step 3 onward is story 12's, and until it lands Continue after step 2 opens the empty Org view. Matches key-first-run.html steps 1–2 and EXPERIENCE.md State Patterns (Wizard: no local server found; Local server: no model loaded; Adding an OpenAI-compatible URL)."
+verify = "Written first, failing: with only an LM Studio fixture and an empty keychain, step 2's Continue is enabled and the built-in list shows Local search as ready with no key field touched; with neither, the one-choice sentence shows and Continue is disabled; Playwright on an empty folder with recorded fixtures opens the wizard, completes steps 1 and 2 by keyboard alone and by mouse; with no local server the no-server sentence and both links show their hosts; an LM Studio fixture with no loaded model shows the no-model sentence and Check again picks up a loaded model; adding an OpenAI-compatible URL shows its host before Add and lists its models; a refused key is not stored and shows 'That key was refused by Anthropic. Check it and try again.'; a reload mid-wizard resumes at the same step; axe is clean on both steps in light and dark. (zero-key path, 2026-11-19) with only an Ollama fixture the step shows the server card, Local search · Built in · ready, and the collapsed 'Add a key later' row, and no key field is visible until it is expanded; with no server, Get LM Studio opens lmstudio.ai and Get Ollama opens ollama.com in the system browser (asserted on the opener call), starting the fixture server and pressing Detect again moves to the next step; a fixture locale of de-DE with Europe/Berlin pre-fills EUR and Europe/Berlin and en-US with America/New_York pre-fills USD; no string on the step contains 'terminal', 'command' or 'agentic '."
+covers = ["R1", "R6", "R22"]
+after = [4, "2.3", "2.4"]
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 6
+type = "story"
+title = "Live cost meter and Stop everything"
+description = "The toolbar meter shows settled plus reserved weekly spend against budget with a ring, ticks at most once a second during runs, turns amber at 80%, shows 'Stopped at budget' at 100% (then linking to the Budget ask), never projects and announces only threshold changes; clicking it at rest opens Models & Costs › This week (spend by seat, team, week and run in the company currency formatted by the system locale, and USD, caps used, local calls as ₹0 with tokens and time). Stop everything (button and ⌘.) opens a popover naming what will stop from epic 4's API, Return confirms and Esc cancels; afterwards a banner on every surface offers 'Resume schedules…', each resumed on its own, and the meter freezes. Matches key-org.html §3–4 and key-models-doctor-history.html §1 (Costs)."
+verify = "Playwright with a FakeLlm run sees the meter tick no faster than 1 Hz, turn amber at 80% and read 'Stopped at budget' when epic 4's cap stops the run; the costs view equals `agentic status`; ₹120000 shows as ₹1,20,000 and switches to USD; ⌘. then Return cancels the running step, shows the banner on Org and Models & Costs and freezes the meter; Resume on one schedule resumes only it; Esc on the popover stops nothing; only the 80% and stopped changes are announced; with the network fixture offline the toolbar shows the 'Offline' pill beside the meter and cloud seats read 'Waiting for network' while local seats keep running (EXPERIENCE.md State Patterns, No internet)."
+covers = ["R11", "R14"]
+after = [5, 16, "4.2", "4.4"]
+hitl = false
+risk = "high"
+
+[[entry]]
+id = 7
+type = "story"
+title = "Estimate line and the Workflows list"
+description = "An estimator in am-engine, a read-only consumer of ledger history that excludes dry-run runs, returns a range with its basis ('rough, no history' from prompt tokens × expected iterations × price until 3 runs exist, then p50–p90 'based on your last N runs'), never writes a cap, is stored on each run at start and recalculates within 300 ms of a seat or model change; the Estimate line component adds 'May stop at the ₹150 run cap.' when its top exceeds the remaining cap; the Workflows list (schedule in words, next run, last result as 'Estimate ₹80–120 · Actual ₹96' with a verdict, Run now with its estimate and ⌘R through epic 4's run-start command) carries it; epic 6 reuses both components. Matches key-workflow-run.html §1 (estimate under Run now) and §3 (estimate against actual)."
+verify = "On FakeLlm the first estimate reads 'rough, no history' and after 3 runs 'based on your last 3 runs', always a range; changing a seat's model updates the line within 300 ms; a range above the remaining cap shows the cap warning and the cap file is unchanged; after a run the Workflows list shows estimate, actual and verdict; on scripted FakeLlm runs from run 3 the actual falls within ±30% of the estimate (prd SM-6)."
+covers = ["R12"]
+after = [4, 6, "4.1"]
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 8
+type = "story"
+title = "Human seats, CEO goals and guidance notes"
+description = "Human seat cards show the ringed avatar, You badge and hat chip whose live fact links to its action (one card per hat); the goal editor sheet (text, scope, optional target and period, optional end date) and guidance notes with optional expiry ('◇ text · N days left' on team boxes and containers, gone when expired and kept in History) are config edits with Undo; every seat below lists them under 'Also receives'; a screen reader announces 'you, Reviewer'. Matches key-org.html §1 and key-seat-sheet.html §1 (Also receives)."
+verify = "Playwright sets a CEO goal and a 30-day guidance note on a team: the CEO card and team box show them, each seat below lists both under Also receives, a FakeLlm run's journal prompt holds both as labelled parts, and with FakeClock past the expiry the note leaves the chart and the prompt but stays in History; in the collapsed view each of the owner's hats (CEO, Vision Creator, Reviewer) still shows one card with its hat chip and live fact (final review UX L3)."
+covers = ["R7", "R8"]
+after = [16]
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 9
+type = "story"
+title = "Tools, budget and what this seat can touch"
+description = "The seat sheet's Tools & connectors section, grouped Built-in, Connectors (MCP tools, filled by epic 9 story 5) and Readers (read website, read URL, read file, arXiv), each chip showing its class on hover and the hosts this seat's allow-list lets it reach, with the caption that Sources run on their own schedule without a model and that watching pages is a Crawler or HTTP Reader Source loading only what changed (owner statement B and owner connector direction, 2026-11-18; the Sources group itself is epic 12 story 14) (Tools library by A, drag, or arrows and Return; remove with ⌫), Budget field (per run, week and month; scheduled and manual caps as two lines; On breach) and an always-visible 'What this seat can touch' panel computed by the core from the same manifests, grants and Account hosts ToolGate uses (Reads, Writes, Sends out per host with what goes there, What leaves this Mac — each linked folder whose files go to a cloud model, with its host, computed by the core from the seat's folders and its model and fallback Accounts (epic 1 story 12), added 2026-11-19 — and Never), updating live with a brief highlight; adding an external-effect or MCP tool, a new egress host or raising a cap opens the two-step privilege-widening confirmation (Keep current access primary and default, the widening action named by its effect) backed by epic 4's confirm token (4.3), which the dialog receives over its own session's WebSocket (arch AD-15); epics 6, 7, 8 and 9 reuse the dialog. Matches key-seat-sheet.html §1. Batch review (final review 2 UX M9, 2026-11-19): when several widenings are pending on one sheet (for example three capability chips switched on), the sheet shows one 'Review 3 changes…' button and one confirmation lists each by its effect sentence and applies all with one confirm token (arch AD-15); a paid provider row shows its price per call ('≈ <price> per search', from models/prices.yaml) in the menu and in the dialog (final review 2 UX M10)."
+verify = "Playwright adds Read website to a seat and it appears under Readers with its hosts while Sends out gains the host with a highlight; adding the fixture external-effect tool or raising a cap opens the confirmation, where Return keeps current access and nothing changes, and the named widening button applies it as one History entry; for every Company A seat the panel equals the core's computation, D1-E1's listing the sample folder under What leaves this Mac with api.anthropic.com and D1-E2's (local) listing nothing there; a widening call without the confirm token is refused by the API. Switching three capabilities on shows one 'Review 3 changes…'; its dialog lists three effect sentences, Return keeps current access with no file changed, and the named button writes the three changes as one History entry; the fixture Tavily row shows its per-search price in the menu and in the dialog."
+covers = ["R9", "R10", "R19"]
+after = [8, "4.3", "4.8"]
+hitl = false
+risk = "high"
+
+[[entry]]
+id = 17
+type = "story"
+title = "Agent card: identity, capabilities, skills, knowledge and links"
+description = "Turns the AI seat sheet into the Agent card (owner statement B, 2026-11-18; EXPERIENCE.md Seat sheet (Agent card), Identity, Skills, Drop folder, Reference files, Saved links; DESIGN.md Agent card, agent-card-index, skill-card, avatar-tints): sticky section headers in this order (final review 2 UX high 1 and M6, owner delegated 2026-11-19): Identity, Brain, Capabilities, Skills, Tools & connectors, Knowledge & inbox, Tasks (epic 6 story 12), Memory notes, Budget, What this seat can touch, with a compact five-group jump row (Identity, Brain, Powers, Context, Limits; ⌥1–⌥5) instead of a ten-anchor index; Skills, Knowledge & inbox, Memory notes and Budget start collapsed to a one-line summary when empty or unchanged from the template and expand on click or Return, with the What this seat can touch one-line summary pinned at the foot; Identity edits name, role, goal (≤500), backstory (≤2,000) and the avatar tint (six swatches; the seat card on the Org view uses it) as config edits with Undo; seats made with N from a role template arrive with the role's goal, backstory and capabilities; Capabilities (owner addition 2026-11-18; arch AD-46; EXPERIENCE.md Capabilities; redrawn 2026-11-19, final review 2 UX high 1) sits right below Brain as one compact row of nine on/off chips (filled when on, outlined when off, with a pending-amber outline while a switch awaits review), each chip opening a small popover with its one-line 'Lets D1-E2 …' summary and, for the three with a real choice (Web search, Browse & read pages, Crawl), the Provider menu ('Built-in (default)' or an Account of a matching kind with its price, '+ Add Account…' at its foot); a provider label shows on the chip only when it is not the built-in; the Folder access chip's popover (owner folder-access direction, 2026-11-19; EXPERIENCE.md Folder access) lists the seat's linked folders (path, Read only or Read & write, patterns, file count) with + Link folder…, and under each folder the file types found there (the API counts the folder's files by extension through WorkspacePath, epic 4 story 6; read-only, no content read) as badges marked by what the seat's model reads ('PDF ✓ · PNG ✓ · XLSX ✗ needs a model that reads office files'), a 'Text fallback for text-only models' switch, and 'Leaves this Mac → <host>' when the seat's model is a cloud Account; linking a folder, switching Read & write on and linking to a cloud-model seat open story 9's two-step confirmation; switching one on or choosing an Account opens story 9's two-step confirmation naming what the seat may then touch and the host it adds ('Keep current access' the default), switching off is a plain edit with Undo, and the What this seat can touch panel updates live; Skills lists the attached skills as skill cards (name, description, reference-file count, 'asks for' chips: granted plain, ungranted 'not granted' with 'Add in Tools & connectors…' opening story 9's tools library and confirmation) and attaches with S or Attach skill… from the project's skills, detaches with ⌫, both undoable, without ever changing tools or hosts; Knowledge & inbox shows the drop folder from story 3 under 'Inbox · processed once' with Paste links… (writes the pasted URLs as a links-<timestamp>.txt list into the folder) and the skipped-hosts line the API reports, reference files under 'Reference · kept' (Add file… copies the file through the API into .agentic/knowledge/<seat-id>/ and lists it; Remove takes it off the list and asks, defaulting to keep the copy) and saved links grouped by group (Add link… with title, URL and group; a host outside the allow-list reads 'Host not allowed' with Allow host… through story 9's privilege-widening confirmation). Matches key-seat-sheet.html §1 and §4 (Allow host)."
+verify = "Written first, failing: Playwright opens D1-E1's card on the Company A fixture and finds the sections in the order above with the foot summary, and the Capabilities chip row starts within the first 600 px at 1440 × 900 below a visible Brain section; switching Calculate & analyse on opens the confirmation and Return keeps current access with the seat file unchanged, while the named button writes it with one History entry and the touch panel gains its tools; choosing a fixture Tavily Account as Web search provider shows 'D1-E1 may send search queries to api.tavily.com.' first; a new seat from the Analyst template shows its role's switches; a seat with no capabilities block shows only Folder access on; on D1-E2 (local text model, text fallback on) the Folder access popover shows the sample folder Read only with CSV ✓ text · PDF ✓ text layer · PNG ✗ · DOCX ✗ and no Leaves this Mac line, on D1-E1 it shows 'Leaves this Mac → api.anthropic.com', + Link folder… on D1-E1 opens the confirmation naming the folder and the host and Return writes nothing, and switching Read & write on opens the confirmation; ⌥3 scrolls to the Powers group (Capabilities) and focuses its label; a pending chip shows the amber outline and an off switch state, never a half-on one; editing the goal and backstory writes the owner's seat file with one History entry each and ⌘Z restores them; changing the tint repaints the owner's seat card; a seat added with N as Researcher arrives with the role's goal and backstory; attaching the fixture skill whose allowed-tools names read_pdf_url writes skills: [..] only, the card shows 'not granted' on that chip, and the core's computed touch panel and grant set for D1-E1 are byte-identical before and after (and after detaching); Paste links… with three URLs creates one link list in its drop folder and the waiting count rises by one; Add file… puts a copy in .agentic/knowledge/d1-e1/ listed as Kept and Remove with the default leaves the copy on disk; Add link… to unlisted.example shows 'Host not allowed', Return in Allow host… keeps current access and writes nothing, the named widening button adds the host as one History entry; the path completes keyboard-only and axe passes in light and dark."
+covers = ["R18", "R19", "R21"]
+after = [9, "1.12", "2.9"]
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 10
+type = "story"
+title = "Add, move and remove seats and teams"
+description = "N on a selected seat (or + Add seat on a team box) opens the add-seat popover (final review 2 UX high 2, owner delegated 2026-11-19; EXPERIENCE.md Add a seat in under 60 seconds; key-seat-sheet.html §5): Name, Role template (the eight, with each one's capabilities named in one line), Model pre-filled with the company default (or the role's Recommended model when connected) and Create; Create writes the seat with the role's instructions, goal, backstory, capabilities, default tools and budget as one config edit (a shipped role template's capabilities need no confirmation, arch AD-15) and selects the new card, the Agent card staying closed unless the owner opens it with Return (the card is for editing, not creating); seats re-parent by drag, ⌥↑/⌥↓ and 'Move to…'; Duplicate and Remove sit in the context menu, and removing a seat used in a workflow asks first; teams are added and removed (only when empty); each change is one config edit with Undo, and a new card slides from its parent. Matches key-org.html §2 and the Role template menu in EXPERIENCE.md (spine-only)."
+verify = "Playwright adds a Writer seat under a selected seat with N, renames it and closes the sheet within 60 s of scripted time by mouse and again by keyboard alone; re-parenting by drag and by ⌥↓ writes the same file change; removing a seat used in a workflow asks first; ⌘Z undoes each change; removing a non-empty team is refused with its reason. (owner-timed acceptance, 2026-11-19) Playwright creates a Researcher seat through the popover with three keystrokes after N (type name, choose role, Return) and the seat file holds the role's capabilities with no confirmation dialog shown; at story 15's demo the owner, timed by the test harness's stopwatch page, adds a seat from a role template in under 60 seconds by mouse and again by keyboard, and the two times are recorded in docs/design-qa.md."
+covers = ["R3", "R23"]
+after = [9]
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 11
+type = "story"
+title = "Import dialog with its diff"
+description = "An Import department dialog (from ⌘K, and used by the wizard) shows epic 4's import Proposal: every file it adds and, by name, every tool, MCP server, schedule and egress host, that schedules arrive paused, and 'Nothing runs until you review the diff'; Apply needs a real pointer or key event and privilege-widening parts go through story 9's confirmation; Dismiss discards; instruction text written outside the project (seat instructions, goals, backstories, SKILL.md and skill reference files) is shown in full under its flag, and epic 9 story 16 reuses this dialog for skill imports (owner statement B, 2026-11-18). Matches key-states-keyboard.html §1 (Template import) and the Template or department import state in EXPERIENCE.md. The diff also names, from epic 4 story 17's classifier, every capability an imported seat switches on, its provider Accounts, accepts entries, hand-offs, event triggers, grants and any AI reviewer replacing a human gate (final review 2 security H3, 2026-11-19)."
+verify = "Playwright imports a shared department zip with 2 tools, 1 MCP server spec and a schedule: the dialog lists each, Apply opens the second confirmation, and after confirming the files exist and the schedule shows paused; Dismiss leaves the project unchanged; the apply route refuses a call without the confirm token issued to the dialog. An imported seat whose capabilities switch Web search on is listed under 'Turns on' with its effect sentence and needs the confirmation."
+covers = ["R17"]
+after = [10, "4.11"]
+hitl = false
+risk = "high"
+
+[[entry]]
+id = 12
+type = "story"
+title = "First-run wizard: template, test and the org chart"
+description = "Completes story 16's wizard with steps 3 and 4: template (Blank or \"Sample company: Company A (two departments)\", each card stating what it adds, the sample clearly labelled as a sample; applied as epic 4's import Proposal by the owner's Continue, which carries the confirm token issued to the wizard's session because a template adds tools and hosts) and a short test where each seat answers one short prompt as a manual run under a small cap with time and cost; the test's estimate range ('About ₹1–2 in total · rough, no history') shows before Start test, and the final figure is shown against it; an unavailable model falls back in words; a local model still loading reads 'Loading gpt-oss-20b in LM Studio… 0:42' with elapsed time and never fails on time alone: after 30 seconds the row offers Keep waiting (another 2 minutes) and Skip this seat, and Skip test stays available throughout; a local model that answers but fails the tool-call probe says 'Answered, but tool calls not tested yet. D1-E1 uses its fallback if it struggles.' and never blocks; 'Open my org chart' lands on the populated, collapsed Org view; quitting resumes at the same step; the whole wizard targets under 10 minutes (EXPERIENCE.md Time targets). Matches key-first-run.html and EXPERIENCE.md State Patterns (Wizard: slow local model load; Wizard: model not tool-capable). Step 4's test run on the zero-key path shows its cost as zero in the company currency with tokens and time (key-first-run.html step 4, restated 2026-11-19)."
+verify = "Playwright on an empty folder with FakeLlm and recorded LM Studio fixtures completes all four steps by keyboard alone and lands on the Company A org chart with the meter showing the test spend; the test step shows its estimate range before Start test and the final figure is inside it; a seat whose model is unavailable runs on the recommended one and says so; a FakeLlm local seat delayed 45 s shows the loading row with elapsed time, offers Keep waiting and Skip this seat at 30 s, and completes when kept waiting; a scripted probe failure shows the tool-call sentence and finishing is not blocked; a reload mid-wizard resumes at the same step; the template's schedule shows paused with a Resume offer. On the zero-key path step 4 reads 'Cost 0' in the company currency's format with tokens and time."
+covers = ["R1"]
+after = [7, 11, 16]
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 13
+type = "story"
+title = "Palette, shortcuts and calm states"
+description = "⌘K palette (actions, places, seats and runs; run actions show the estimate line and start only on Return), ⌘1–⌘8 for shipped surfaces, the ? keyboard map, single-key shortcuts acting only on their surface and switchable off in Settings › General (with the theme override), stacking rules (one sheet plus one popover, ⌘[ back), the sidebar Teams list with status dot and weekly cost, cold-load skeletons, one-sentence empty states and the reconnect page when the server stops; the layout holds at 200% zoom and below 1024 px. Matches key-states-keyboard.html §1–4. Server unreachable in browser mode reads 'The app is not running. Open Agentic Manager to reconnect.' with Reopen the app (a custom URL scheme the desktop and login item register) and a link to Settings › About; no terminal command appears in the UI, only in docs (final review 2 UX high 4, 2026-11-19)."
+verify = "Playwright reaches every shipped surface by sidebar, ⌘K and ⌘1–⌘8; a run action in ⌘K shows its estimate and starts only on Return; with single-key shortcuts off, N does nothing; stopping the server shows the reconnect page and restarting reconnects on its own; with the LM Studio fixture stopped, D1-E1's card shows the amber dot and 'LM Studio is not running. D1-E1 will use its fallback, Claude Haiku (about ₹2 per run).' with Use fallback this time; a cold load past 3 s keeps its skeleton and then shows 'Still loading…' instead of a spinner; each sentence matches EXPERIENCE.md State Patterns word for word; axe passes on every surface in light and dark; at 200% zoom there is no horizontal scroll at 1280 px. The reconnect page shows no 'agentic serve' or other command text."
+covers = ["R13", "R16"]
+after = [12]
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 18
+type = "story"
+title = "Hand-offs and review gates on the org chart"
+description = "Matches `mockups/key-org.html` (hand-off lines, as Sally updates it for the 2026-11-18 REPLAN): the org chart draws each declared cross-department hand-off (epic 3 story 15) as a directed line between team boxes, labelled with its payload, with the reviewing seat's chip when the hand-off has a review gate (epic 3 story 16), distinct from story 2's reporting lines and epic 7's dotted grant lines; lines show only for the selected (or hovered) department, never all at once, and grant lines are not drawn on the canvas except on hover of a team (they live in the Team sheet; final review 2 UX M5, owner delegated 2026-11-19); when a grant and a hand-off join the same pair of teams they draw as one line labelled with both, and in seat-card mode attach to the steps' seats; every line is focusable in the ARIA tree (Tab from a team box), announced as '<sender> hands <payload> to <receiver>[, reviewed by <seat>]'; selecting a line opens a side panel with the workflow and step, payload, review gate, the receiving department's acceptance and the last delivery (time, run, taint) linking to the run view; Add hand-off… and Remove from the panel, and an acceptance change in the Team sheet, open story 9's two-step privilege-widening confirmation and write the files with History and Undo; reduced motion and both themes follow DESIGN.md."
+verify = "Written first, failing: Playwright on the Company A fixture shows the D2 → D1 and D1 → D2 lines when D2 (or D1) is selected and no hand-off line for an unselected department, labelled 'Document A' and with D1-Head's review chip on the hand-back; keyboard Tab reaches each line and the accessibility tree announces 'D2 hands Document A to D1'; the panel lists the workflow f1, payload, review gate, D1's acceptance and the last delivery with its taint after a FakeLlm run; Add hand-off… opens the confirmation where Return changes nothing and the widening button writes one History entry undone by ⌘Z; visual snapshots match key-org.html's hand-off state in light and dark; axe finds no violation."
+covers = ["R20"]
+after = [10, 2, "3.15", "3.16"]
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 14
+type = "story"
+title = "Refactor sweep"
+description = "Cleanup only, scoped at its start from the plans and review findings this epic deferred: no new behaviour; scope pushed out of another story becomes a new story."
+verify = "`just check`, the web lint and unit tests and Playwright on main are green, and every deferred finding from this epic is closed or named in a new story."
+covers = []
+after = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 16, 17, 18]
+hitl = false
+risk = "low"
+
+[[entry]]
+id = 15
+type = "story"
+title = "Org and seats end to end and design QA"
+description = "Closing end-to-end suite: Playwright runs UJ-2 (wizard to first run on FakeLlm), Flow 4 (meter amber, ⌘. stop) and Flow 5 (a Writer seat in under 60 s) in light and dark, by mouse and by keyboard only, with axe; records the 30-seat frame rate and interaction latencies against RULE-18; captures each mocked screen for design QA. Owner steps: design QA at the milestone demo against key-first-run, key-org, key-seat-sheet, key-models-doctor-history §1 and key-states-keyboard; on the owner's Mac, timing the wizard (target under 10 minutes) and timing Flow 5 in person, a new seat from a role template in under 60 seconds, once by mouse and once by keyboard (final review UX high 1); and recording findings and both times against EXPERIENCE.md Time targets."
+verify = "The three flows pass in CI in both themes and keyboard-only with no axe violation; the 30-seat trace shows 60 fps and interactions under 100 ms; the owner's design QA record marks each mock passed or names a new story, and records the wizard time and the owner's own Flow 5 times, each seat under 60 seconds or a new story naming what slowed him."
+covers = ["R15"]
+after = [14]
+hitl = true
+risk = "medium"

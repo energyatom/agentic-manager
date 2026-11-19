@@ -1,0 +1,482 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><title>Seat side sheet — the Agent card — Agentic Manager key screens</title>
+<style>
+/* Governing spine sections: EXPERIENCE.md Component Patterns (Seat sheet (Agent card), Identity, Capabilities, Skills, Tools & connectors, Drop folder, Reference files, Saved links, Tasks, Account › Model picker, What this seat can touch, Privilege-widening confirmation); Safety Surfaces (Skills never widen; Links and reference files); DESIGN.md Components (side-sheet, agent-card-index, capability-row, skill-card, avatar-tints, capability-chip, proposal-card-risk); architecture AD-27, AD-30, AD-38, AD-45, AD-46
+   Spines (DESIGN.md + EXPERIENCE.md) win on any conflict with this mock. Static, offline, no JS. */
+
+:root{--font:-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI Variable Text","Segoe UI",system-ui,sans-serif;
+--mono:ui-monospace,"SF Mono",SFMono-Regular,Menlo,Consolas,monospace;}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:var(--font);font-size:13px;line-height:20px;background:#DCDCE0;color:#1D1D1F;padding:32px;-webkit-font-smoothing:antialiased}
+.theme{--bg:#F5F5F7;--surface:#FFFFFF;--surface-2:#FAFAFB;--sidebar:#ECECEF;--ink:#1D1D1F;--ink-2:#5E5E64;--ink-3:#707075;
+--hair:#E2E2E7;--control:#8E8E93;--accent:#0A63E0;--accent-fill:#0A63E0;--on-accent:#FFFFFF;--accent-soft:#E8F0FD;
+--ok:#1A7F45;--warn:#8A5200;--warn-dot:#E59A00;--warn-fill:#FFF3DC;--err:#B3261E;--err-fill:#FDECEC;--untrusted:#FFF8E6;--untrusted-edge:#D9B44A;
+--shadow-1:0 1px 2px rgba(0,0,0,.06),0 0 0 .5px rgba(0,0,0,.06);--shadow-2:0 8px 28px rgba(0,0,0,.12),0 0 0 .5px rgba(0,0,0,.08);--scrim:rgba(0,0,0,.18);
+color:var(--ink)}
+.theme.dark{--bg:#161618;--surface:#1E1E21;--surface-2:#252528;--sidebar:#1A1A1C;--ink:#F2F2F5;--ink-2:#A1A1A8;--ink-3:#8A8A91;
+--hair:#2E2E33;--control:#6A6A72;--accent:#4C94FF;--accent-fill:#2468D6;--on-accent:#FFFFFF;--accent-soft:#1F2A3D;
+--ok:#4CC27E;--warn:#F0B44C;--warn-dot:#F0B44C;--warn-fill:#3A2C12;--err:#FF7B72;--err-fill:#3A1D1D;--untrusted:#2B2616;--untrusted-edge:#8C7330;
+--shadow-1:0 0 0 .5px rgba(255,255,255,.08);--shadow-2:0 12px 32px rgba(0,0,0,.5),0 0 0 .5px rgba(255,255,255,.1);--scrim:rgba(0,0,0,.4)}
+h1.page{font-size:22px;line-height:28px;font-weight:600;margin:0 0 8px;color:#1D1D1F}
+p.lede{color:#4A4A50;max-width:900px;margin-bottom:24px}
+.caption{font-size:12px;color:#4A4A50;margin:8px 0 32px;max-width:1100px}
+.caption b{color:#1D1D1F}
+.row{display:flex;gap:24px;align-items:flex-start;flex-wrap:wrap}
+/* window */
+.win{width:1280px;height:780px;border-radius:12px;overflow:hidden;box-shadow:0 24px 60px rgba(0,0,0,.18),0 0 0 .5px rgba(0,0,0,.2);display:grid;grid-template-columns:216px 1fr;background:var(--bg);position:relative}
+.win.sm{width:960px;height:640px}
+.win.tall{height:1010px}
+.side{background:var(--sidebar);border-right:.5px solid var(--hair);padding:12px 8px;display:flex;flex-direction:column;gap:2px}
+.lights{display:flex;gap:8px;padding:4px 8px 16px}.lights i{width:12px;height:12px;border-radius:50%;background:#FF5F57;display:block}.lights i:nth-child(2){background:#FEBC2E}.lights i:nth-child(3){background:#28C840}
+.nav{display:flex;align-items:center;gap:8px;padding:4px 8px;border-radius:6px;color:var(--ink);height:28px}
+.nav .ic{width:16px;text-align:center;color:var(--ink-2);font-size:12px}
+.nav.on{background:var(--accent-soft);color:var(--accent);font-weight:600}.nav.on .ic{color:var(--accent)}
+.nav .badge{margin-left:auto;font-size:11px;font-weight:600;color:var(--ink-2);font-variant-numeric:tabular-nums}
+.nav.on .badge{color:var(--accent)}
+.sidehead{font-size:11px;font-weight:600;color:var(--ink-3);padding:16px 8px 4px;letter-spacing:.02em}
+.main{display:grid;grid-template-rows:48px 1fr;min-width:0;position:relative}
+.tb{display:flex;align-items:center;gap:8px;padding:0 16px;border-bottom:.5px solid var(--hair);background:var(--surface)}
+.co{font-weight:600;font-size:14px}
+.meter{display:inline-flex;align-items:center;gap:6px;height:24px;padding:0 10px 0 6px;border-radius:12px;background:var(--surface-2);box-shadow:inset 0 0 0 .5px var(--hair);font-variant-numeric:tabular-nums;font-size:12px;color:var(--ink-2)}
+.meter b{color:var(--ink);font-weight:600}
+.meter.amber{background:var(--warn-fill);color:var(--warn)}.meter.amber b{color:var(--warn)}
+.meter.stop{background:var(--err-fill);color:var(--err)}.meter.stop b{color:var(--err)}
+.meter.run b{color:var(--ink)}
+.sp{flex:1}
+.kbd{font-family:var(--font);font-size:11px;color:var(--ink-3);border:.5px solid var(--control);border-radius:4px;padding:0 4px;line-height:16px;display:inline-block}
+.btn{display:inline-flex;align-items:center;gap:6px;height:28px;padding:0 12px;border-radius:6px;font-size:13px;font-weight:500;background:var(--surface);color:var(--ink);box-shadow:inset 0 0 0 .5px var(--control);white-space:nowrap}
+.btn.pri{background:var(--accent-fill);color:var(--on-accent);box-shadow:none}
+.btn.ghost{box-shadow:none;background:transparent;color:var(--ink-2)}
+.btn.stop{color:var(--err);box-shadow:inset 0 0 0 .5px var(--control)}
+.btn.danger{background:var(--err);color:#fff;box-shadow:none}
+.btn.sm{height:24px;padding:0 8px;font-size:12px}
+.content{overflow:hidden;position:relative;background:var(--bg)}
+.pad{padding:24px}
+.h2{font-size:17px;line-height:24px;font-weight:600}
+.h3{font-size:13px;font-weight:600}
+.sub{color:var(--ink-2)}
+.mute{color:var(--ink-3)}
+.small{font-size:12px;line-height:16px}
+.xs{font-size:11px;line-height:16px}
+.num{font-variant-numeric:tabular-nums}
+.mono{font-family:var(--mono);font-size:12px;line-height:18px}
+.card{background:var(--surface);border-radius:10px;box-shadow:var(--shadow-1)}
+.sep{height:.5px;background:var(--hair);margin:12px 0}
+.dot{width:8px;height:8px;border-radius:50%;display:inline-block;background:var(--control);flex:none}
+.dot.run{background:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
+.dot.ok{background:var(--ok)}.dot.wait{background:var(--warn-dot)}.dot.err{background:var(--err)}.dot.idle{background:var(--control)}
+.pill{display:inline-flex;align-items:center;gap:4px;height:20px;padding:0 8px;border-radius:10px;font-size:11px;font-weight:500;background:var(--surface-2);box-shadow:inset 0 0 0 .5px var(--hair);color:var(--ink-2);white-space:nowrap}
+.pill.acc{background:var(--accent-soft);color:var(--accent);box-shadow:none}
+.pill.warn{background:var(--warn-fill);color:var(--warn);box-shadow:none}
+.pill.err{background:var(--err-fill);color:var(--err);box-shadow:none}
+.pill.you{background:var(--ink);color:var(--surface);box-shadow:none;font-weight:600}
+.chip{display:inline-flex;align-items:center;gap:4px;height:20px;padding:0 6px;border-radius:4px;font-size:11px;color:var(--ink-2);box-shadow:inset 0 0 0 .5px var(--control)}
+.chip.t{color:var(--ink);background:var(--surface-2)}
+.chip.t::before{content:"✓";color:var(--ok);font-weight:700}
+.chip.k::before{content:"○";color:var(--ink-3)}
+.chip.no{color:var(--warn);box-shadow:inset 0 0 0 .5px var(--warn-dot)}
+.chip.no::before{content:"!";font-weight:700}
+.av{width:28px;height:28px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;font-size:12px;font-weight:600;color:#fff;flex:none}
+.av.s{width:20px;height:20px;font-size:10px}
+.av.ai{background:linear-gradient(135deg,#7D8597,#5C6273)}
+.av.h{background:linear-gradient(135deg,#3A3A3F,#1D1D1F);box-shadow:0 0 0 2px var(--surface),0 0 0 3px var(--ink)}
+.dark .av.h{background:linear-gradient(135deg,#E8E8EC,#BDBDC4);color:#1D1D1F}
+/* seat card */
+.seat{position:absolute;width:192px;background:var(--surface);border-radius:10px;box-shadow:var(--shadow-1);padding:10px 12px}
+.seat .top{display:flex;gap:8px;align-items:center}
+.seat .nm{font-weight:600;font-size:13px;line-height:16px}
+.seat .rl{font-size:11px;line-height:14px;color:var(--ink-2)}
+.seat .occ{margin-top:8px;font-size:12px;line-height:16px;color:var(--ink-2);display:flex;gap:6px;align-items:center}
+.seat .st{margin-top:4px;font-size:12px;line-height:16px;display:flex;gap:6px;align-items:center;justify-content:space-between}
+.seat.sel{box-shadow:0 0 0 2px var(--accent),var(--shadow-1)}
+.seat.human{background:var(--surface-2);box-shadow:inset 0 0 0 .5px var(--control)}
+.team{position:absolute;background:var(--surface);border-radius:12px;box-shadow:var(--shadow-1);padding:12px 14px}
+.team .nm{font-weight:600;font-size:14px}
+.teamx{position:absolute;border-radius:14px;background:rgba(127,127,140,.06);box-shadow:inset 0 0 0 .5px var(--hair)}
+.teamx .lbl{position:absolute;left:14px;top:10px;font-size:12px;font-weight:600;color:var(--ink-2);display:flex;gap:8px;align-items:center}
+.canvas{position:absolute;inset:0;background-image:radial-gradient(var(--hair) 1px,transparent 1px);background-size:16px 16px}
+svg.wires{position:absolute;inset:0;pointer-events:none}
+.wire{stroke:var(--control);stroke-width:1;fill:none}
+.grant{stroke:var(--accent);stroke-width:1.25;fill:none;stroke-dasharray:3 4}
+.adv{stroke:var(--ink-3);stroke-width:1;fill:none;stroke-dasharray:2 3}
+.glabel{position:absolute;font-size:11px;background:var(--surface);color:var(--accent);padding:0 6px;border-radius:8px;box-shadow:inset 0 0 0 .5px var(--accent)}
+.note{position:absolute;font-size:11px;line-height:16px;background:var(--surface);border-radius:6px;padding:4px 8px;box-shadow:inset 0 0 0 .5px var(--control);color:var(--ink-2)}
+.zoomctl{position:absolute;right:16px;bottom:16px;display:flex;gap:2px;background:var(--surface);border-radius:8px;box-shadow:var(--shadow-1);padding:2px}
+.zoomctl span{width:28px;height:24px;display:flex;align-items:center;justify-content:center;color:var(--ink-2);font-size:12px}
+/* sheet */
+.scrim{position:absolute;inset:0;background:var(--scrim)}
+.sheet{position:absolute;top:0;right:0;bottom:0;width:440px;background:var(--surface);box-shadow:var(--shadow-2);overflow:hidden;display:flex;flex-direction:column}
+.sheet .hd{padding:16px 20px;border-bottom:.5px solid var(--hair);display:flex;gap:12px;align-items:center}
+.sheet .bd{padding:4px 20px 20px;overflow:hidden;flex:1}
+.sec{padding:14px 0;border-bottom:.5px solid var(--hair)}
+.sec:last-child{border-bottom:none}
+.sec .lab{font-size:11px;font-weight:600;color:var(--ink-3);letter-spacing:.02em;margin-bottom:8px;display:flex;justify-content:space-between}
+.field{height:28px;border-radius:6px;box-shadow:inset 0 0 0 .5px var(--control);padding:0 8px;display:flex;align-items:center;gap:8px;background:var(--surface)}
+.ta{border-radius:6px;box-shadow:inset 0 0 0 .5px var(--control);padding:8px;font-size:12px;line-height:18px;color:var(--ink);background:var(--surface)}
+.menu{position:absolute;background:var(--surface);border-radius:10px;box-shadow:var(--shadow-2);padding:6px;width:420px}
+.menu .grp{font-size:11px;font-weight:600;color:var(--ink-3);padding:8px 8px 4px;display:flex;gap:8px;align-items:center}
+.menu .it{padding:6px 8px;border-radius:6px;display:flex;flex-direction:column;gap:4px}
+.menu .it.on{background:var(--accent-soft)}
+.menu .it .l1{display:flex;align-items:center;gap:8px}
+.chips{display:flex;gap:4px;flex-wrap:wrap}
+.list{display:flex;flex-direction:column}
+.li{display:flex;gap:10px;align-items:flex-start;padding:10px 12px;border-bottom:.5px solid var(--hair)}
+.li.on{background:var(--accent-soft)}
+.well{border-radius:8px;background:var(--surface-2);box-shadow:inset 0 0 0 .5px var(--hair);padding:10px 12px}
+.untr{border-radius:8px;background:var(--untrusted);border-left:3px solid var(--untrusted-edge);padding:8px 12px;background-image:repeating-linear-gradient(135deg,transparent 0 6px,rgba(217,180,74,.07) 6px 12px)}
+.untr .tag{font-size:11px;font-weight:600;color:var(--warn);display:flex;gap:6px;align-items:center;margin-bottom:4px}
+.grid{width:100%;border-collapse:collapse;font-size:12px}
+.grid th{position:sticky;top:0;text-align:left;font-weight:600;color:var(--ink-2);font-size:11px;padding:6px 10px;border-bottom:.5px solid var(--hair);background:var(--surface-2);white-space:nowrap}
+.grid td{padding:7px 10px;border-bottom:.5px solid var(--hair);white-space:nowrap;vertical-align:middle}
+.grid.wrap td{white-space:normal}
+.grid tr.on td{background:var(--accent-soft)}
+.tabs{display:flex;gap:4px}
+.tab{height:26px;padding:0 10px;border-radius:6px;display:flex;align-items:center;font-size:12px;color:var(--ink-2)}
+.tab.on{background:var(--surface);color:var(--ink);font-weight:600;box-shadow:var(--shadow-1)}
+.seg{display:inline-flex;background:var(--surface-2);border-radius:7px;padding:2px;box-shadow:inset 0 0 0 .5px var(--hair)}
+.seg span{height:22px;padding:0 10px;border-radius:5px;display:flex;align-items:center;font-size:12px;color:var(--ink-2)}
+.seg span.on{background:var(--surface);color:var(--ink);font-weight:600;box-shadow:var(--shadow-1)}
+.pop{position:absolute;background:var(--surface);border-radius:10px;box-shadow:var(--shadow-2);padding:14px}
+.toast{position:absolute;left:50%;bottom:20px;transform:translateX(-50%);background:var(--ink);color:var(--surface);border-radius:8px;padding:8px 12px;display:flex;gap:12px;align-items:center;font-size:12px;box-shadow:var(--shadow-2)}
+.toast b{color:var(--surface)}
+.toast .u{color:var(--surface);font-weight:600;text-decoration:underline}
+.step{display:grid;grid-template-columns:28px 1fr auto;gap:12px;padding:12px 14px;background:var(--surface);border-radius:10px;box-shadow:var(--shadow-1);align-items:start}
+.step .n{width:24px;height:24px;border-radius:50%;background:var(--surface-2);box-shadow:inset 0 0 0 .5px var(--control);display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:600;color:var(--ink-2)}
+.step.done .n{background:var(--ok);color:#fff;box-shadow:none}
+.step.running .n{background:var(--accent-fill);color:#fff;box-shadow:0 0 0 4px var(--accent-soft)}
+.step.waiting .n{background:var(--warn-dot);color:#1D1D1F;box-shadow:none}
+.handoff{display:flex;align-items:center;gap:8px;padding:4px 0 4px 26px;font-size:11px;color:var(--ink-3)}
+.handoff .ln{width:1px;height:16px;background:var(--control);margin-right:6px}
+.handoff.loop{color:var(--ink-2)}
+.handoff.gate{color:var(--warn)}
+.kpi{font-size:28px;line-height:32px;font-weight:600;font-variant-numeric:tabular-nums}
+.bar{height:6px;border-radius:3px;background:var(--hair);overflow:hidden}.bar i{display:block;height:100%;background:var(--accent);border-radius:3px}
+.wiz{width:620px;height:520px;border-radius:12px;background:var(--surface);box-shadow:0 24px 60px rgba(0,0,0,.16),0 0 0 .5px rgba(0,0,0,.18);padding:32px 40px;position:relative;display:flex;flex-direction:column}
+.wiz .steps{display:flex;gap:6px;margin-bottom:24px}.wiz .steps i{height:4px;flex:1;border-radius:2px;background:var(--hair)}.wiz .steps i.on{background:var(--accent)}
+.wiz .t{font-size:22px;line-height:28px;font-weight:600;margin-bottom:6px}
+.wiz .foot{margin-top:auto;display:flex;justify-content:space-between;align-items:center}
+.opt{border-radius:10px;box-shadow:inset 0 0 0 .5px var(--control);padding:14px 16px;display:flex;gap:12px;align-items:flex-start}
+.opt.on{box-shadow:inset 0 0 0 2px var(--accent);background:var(--accent-soft)}
+.acct{border-radius:10px;box-shadow:inset 0 0 0 .5px var(--hair);padding:12px 14px;display:flex;gap:12px;align-items:center;background:var(--surface-2)}
+.logo{width:28px;height:28px;border-radius:7px;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;color:#fff;flex:none}
+.cmd{position:absolute;left:50%;top:72px;transform:translateX(-50%);width:560px;background:var(--surface);border-radius:12px;box-shadow:var(--shadow-2);overflow:hidden}
+.cmd .in{height:48px;display:flex;align-items:center;padding:0 16px;font-size:15px;border-bottom:.5px solid var(--hair);gap:8px}
+.cmd .r{padding:8px 16px;display:flex;align-items:center;gap:10px}
+.cmd .r.on{background:var(--accent-soft)}
+.state{width:300px;height:200px;border-radius:12px;background:var(--surface);box-shadow:var(--shadow-1);padding:20px;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;gap:12px;position:relative;overflow:hidden}
+.skel{background:linear-gradient(90deg,var(--hair),var(--surface-2));border-radius:4px;height:10px}
+.cap{position:absolute;top:8px;left:12px;font-size:10px;font-weight:600;color:var(--ink-3);letter-spacing:.04em;text-transform:uppercase}
+.proposal{flex:none;border-radius:10px;box-shadow:inset 0 0 0 .5px var(--control);overflow:hidden;background:var(--surface)}
+.proposal .ph{padding:10px 12px;display:flex;gap:8px;align-items:center;border-bottom:.5px solid var(--hair)}
+.proposal .diff{font-family:var(--mono);font-size:11px;line-height:18px;padding:8px 12px;background:var(--surface-2)}
+.proposal .diff .m{color:var(--err)}.proposal .diff .p{color:var(--ok)}
+.proposal .pf{padding:8px 12px;display:flex;gap:8px;justify-content:flex-end;border-top:.5px solid var(--hair)}
+.proposal.risk{box-shadow:inset 0 0 0 1.5px var(--warn-dot)}
+.msg{padding:8px 12px;border-radius:10px;max-width:92%}
+.msg.me{background:var(--accent-fill);color:#fff;margin-left:auto}
+.cite{display:inline-flex;align-items:center;height:18px;padding:0 6px;border-radius:4px;background:var(--accent-soft);color:var(--accent);font-size:11px;font-weight:500;margin-right:4px}
+/* cross-department primitives (added 2026-11-18, reference company replan) */
+.flow{stroke:var(--ink-2);stroke-width:1.25;fill:none;stroke-dasharray:7 4}
+.flow.hot{stroke:var(--ink);stroke-width:1.5}
+.flabel{position:absolute;font-size:11px;line-height:18px;background:var(--surface);color:var(--ink-2);padding:0 7px;border-radius:9px;box-shadow:inset 0 0 0 .5px var(--control);white-space:nowrap}
+.flabel b{color:var(--ink);font-weight:600}
+.dept{display:inline-flex;align-items:center;height:16px;padding:0 6px;border-radius:4px;font-size:10px;font-weight:600;letter-spacing:.02em;color:var(--ink-2);box-shadow:inset 0 0 0 .5px var(--control);background:var(--surface);white-space:nowrap}
+.legend{position:absolute;display:flex;gap:14px;align-items:center;font-size:11px;color:var(--ink-3)}
+.legend svg{vertical-align:middle;margin-right:4px}
+.xhand{display:flex;align-items:center;gap:8px;padding:4px 0 4px 26px;font-size:11px;color:var(--ink-2)}
+.xhand .ln{width:1px;height:16px;background:var(--ink-2);margin-right:6px}
+.xhand .arrow{color:var(--ink-2)}
+.fan{display:grid;gap:8px;padding:10px;border-radius:10px;background:var(--surface-2);box-shadow:inset 0 0 0 .5px var(--hair)}
+.fan .fh{display:flex;align-items:center;gap:8px;font-size:12px}
+.branch{background:var(--surface);border-radius:8px;box-shadow:var(--shadow-1);padding:8px 10px;font-size:12px;line-height:16px;min-width:0}
+.branch .bn{display:flex;gap:6px;align-items:center;font-weight:600;font-size:12px}
+.branch .bm{color:var(--ink-2);font-size:11px;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.branch .bs{display:flex;justify-content:space-between;align-items:center;margin-top:6px;font-size:11px}
+.branch.on{box-shadow:0 0 0 2px var(--accent),var(--shadow-1)}
+.trig{display:flex;align-items:center;gap:8px;padding:8px 12px;border-radius:8px;background:var(--surface);box-shadow:var(--shadow-1);font-size:12px}
+.trig .tg{color:var(--ink-2)}
+.lin{position:relative;padding-left:18px}
+.lin::before{content:"";position:absolute;left:7px;top:6px;bottom:6px;width:1px;background:var(--control)}
+.lnode{position:relative;display:grid;grid-template-columns:auto 1fr auto;gap:8px;align-items:start;padding:7px 10px;border-radius:8px;background:var(--surface);box-shadow:var(--shadow-1);margin-bottom:6px;font-size:12px;line-height:16px}
+.lnode::before{content:"";position:absolute;left:-15px;top:14px;width:9px;height:9px;border-radius:50%;background:var(--surface);box-shadow:inset 0 0 0 1.5px var(--control)}
+.lnode.gate::before{border-radius:2px;transform:rotate(45deg);box-shadow:inset 0 0 0 1.5px var(--warn-dot)}
+.lnode.open{box-shadow:0 0 0 1.5px var(--accent),var(--shadow-1)}
+.lnode .ln1{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.lnode .ln2{color:var(--ink-2);font-size:11px;margin-top:2px}
+.lnode .lr{text-align:right;font-size:11px;color:var(--ink-2);white-space:nowrap;font-variant-numeric:tabular-nums}
+.lin .lin{margin-left:10px}
+
+.win.agent{height:2900px}
+.win.capwin{height:900px}
+.sw{width:30px;height:18px;border-radius:9px;background:var(--control);position:relative;flex:none;display:inline-block}
+.sw::after{content:"";position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:50%;background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.2)}
+.sw.on{background:var(--accent-fill)}.sw.on::after{left:14px}
+.caprow{display:grid;grid-template-columns:1fr auto auto;gap:10px;align-items:center;min-height:44px;padding:4px 0;border-bottom:.5px solid var(--hair)}
+.caprow:last-child{border-bottom:none}
+.prov{font-size:11px;color:var(--ink-2);box-shadow:inset 0 0 0 .5px var(--control);border-radius:5px;padding:0 6px;height:22px;display:inline-flex;align-items:center;gap:4px;background:var(--surface);white-space:nowrap}
+.prov.static{box-shadow:none;background:transparent}
+.freep{font-size:10px;color:var(--ink-2);background:var(--surface-2);box-shadow:inset 0 0 0 .5px var(--hair);border-radius:4px;padding:0 4px;height:16px;display:inline-flex;align-items:center}
+.win.mid{height:880px}
+.sheet .bd.scroll{overflow:hidden}
+.idx{display:flex;gap:0;padding:0 20px;height:30px;align-items:center;border-bottom:.5px solid var(--hair);font-size:10.5px;color:var(--ink-2);white-space:nowrap}
+.idx span{padding:0 3px;height:30px;display:flex;align-items:center}
+.idx span:first-child{padding-left:0}
+.idx span.on{color:var(--accent);font-weight:600;box-shadow:inset 0 -2px 0 var(--accent)}
+.kv2{display:grid;grid-template-columns:84px 1fr;row-gap:6px;column-gap:10px;align-items:baseline}
+.skill{background:var(--surface-2);border-radius:8px;box-shadow:inset 0 0 0 .5px var(--hair);padding:10px 12px}
+.grp{font-size:11px;color:var(--ink-3);margin:8px 0 4px;display:flex;justify-content:space-between}
+.grp:first-of-type{margin-top:0}
+.tch{display:inline-flex;align-items:center;gap:4px;height:22px;padding:0 7px;border-radius:4px;font-size:11px;color:var(--ink);box-shadow:inset 0 0 0 .5px var(--control);background:var(--surface)}
+.tch .h{color:var(--ink-3)}
+.lrow{display:grid;grid-template-columns:1fr auto;gap:8px;padding:5px 0;border-bottom:.5px solid var(--hair);align-items:baseline}
+.lrow:last-child{border-bottom:none}
+.miss{color:var(--warn);box-shadow:inset 0 0 0 .5px var(--warn-dot)}
+.sub2{font-size:11px;font-weight:600;color:var(--ink-2);margin:10px 0 4px;display:flex;justify-content:space-between;align-items:center}
+.foot{border-top:.5px solid var(--hair);padding:8px 20px;font-size:11px;line-height:16px;color:var(--ink-2);background:var(--surface-2)}
+.foot b{color:var(--ink);white-space:nowrap}
+.cb{width:14px;height:14px;border-radius:4px;box-shadow:inset 0 0 0 1px var(--control);display:inline-block;flex:none;background:var(--surface)}
+.cb.on{background:var(--accent-fill);box-shadow:none;position:relative}.cb.on::after{content:'✓';color:#fff;font-size:10px;position:absolute;left:3px;top:-2px}
+.task{display:grid;grid-template-columns:22px 1fr auto;gap:8px;align-items:start;padding:6px 0;border-bottom:.5px solid var(--hair)}
+.task:last-child{border-bottom:none}
+.task .n{width:20px;height:20px;border-radius:50%;box-shadow:inset 0 0 0 .5px var(--control);display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:600;color:var(--ink-2);background:var(--surface-2)}
+.dlg{position:absolute;background:var(--surface);border-radius:12px;box-shadow:var(--shadow-2);overflow:hidden;display:flex;flex-direction:column}
+.dlg .dh{padding:16px 20px 12px;border-bottom:.5px solid var(--hair)}
+.dlg .db{padding:0 20px}
+.dlg .sec{padding:10px 0}
+.dlg .df{padding:12px 20px;border-top:.5px solid var(--hair);display:flex;gap:8px;align-items:center;margin-top:auto}
+.kv{display:grid;grid-template-columns:116px 1fr;row-gap:6px;column-gap:12px;align-items:baseline}
+.difff{font-family:var(--mono);font-size:11px;line-height:17px;background:var(--surface-2);border-radius:8px;padding:8px 10px;color:var(--ok);white-space:pre-wrap}
+</style></head><body>
+<h1 class="page">Seat side sheet — the Agent card</h1><p class="lede">Opened by Return on a selected seat card or a click. The sheet covers the right of the org chart; the chart stays visible and dimmed so the seat keeps its place. Sample seat: D1-E2 in Company A, a local model with a cloud fallback. Every AI seat is one Agent card in ten sections; Capabilities, right after Identity, switches the built-in, free capabilities on and off and picks each one's provider.</p>
+<div class="theme "><div class="win agent"><div class="side"><div class="lights"><i></i><i></i><i></i></div><div class="nav on"><span class="ic">◎</span>Org</div><div class="nav"><span class="ic">▤</span>Inbox<span class="badge">6</span></div><div class="nav"><span class="ic">▷</span>Runs</div><div class="nav"><span class="ic">≡</span>Workflows</div><div class="nav"><span class="ic">▦</span>Tables</div><div class="nav"><span class="ic">◫</span>Dashboards</div><div class="nav"><span class="ic">₹</span>Models & Costs</div><div class="nav"><span class="ic">⚙</span>Settings</div>
+<div class="sidehead">TEAMS</div>
+<div class="nav"><span class="dot run"></span>Department 1<span class="badge">₹66</span></div>
+<div class="nav"><span class="dot ok"></span>Department 2<span class="badge">₹62</span></div>
+<div style="margin-top:auto" class="nav"><span class="ic">◌</span><span class="small sub">Doctor · all good</span></div></div><div class="main"><div class="tb"><span class="co">Company A</span><span class="meter" title="Weekly spend against budget"><svg width="16" height="16" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6" fill="none" stroke="var(--hair)" stroke-width="2"/><circle cx="8" cy="8" r="6" fill="none" stroke="var(--ink-2)" stroke-width="2" stroke-linecap="round" stroke-dasharray="7.9 37.7" transform="rotate(-90 8 8)"/></svg><b>₹128</b> of ₹600 this week</span><span class="sub" style="margin-left:4px">› D1-E2</span><span class="sp"></span>
+<span class="btn ghost sm">Search <span class="kbd">⌘K</span></span>
+<span class="btn sm">✦ Assistant <span class="kbd">⌘J</span></span>
+<span class="btn stop sm">■ Stop everything</span></div>
+<div class="content"><div style="position:absolute;inset:0;opacity:.45"><div class="canvas"></div><svg class="wires" width="100%" height="100%"><path class="wire" d="M532 124 V170"/><path class="wire" d="M360 170 H870"/><path class="wire" d="M360 170 V200"/><path class="wire" d="M870 170 V240"/><path class="wire" d="M360 342 V366"/><path class="wire" d="M154 366 H566"/><path class="wire" d="M154 366 V390"/><path class="wire" d="M360 366 V390"/><path class="wire" d="M566 366 V390"/></svg><div class="seat human" style="left:436px;top:24px;width:192px"><div class="top"><span class="av h">Y</span><div><div class="nm">Owner</div><div class="rl">Company A</div></div></div>
+<div class="occ"><span class="pill you">You</span> <span class="pill">CEO</span></div><div class="st"><span style="display:flex;gap:6px;align-items:center"><span class="dot ok"></span>Goal G1 · this quarter</span></div></div><div class="teamx" style="left:40px;top:200px;width:640px;height:330px"><div class="lbl"><span class="dot run"></span>Department 1 · 4 seats · ₹66 this week
+<span class="pill" style="font-weight:400">◇ Note N1 · 20 days left</span></div></div><div class="seat" style="left:266px;top:240px;width:188px"><div class="top"><span class="av ai" style="background:#4E6478;font-size:11px">H</span><div><div class="nm">D1-Head</div><div class="rl">Head · Department 1</div></div></div>
+<div class="occ"><span class="av s ai" style="background:#444">O</span>GPT · OpenAI</div><div class="st"><span style="display:flex;gap:6px;align-items:center"><span class="dot ok"></span>Done · Document B</span><span class="num sub">₹22</span></div></div><div class="seat" style="left:60px;top:390px;width:188px"><div class="top"><span class="av ai" style="background:#4E6478;font-size:11px">E1</span><div><div class="nm">D1-E1</div><div class="rl">Department 1</div></div></div>
+<div class="occ"><span class="av s ai" style="background:#C96442">A</span>Claude Sonnet · Anthropic</div><div class="st"><span style="display:flex;gap:6px;align-items:center"><span class="dot ok"></span>Done</span><span class="num sub">₹26</span></div></div><div class="seat sel" style="left:266px;top:390px;width:188px"><div class="top"><span class="av ai" style="background:#4E6478;font-size:11px">E2</span><div><div class="nm">D1-E2</div><div class="rl">Department 1</div></div></div>
+<div class="occ"><span class="av s ai" style="background:#3B7D4F">L</span>gpt-oss-20b · On this Mac</div><div class="st"><span style="display:flex;gap:6px;align-items:center"><span class="dot ok"></span>Done</span><span class="num sub">₹0 · 38k tok</span></div></div><div class="seat" style="left:472px;top:390px;width:188px"><div class="top"><span class="av ai" style="background:#4E6478;font-size:11px">E3</span><div><div class="nm">D1-E3</div><div class="rl">Department 1</div></div></div>
+<div class="occ"><span class="av s ai" style="background:#444">O</span>GPT · OpenAI</div><div class="st"><span style="display:flex;gap:6px;align-items:center"><span class="dot ok"></span>Done</span><span class="num sub">₹18</span></div></div><div class="team" style="left:720px;top:240px;width:300px;">
+<div style="display:flex;justify-content:space-between;align-items:center"><span class="nm">Department 2</span><span class="num sub">₹62 this week</span></div>
+<div class="small sub" style="margin-top:4px;display:flex;gap:6px;align-items:center"><span class="dot ok"></span>Done · Document A handed on</div>
+<div style="display:flex;gap:4px;margin-top:10px;align-items:center"><span class="av s ai" style="background:#566352;font-size:9px">H</span><span class="av s ai" style="background:#566352;font-size:9px">E1</span><span class="av s ai" style="background:#566352;font-size:9px">E2</span><span class="av s ai" style="background:#566352;font-size:9px">E3</span><span class="av s ai" style="background:#566352;font-size:9px">E4</span><span class="small sub" style="margin-left:6px">5 seats</span></div></div><div style="position:absolute;left:24px;top:16px" class="seg"><span>Teams</span><span class="on">Seats</span></div><div class="zoomctl"><span>−</span><span>Fit</span><span>+</span></div></div><div class="sheet"><div class="hd"><span class="av ai" style="width:36px;height:36px;background:#4E6478;font-size:13px">E2</span><div style="flex:1"><div class="h2">D1-E2</div><div class="small sub">Department 1 · reports to D1-Head</div></div><span class="pill"><span class="dot ok"></span>Done · ₹0 this week</span><span class="btn ghost sm">Esc</span></div><div class="idx"><span class="on">Identity</span><span class="">Capabilities</span><span class="">Brain</span><span class="">Skills</span><span class="">Tools</span><span class="">Knowledge</span><span class="">Tasks</span><span class="">Memory</span><span class="">Budget</span><span class="">Can touch</span></div>
+<div class="bd scroll"><div class="sec"><div class="lab"><span>IDENTITY</span><span class="sub" style="font-weight:400">Reaches every prompt after the role instructions</span></div>
+<div class="kv2 small">
+<span class="sub">Name · role</span><span>D1-E2 · Reviewer, Department 1</span>
+<span class="sub">Goal</span><span class="ta" style="padding:5px 8px">Review every Document A version that reaches Department 1 against Skill S1, and list each issue with its section and a source link.</span>
+<span class="sub">Backstory</span><span class="ta" style="padding:5px 8px;color:var(--ink-2)">A careful reviewer who reads the whole input before writing, quotes the exact sentence it questions and says plainly when a source is missing. Never guesses a figure.</span>
+<span class="sub">Avatar</span><span style="display:flex;gap:6px;align-items:center"><span class="av s" style="background:#5C6273;font-size:9px">E2</span><span class="av s" style="background:#4E6478;font-size:9px;box-shadow:0 0 0 2px var(--surface),0 0 0 3.5px var(--accent)">E2</span><span class="av s" style="background:#566352;font-size:9px">E2</span><span class="av s" style="background:#6A6157;font-size:9px">E2</span><span class="av s" style="background:#65586E;font-size:9px">E2</span><span class="av s" style="background:#73594E;font-size:9px">E2</span><span class="xs mute" style="margin-left:4px">Initials on a tint</span></span>
+</div></div><div class="sec"><div class="lab"><span>CAPABILITIES · 5 OF 9 ON</span><span class="sub" style="font-weight:400">Built in and free. Add an Account only if you want a different provider.</span></div>
+<div class="caprow"><div><div class="small" style="font-weight:600">Web search</div><div class="xs sub">Lets D1-E2: Search the web through Local search on this computer</div></div><span class="prov">Built-in · Local search <span class="freep">Free · no key</span> <span class="mute">▾</span></span><span class="sw on"></span></div><div class="caprow"><div><div class="small" style="font-weight:600">Browse &amp; read pages</div><div class="xs sub">Lets D1-E2: Open saved links and search results on 4 allowed hosts</div></div><span class="prov">Built-in <span class="freep">Free · no key</span> <span class="mute">▾</span></span><span class="sw on"></span></div><div class="caprow"><div><div class="small" style="font-weight:600">Crawl</div><div class="xs sub">Lets D1-E2: Own Crawler Sources that load whole sites on a schedule</div></div><span class="prov">Built-in <span class="freep">Free · no key</span> <span class="mute">▾</span></span><span class="sw"></span></div><div class="caprow"><div><div class="small" style="font-weight:600">Documents &amp; knowledge</div><div class="xs sub">Lets D1-E2: Read files and scans, search its reference files</div></div><span class="prov">Built-in · local OCR <span class="freep">Free · no key</span> <span class="mute">▾</span></span><span class="sw on"></span></div><div class="caprow"><div><div class="small" style="font-weight:600">Files workspace</div><div class="xs sub">Lets D1-E2: Write drafts and outputs to its own folder</div></div><span class="prov static">Built-in <span class="freep">Free</span></span><span class="sw"></span></div><div class="caprow"><div><div class="small" style="font-weight:600">Tables</div><div class="xs sub">Lets D1-E2: Read Table T1 (grant) and write its own tables</div></div><span class="prov static">Built-in <span class="freep">Free</span></span><span class="sw on"></span></div><div class="caprow"><div><div class="small" style="font-weight:600">Memory</div><div class="xs sub">Lets D1-E2: Keep long-term notes you approve</div></div><span class="prov static">Built-in <span class="freep">Free</span></span><span class="sw on"></span></div><div class="caprow"><div><div class="small" style="font-weight:600">Hand-off &amp; ask</div><div class="xs sub">Lets D1-E2: Ask D1-Head or a seat it hands work to</div></div><span class="prov static">Built-in <span class="freep">Free</span></span><span class="sw"></span></div><div class="caprow"><div><div class="small" style="font-weight:600">Calculate &amp; analyse</div><div class="xs sub">Lets D1-E2: Arithmetic, statistics and read-only queries on its tables</div><div class="xs" style="color:var(--warn);margin-top:2px">⚠ Widens access · D1-E2 may run calculations and read-only queries on Table T1 · <span style="color:var(--accent)">Review and apply…</span></div></div><span class="prov static">Built-in <span class="freep">Free</span></span><span class="sw on" style="opacity:.55"></span></div></div><div class="sec"><div class="lab"><span>BRAIN</span><span class="sub" style="font-weight:400">Instructions · model · fallback</span></div>
+<div class="ta" style="font-size:12px;line-height:17px">Review the Document A version handed to you for {run_date}. Use Skill S1. For each issue give the section, the sentence, why it matters and what to change…</div>
+<div class="xs mute" style="margin-top:4px">Also receives: Owner goal (Goal G1) · guidance Note N1 (20 days left) · 1 memory note · inputs handed across from Department 2</div>
+<div class="field" style="justify-content:space-between;margin-top:8px"><span><span class="av s ai" style="background:#3B7D4F;width:16px;height:16px;font-size:9px">LM</span> LM Studio › <b>gpt-oss-20b</b><span class="pill acc" style="margin-left:6px">On this Mac</span></span><span class="mute">▾</span></div>
+<div class="chips" style="margin-top:6px"><span class="chip t">Tools</span><span class="chip t">Structured output</span><span class="chip t">Context 32k (loaded)</span><span class="chip k">Free (local)</span></div>
+<div style="display:flex;gap:8px;margin-top:6px;align-items:center"><span class="btn sm">Test this model</span><span class="xs mute">Tested 12 Nov · 1 tool call, 1 schema output</span></div>
+<div style="display:flex;gap:8px;margin-top:6px;align-items:center"><span class="small sub" style="width:56px">Fallback</span><div class="field" style="flex:1"><span class="av s ai" style="background:#C96442;width:16px;height:16px;font-size:9px">A</span>&nbsp;Anthropic › <b>&nbsp;Claude Sonnet</b><span class="sp"></span><span class="xs mute">≈ ₹12 a run</span><span class="mute" style="margin-left:6px">▾</span></div></div>
+<div class="xs sub" style="margin-top:6px">More: temperature, max output tokens, output schema ›</div></div><div class="sec"><div class="lab"><span>SKILLS · 1</span><span class="sub" style="font-weight:400">Skills add instructions, never access</span></div>
+<div class="skill"><div style="display:flex;align-items:center;gap:8px"><span class="h3">Skill S1</span><span class="pill" style="height:18px">SKILL.md</span><span class="sp"></span><span class="xs mute">2 reference files</span></div>
+<div class="small sub" style="margin-top:2px">A review checklist: read the input against a fixed list of checks, quote the source for each finding, and rate each issue blocking, fix first or note.</div>
+<div style="display:flex;gap:4px;align-items:center;margin-top:8px;flex-wrap:wrap"><span class="xs mute" style="margin-right:2px">Asks for</span><span class="chip t">Web search</span><span class="chip t">Read website</span><span class="chip miss">! Read PDF from URL · not granted</span></div>
+<div class="xs" style="margin-top:4px;color:var(--warn)">Not granted tools stay off. Add in Tools &amp; connectors… if D1-E2 should have it.</div></div>
+<div style="display:flex;gap:8px;margin-top:8px"><span class="btn sm">Attach skill… <span class="kbd">S</span></span><span class="btn sm ghost">New skill…</span><span class="btn sm ghost">Import skill…</span></div></div><div class="sec"><div class="lab"><span>TOOLS &amp; CONNECTORS</span><span class="sub" style="font-weight:400">Drag from library or press A</span></div>
+<div class="grp"><span>Built-in</span></div>
+<div class="chips"><span class="tch">Web search · Local search <span class="h">this computer → 3 engines</span></span><span class="tch">Write document · Review 2 <span class="h">local</span></span></div>
+<div class="xs mute" style="margin-top:4px">Built-in tools come from Capabilities. <span style="color:var(--accent)">Change in Capabilities ›</span></div>
+<div class="grp"><span>Connectors</span><span>MCP</span></div>
+<div class="chips"><span class="tch">Search S3 <span class="h">search-mcp 1.4.2 · api.exa.ai · declared</span></span></div>
+<div class="grp"><span>Readers</span><span>over saved links and search results</span></div>
+<div class="chips"><span class="tch">Read website <span class="h">4 allowed hosts</span></span><span class="tch">Read URL</span><span class="tch">Search knowledge</span><span class="chip" style="height:22px;border-style:dashed;color:var(--accent)">+ Add tool</span></div>
+<div class="xs mute" style="margin-top:6px">To check pages on a schedule, add a Source that reads D1-E2's saved links. <span style="color:var(--accent)">Open Connectors ›</span></div></div><div class="sec"><div class="lab"><span>KNOWLEDGE &amp; INBOX</span><span class="sub" style="font-weight:400">All read as outside content</span></div>
+<div class="sub2" style="margin-top:0"><span>Inbox · processed once</span><span class="mono" style="font-weight:400">.agentic/drop/d1-e2</span></div>
+<div class="lrow small"><span>file-f1-nov.pdf</span><span class="xs mute">waiting · 14.2 MB</span></div>
+<div class="lrow small"><span>links-18nov.txt <span class="mute">· 6 links</span></span><span class="xs mute">waiting</span></div>
+<div class="xs" style="margin-top:4px;color:var(--warn)">Last run: 2 links skipped · host not allowed: site-e.example, site-f.example · <span style="color:var(--accent)">Allow host…</span></div>
+<div style="display:flex;gap:8px;margin-top:6px;align-items:center"><span class="btn sm">Paste links…</span><span class="btn sm ghost">Reveal in Finder</span><span class="sp"></span><span class="xs mute">Delete after processing ▾</span></div>
+<div class="sub2"><span>Reference · kept</span><span class="btn sm ghost" style="height:20px">Add file…</span></div>
+<div class="lrow small"><span>Reference K1.pdf</span><span><span class="xs mute num">2.1 MB</span> <span class="pill" style="height:18px">Kept</span></span></div>
+<div class="lrow small"><span>Reference K2.xlsx</span><span><span class="xs mute num">48 KB</span> <span class="pill" style="height:18px">Kept</span></span></div>
+<div class="sub2"><span>Saved links · Group L1</span><span class="btn sm ghost" style="height:20px">Add link…</span></div>
+<div class="lrow small"><span>Link 1 · guidance page</span><span class="xs mute mono">site-b.example</span></div>
+<div class="lrow small"><span>Link 2 · reference text</span><span class="xs mute mono">site-c.example</span></div>
+<div class="lrow small"><span>Link 3 · update notices</span><span class="xs mute mono">site-d.example</span></div>
+<div class="lrow small"><span>Link 4 · archive <div class="xs" style="color:var(--warn)">Host not allowed · <span style="color:var(--accent)">Allow host…</span></div></span><span class="xs mute mono">site-g.example</span></div>
+</div><div class="sec"><div class="lab"><span>TASKS · 2</span><span class="sub" style="font-weight:400">Read-only · from workflows</span></div>
+<div class="task small"><span class="n">2</span><div><div><b>Review Document A</b> · Flow F1 · branch 2 of 3</div><div class="xs mute">Starts when Document A is updated (Department 2)</div></div><div class="xs" style="text-align:right"><span class="dot ok"></span> Tue 18 Nov<div class="mute num">₹0 · 52k tok</div></div></div>
+<div class="task small"><span class="n">1</span><div><div><b>Check Table T1 changes</b> · Flow F2</div><div class="xs mute">Starts when Table T1 is updated (Department 2)</div></div><div class="xs" style="text-align:right"><span class="dot ok"></span> Mon 17:06<div class="mute num">₹0 · 9k tok</div></div></div>
+<div class="xs" style="margin-top:4px;color:var(--accent)">Return opens the step in the workflow editor</div></div><div class="sec"><div class="lab"><span>MEMORY NOTES · 2</span><span class="sub" style="font-weight:400">Owner-editable</span></div>
+<div class="small">• Memory note M1: quote the exact sentence for every finding.</div>
+<div class="small" style="margin-top:2px">• Memory note M2: Reference K1 supersedes Link 3 for section 4.</div></div>
+<div class="sec"><div class="lab"><span>BUDGET</span><span class="sub" style="font-weight:400">Stop and ask on breach</span></div>
+<div class="small">₹40 per run · ₹150 per week <span class="mute">· applies when the fallback runs</span></div><div class="bar" style="margin-top:6px"><i style="width:0%"></i></div><div class="xs mute num" style="margin-top:4px">₹0 of ₹150 this week · local runs are free</div></div>
+<div class="sec"><div class="lab"><span>WHAT D1-E2 CAN TOUCH</span><span class="sub" style="font-weight:400">Computed · read-only</span></div>
+<div class="small" style="display:grid;grid-template-columns:76px 1fr;row-gap:4px">
+<span class="sub">Reads</span><span>Pages on 4 allowed hosts, Search S3, its inbox, 2 reference files, Document A (handed across), Table T1 (grant)</span>
+<span class="sub">Writes</span><span>Its own review document</span>
+<span class="sub">Sends out</span><span>Prompts → localhost:1234 (fallback: api.anthropic.com) · searches → Local search on this computer (it sends them to Engine 1, Engine 2, Wikipedia), api.exa.ai (declared) · page reads → site-b, site-c, site-d.example</span>
+<span class="sub">Never</span><span>Email, posts, files outside the project</span></div>
+<div class="xs mute" style="margin-top:4px">Skills are not listed here: they grant nothing.</div></div></div>
+<div class="foot"><span class="dot ok" style="margin-right:4px"></span><b>Can touch</b> · reads 4 hosts, Document A, Table T1 · writes its review · sends to 5 hosts · never email or posts</div></div></div></div></div></div><p class="caption"><b>1 · D1-E2's Agent card (shown unscrolled at full height).</b> Index (⌥1–⌥9, ⌥0 jump): Identity → Capabilities → Brain → Skills → Tools &amp; connectors → Knowledge &amp; inbox → Tasks → Memory notes → Budget → What this seat can touch. Capabilities shows five of nine on, every one on its free Built-in provider (Web search through Local search, no key); Calculate &amp; analyse is being switched on and waits for "Review and apply…", because switching on widens access. Brain runs gpt-oss-20b on this Mac with Claude Sonnet as fallback, and "Also receives" names the input handed across from Department 2. The skill's "asks for" chips never grant: Read PDF from URL stays off. Inbox items are processed once; reference files are kept; saved links open only within the allow-list, and a host outside it offers Allow host…. Tasks are read-only and show what starts each one, including a workflow started by another department. The touch summary stays pinned at the foot. Edits save on blur with an Undo toast.</p><div class="theme "><div class="win capwin"><div class="side"><div class="lights"><i></i><i></i><i></i></div><div class="nav on"><span class="ic">◎</span>Org</div><div class="nav"><span class="ic">▤</span>Inbox<span class="badge">6</span></div><div class="nav"><span class="ic">▷</span>Runs</div><div class="nav"><span class="ic">≡</span>Workflows</div><div class="nav"><span class="ic">▦</span>Tables</div><div class="nav"><span class="ic">◫</span>Dashboards</div><div class="nav"><span class="ic">₹</span>Models & Costs</div><div class="nav"><span class="ic">⚙</span>Settings</div>
+<div class="sidehead">TEAMS</div>
+<div class="nav"><span class="dot run"></span>Department 1<span class="badge">₹66</span></div>
+<div class="nav"><span class="dot ok"></span>Department 2<span class="badge">₹62</span></div>
+<div style="margin-top:auto" class="nav"><span class="ic">◌</span><span class="small sub">Doctor · all good</span></div></div><div class="main"><div class="tb"><span class="co">Company A</span><span class="meter" title="Weekly spend against budget"><svg width="16" height="16" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6" fill="none" stroke="var(--hair)" stroke-width="2"/><circle cx="8" cy="8" r="6" fill="none" stroke="var(--ink-2)" stroke-width="2" stroke-linecap="round" stroke-dasharray="7.9 37.7" transform="rotate(-90 8 8)"/></svg><b>₹128</b> of ₹600 this week</span><span class="sub" style="margin-left:4px">› D1-E2</span><span class="sp"></span>
+<span class="btn ghost sm">Search <span class="kbd">⌘K</span></span>
+<span class="btn sm">✦ Assistant <span class="kbd">⌘J</span></span>
+<span class="btn stop sm">■ Stop everything</span></div>
+<div class="content"><div style="position:absolute;inset:0;opacity:.45"><div class="canvas"></div><svg class="wires" width="100%" height="100%"><path class="wire" d="M532 124 V170"/><path class="wire" d="M360 170 H870"/><path class="wire" d="M360 170 V200"/><path class="wire" d="M870 170 V240"/><path class="wire" d="M360 342 V366"/><path class="wire" d="M154 366 H566"/><path class="wire" d="M154 366 V390"/><path class="wire" d="M360 366 V390"/><path class="wire" d="M566 366 V390"/></svg><div class="seat human" style="left:436px;top:24px;width:192px"><div class="top"><span class="av h">Y</span><div><div class="nm">Owner</div><div class="rl">Company A</div></div></div>
+<div class="occ"><span class="pill you">You</span> <span class="pill">CEO</span></div><div class="st"><span style="display:flex;gap:6px;align-items:center"><span class="dot ok"></span>Goal G1 · this quarter</span></div></div><div class="teamx" style="left:40px;top:200px;width:640px;height:330px"><div class="lbl"><span class="dot run"></span>Department 1 · 4 seats · ₹66 this week
+<span class="pill" style="font-weight:400">◇ Note N1 · 20 days left</span></div></div><div class="seat" style="left:266px;top:240px;width:188px"><div class="top"><span class="av ai" style="background:#4E6478;font-size:11px">H</span><div><div class="nm">D1-Head</div><div class="rl">Head · Department 1</div></div></div>
+<div class="occ"><span class="av s ai" style="background:#444">O</span>GPT · OpenAI</div><div class="st"><span style="display:flex;gap:6px;align-items:center"><span class="dot ok"></span>Done · Document B</span><span class="num sub">₹22</span></div></div><div class="seat" style="left:60px;top:390px;width:188px"><div class="top"><span class="av ai" style="background:#4E6478;font-size:11px">E1</span><div><div class="nm">D1-E1</div><div class="rl">Department 1</div></div></div>
+<div class="occ"><span class="av s ai" style="background:#C96442">A</span>Claude Sonnet · Anthropic</div><div class="st"><span style="display:flex;gap:6px;align-items:center"><span class="dot ok"></span>Done</span><span class="num sub">₹26</span></div></div><div class="seat sel" style="left:266px;top:390px;width:188px"><div class="top"><span class="av ai" style="background:#4E6478;font-size:11px">E2</span><div><div class="nm">D1-E2</div><div class="rl">Department 1</div></div></div>
+<div class="occ"><span class="av s ai" style="background:#3B7D4F">L</span>gpt-oss-20b · On this Mac</div><div class="st"><span style="display:flex;gap:6px;align-items:center"><span class="dot ok"></span>Done</span><span class="num sub">₹0 · 38k tok</span></div></div><div class="seat" style="left:472px;top:390px;width:188px"><div class="top"><span class="av ai" style="background:#4E6478;font-size:11px">E3</span><div><div class="nm">D1-E3</div><div class="rl">Department 1</div></div></div>
+<div class="occ"><span class="av s ai" style="background:#444">O</span>GPT · OpenAI</div><div class="st"><span style="display:flex;gap:6px;align-items:center"><span class="dot ok"></span>Done</span><span class="num sub">₹18</span></div></div><div class="team" style="left:720px;top:240px;width:300px;">
+<div style="display:flex;justify-content:space-between;align-items:center"><span class="nm">Department 2</span><span class="num sub">₹62 this week</span></div>
+<div class="small sub" style="margin-top:4px;display:flex;gap:6px;align-items:center"><span class="dot ok"></span>Done · Document A handed on</div>
+<div style="display:flex;gap:4px;margin-top:10px;align-items:center"><span class="av s ai" style="background:#566352;font-size:9px">H</span><span class="av s ai" style="background:#566352;font-size:9px">E1</span><span class="av s ai" style="background:#566352;font-size:9px">E2</span><span class="av s ai" style="background:#566352;font-size:9px">E3</span><span class="av s ai" style="background:#566352;font-size:9px">E4</span><span class="small sub" style="margin-left:6px">5 seats</span></div></div><div style="position:absolute;left:24px;top:16px" class="seg"><span>Teams</span><span class="on">Seats</span></div><div class="zoomctl"><span>−</span><span>Fit</span><span>+</span></div></div><div class="sheet"><div class="hd"><span class="av ai" style="width:36px;height:36px;background:#4E6478;font-size:13px">E2</span><div style="flex:1"><div class="h2">D1-E2</div><div class="small sub">Department 1 · reports to D1-Head</div></div><span class="pill"><span class="dot ok"></span>Done · ₹0 this week</span><span class="btn ghost sm">Esc</span></div><div class="idx"><span class="">Identity</span><span class="on">Capabilities</span><span class="">Brain</span><span class="">Skills</span><span class="">Tools</span><span class="">Knowledge</span><span class="">Tasks</span><span class="">Memory</span><span class="">Budget</span><span class="">Can touch</span></div>
+<div class="bd scroll"><div class="sec"><div class="lab"><span>CAPABILITIES · 5 OF 9 ON</span><span class="sub" style="font-weight:400">Built in and free. Add an Account only if you want a different provider.</span></div>
+<div class="caprow"><div><div class="small" style="font-weight:600">Web search</div><div class="xs sub">Lets D1-E2: Search the web through Local search on this computer</div></div><span class="prov" style="box-shadow:inset 0 0 0 2px var(--accent)">Built-in · Local search <span class="freep">Free · no key</span> <span class="mute">▴</span></span><span class="sw on"></span></div><div class="caprow"><div><div class="small" style="font-weight:600">Browse &amp; read pages</div><div class="xs sub">Lets D1-E2: Open saved links and search results on 4 allowed hosts</div></div><span class="prov">Built-in <span class="freep">Free · no key</span> <span class="mute">▾</span></span><span class="sw on"></span></div><div class="caprow"><div><div class="small" style="font-weight:600">Crawl</div><div class="xs sub">Lets D1-E2: Own Crawler Sources that load whole sites on a schedule</div></div><span class="prov">Built-in <span class="freep">Free · no key</span> <span class="mute">▾</span></span><span class="sw"></span></div><div class="caprow"><div><div class="small" style="font-weight:600">Documents &amp; knowledge</div><div class="xs sub">Lets D1-E2: Read files and scans, search its reference files</div></div><span class="prov">Built-in · local OCR <span class="freep">Free · no key</span> <span class="mute">▾</span></span><span class="sw on"></span></div><div class="caprow"><div><div class="small" style="font-weight:600">Files workspace</div><div class="xs sub">Lets D1-E2: Write drafts and outputs to its own folder</div></div><span class="prov static">Built-in <span class="freep">Free</span></span><span class="sw"></span></div><div class="caprow"><div><div class="small" style="font-weight:600">Tables</div><div class="xs sub">Lets D1-E2: Read Table T1 (grant) and write its own tables</div></div><span class="prov static">Built-in <span class="freep">Free</span></span><span class="sw on"></span></div><div class="caprow"><div><div class="small" style="font-weight:600">Memory</div><div class="xs sub">Lets D1-E2: Keep long-term notes you approve</div></div><span class="prov static">Built-in <span class="freep">Free</span></span><span class="sw on"></span></div><div class="caprow"><div><div class="small" style="font-weight:600">Hand-off &amp; ask</div><div class="xs sub">Lets D1-E2: Ask D1-Head or a seat it hands work to</div></div><span class="prov static">Built-in <span class="freep">Free</span></span><span class="sw"></span></div><div class="caprow"><div><div class="small" style="font-weight:600">Calculate &amp; analyse</div><div class="xs sub">Lets D1-E2: Arithmetic, statistics and read-only queries on its tables</div><div class="xs" style="color:var(--warn);margin-top:2px">⚠ Widens access · D1-E2 may run calculations and read-only queries on Table T1 · <span style="color:var(--accent)">Review and apply…</span></div></div><span class="prov static">Built-in <span class="freep">Free</span></span><span class="sw on" style="opacity:.55"></span></div></div></div>
+<div class="foot"><span class="dot ok" style="margin-right:4px"></span><b>Can touch</b> · reads 4 hosts, Document A, Table T1 · writes its review · sends to 5 hosts · never email or posts</div></div><div class="menu" style="right:150px;top:150px;width:330px">
+<div class="grp" style="margin:0;padding:8px 8px 4px">Web search for D1-E2</div>
+<div class="it on"><div class="l1"><b>Built-in · Local search (SearXNG)</b><span class="sp"></span><span class="xs" style="color:var(--accent)">✓ current</span></div><div class="chips"><span class="chip k">Free · no key</span><span class="chip k">Runs on this computer</span></div><div class="xs sub">Sends each query to Engine 1, Engine 2, Wikipedia.</div></div>
+<div class="sep" style="margin:4px 0"></div>
+<div class="grp" style="margin:0;padding:6px 8px 2px">Optional Accounts</div>
+<div class="it"><div class="l1"><b>Tavily</b><span class="sp"></span><span class="xs mute">Free key · then about ₹0.70 a search</span></div></div>
+<div class="it"><div class="l1"><b>Public instance · searx.example.org</b><span class="sp"></span><span class="xs mute">No key</span></div></div>
+<div class="sep" style="margin:4px 0"></div><div class="it"><span class="small" style="color:var(--accent)">+ Add Account… (Brave, Tavily, Exa, Serper, SearXNG URL)</span></div></div></div></div></div></div><div class="row"><div class="theme"><div class="card" style="width:460px;padding:20px;box-shadow:var(--shadow-2)">
+<div class="h3">Switch on Calculate &amp; analyse for D1-E2?</div>
+<div class="small" style="margin:8px 0">D1-E2 may do arithmetic and statistics and run read-only queries on Table T1. It cannot change a row or run any other code.</div>
+<div class="well small kv"><span class="sub">Seat</span><span>D1-E2</span><span class="sub">Adds tools</span><span>calculate, stats, query_table (read-only)</span><span class="sub">Provider</span><span>Built-in · free · on this computer</span><span class="sub">New hosts</span><span>None</span><span class="sub">Undo</span><span>Switch it off, or Settings › History</span></div>
+<div style="display:flex;gap:8px;justify-content:space-between;margin-top:14px;align-items:center"><span class="btn pri">Keep current access</span><span class="btn">Yes, switch on</span></div>
+<div class="xs mute" style="margin-top:6px">Return keeps current access.</div></div></div><div class="theme dark"><div class="card" style="width:460px;padding:20px;box-shadow:var(--shadow-2)">
+<div class="h3">Send D1-E2's searches to Tavily instead of Local search?</div>
+<div class="small" style="margin:8px 0">D1-E2 may send search queries to api.tavily.com. Each search is paid from your Tavily Account and counted on the meter. Local search stays installed; switch back any time.</div>
+<div class="well small kv"><span class="sub">Seat</span><span>D1-E2</span><span class="sub">New host</span><span class="mono">api.tavily.com</span><span class="sub">Cost</span><span>About ₹0.70 a search, reserved before each call</span><span class="sub">Undo</span><span>Provider › Built-in, or Settings › History</span></div>
+<div style="display:flex;gap:8px;justify-content:space-between;margin-top:14px;align-items:center"><span class="btn pri">Keep current access</span><span class="btn">Yes, use Tavily</span></div>
+<div class="xs mute" style="margin-top:6px">Return keeps current access.</div></div></div></div><p class="caption"><b>2 · Capabilities: Provider menu and the two confirmations.</b> Each capability is Built-in by default: shipped in the install, free, no key. The Provider menu lists Built-in first, then Accounts of a matching kind (keyed search APIs, a public SearXNG instance) as optional upgrades, then Add Account…; nothing is pre-selected. Left: switching Calculate &amp; analyse on (light) names what D1-E2 may then do; Return keeps current access. Right: choosing a Tavily Account for Web search (dark) names the host it adds and that queries are paid; the built-in stays one click away. Files workspace, Tables, Memory, Hand-off &amp; ask and Calculate &amp; analyse are local and offer Built-in only.</p><div class="theme dark"><div class="win mid"><div class="side"><div class="lights"><i></i><i></i><i></i></div><div class="nav on"><span class="ic">◎</span>Org</div><div class="nav"><span class="ic">▤</span>Inbox<span class="badge">6</span></div><div class="nav"><span class="ic">▷</span>Runs</div><div class="nav"><span class="ic">≡</span>Workflows</div><div class="nav"><span class="ic">▦</span>Tables</div><div class="nav"><span class="ic">◫</span>Dashboards</div><div class="nav"><span class="ic">₹</span>Models & Costs</div><div class="nav"><span class="ic">⚙</span>Settings</div>
+<div class="sidehead">TEAMS</div>
+<div class="nav"><span class="dot run"></span>Department 1<span class="badge">₹66</span></div>
+<div class="nav"><span class="dot ok"></span>Department 2<span class="badge">₹62</span></div>
+<div style="margin-top:auto" class="nav"><span class="ic">◌</span><span class="small sub">Doctor · all good</span></div></div><div class="main"><div class="tb"><span class="co">Company A</span><span class="meter" title="Weekly spend against budget"><svg width="16" height="16" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6" fill="none" stroke="var(--hair)" stroke-width="2"/><circle cx="8" cy="8" r="6" fill="none" stroke="var(--ink-2)" stroke-width="2" stroke-linecap="round" stroke-dasharray="7.9 37.7" transform="rotate(-90 8 8)"/></svg><b>₹128</b> of ₹600 this week</span><span class="sub" style="margin-left:4px">› D1-E2</span><span class="sp"></span>
+<span class="btn ghost sm">Search <span class="kbd">⌘K</span></span>
+<span class="btn sm">✦ Assistant <span class="kbd">⌘J</span></span>
+<span class="btn stop sm">■ Stop everything</span></div>
+<div class="content"><div style="position:absolute;inset:0;opacity:.45"><div class="canvas"></div><svg class="wires" width="100%" height="100%"><path class="wire" d="M532 124 V170"/><path class="wire" d="M360 170 H870"/><path class="wire" d="M360 170 V200"/><path class="wire" d="M870 170 V240"/><path class="wire" d="M360 342 V366"/><path class="wire" d="M154 366 H566"/><path class="wire" d="M154 366 V390"/><path class="wire" d="M360 366 V390"/><path class="wire" d="M566 366 V390"/></svg><div class="seat human" style="left:436px;top:24px;width:192px"><div class="top"><span class="av h">Y</span><div><div class="nm">Owner</div><div class="rl">Company A</div></div></div>
+<div class="occ"><span class="pill you">You</span> <span class="pill">CEO</span></div><div class="st"><span style="display:flex;gap:6px;align-items:center"><span class="dot ok"></span>Goal G1 · this quarter</span></div></div><div class="teamx" style="left:40px;top:200px;width:640px;height:330px"><div class="lbl"><span class="dot run"></span>Department 1 · 4 seats · ₹66 this week
+<span class="pill" style="font-weight:400">◇ Note N1 · 20 days left</span></div></div><div class="seat" style="left:266px;top:240px;width:188px"><div class="top"><span class="av ai" style="background:#4E6478;font-size:11px">H</span><div><div class="nm">D1-Head</div><div class="rl">Head · Department 1</div></div></div>
+<div class="occ"><span class="av s ai" style="background:#444">O</span>GPT · OpenAI</div><div class="st"><span style="display:flex;gap:6px;align-items:center"><span class="dot ok"></span>Done · Document B</span><span class="num sub">₹22</span></div></div><div class="seat" style="left:60px;top:390px;width:188px"><div class="top"><span class="av ai" style="background:#4E6478;font-size:11px">E1</span><div><div class="nm">D1-E1</div><div class="rl">Department 1</div></div></div>
+<div class="occ"><span class="av s ai" style="background:#C96442">A</span>Claude Sonnet · Anthropic</div><div class="st"><span style="display:flex;gap:6px;align-items:center"><span class="dot ok"></span>Done</span><span class="num sub">₹26</span></div></div><div class="seat sel" style="left:266px;top:390px;width:188px"><div class="top"><span class="av ai" style="background:#4E6478;font-size:11px">E2</span><div><div class="nm">D1-E2</div><div class="rl">Department 1</div></div></div>
+<div class="occ"><span class="av s ai" style="background:#3B7D4F">L</span>gpt-oss-20b · On this Mac</div><div class="st"><span style="display:flex;gap:6px;align-items:center"><span class="dot ok"></span>Done</span><span class="num sub">₹0 · 38k tok</span></div></div><div class="seat" style="left:472px;top:390px;width:188px"><div class="top"><span class="av ai" style="background:#4E6478;font-size:11px">E3</span><div><div class="nm">D1-E3</div><div class="rl">Department 1</div></div></div>
+<div class="occ"><span class="av s ai" style="background:#444">O</span>GPT · OpenAI</div><div class="st"><span style="display:flex;gap:6px;align-items:center"><span class="dot ok"></span>Done</span><span class="num sub">₹18</span></div></div><div class="team" style="left:720px;top:240px;width:300px;">
+<div style="display:flex;justify-content:space-between;align-items:center"><span class="nm">Department 2</span><span class="num sub">₹62 this week</span></div>
+<div class="small sub" style="margin-top:4px;display:flex;gap:6px;align-items:center"><span class="dot ok"></span>Done · Document A handed on</div>
+<div style="display:flex;gap:4px;margin-top:10px;align-items:center"><span class="av s ai" style="background:#566352;font-size:9px">H</span><span class="av s ai" style="background:#566352;font-size:9px">E1</span><span class="av s ai" style="background:#566352;font-size:9px">E2</span><span class="av s ai" style="background:#566352;font-size:9px">E3</span><span class="av s ai" style="background:#566352;font-size:9px">E4</span><span class="small sub" style="margin-left:6px">5 seats</span></div></div><div style="position:absolute;left:24px;top:16px" class="seg"><span>Teams</span><span class="on">Seats</span></div><div class="zoomctl"><span>−</span><span>Fit</span><span>+</span></div></div><div class="sheet"><div class="hd"><span class="av ai" style="width:36px;height:36px;background:#4E6478;font-size:13px">E2</span><div style="flex:1"><div class="h2">D1-E2</div><div class="small sub">Department 1 · reports to D1-Head</div></div><span class="pill"><span class="dot ok"></span>Done · ₹0 this week</span><span class="btn ghost sm">Esc</span></div><div class="idx"><span class="">Identity</span><span class="">Capabilities</span><span class="on">Brain</span><span class="">Skills</span><span class="">Tools</span><span class="">Knowledge</span><span class="">Tasks</span><span class="">Memory</span><span class="">Budget</span><span class="">Can touch</span></div>
+<div class="bd scroll"><div class="sec"><div class="lab"><span>BRAIN</span><span class="sub" style="font-weight:400">Instructions · model · fallback</span></div>
+<div class="ta" style="font-size:12px;line-height:17px">Review the Document A version handed to you for {run_date}. Use Skill S1. For each issue give the section, the sentence, why it matters and what to change…</div>
+<div class="xs mute" style="margin-top:4px">Also receives: Owner goal (Goal G1) · guidance Note N1 (20 days left) · 1 memory note · inputs handed across from Department 2</div>
+<div class="field" style="justify-content:space-between;margin-top:8px"><span><span class="av s ai" style="background:#3B7D4F;width:16px;height:16px;font-size:9px">LM</span> LM Studio › <b>gpt-oss-20b</b><span class="pill acc" style="margin-left:6px">On this Mac</span></span><span class="mute">▾</span></div>
+<div class="chips" style="margin-top:6px"><span class="chip t">Tools</span><span class="chip t">Structured output</span><span class="chip t">Context 32k (loaded)</span><span class="chip k">Free (local)</span></div>
+<div style="display:flex;gap:8px;margin-top:6px;align-items:center"><span class="btn sm">Test this model</span><span class="xs mute">Tested 12 Nov · 1 tool call, 1 schema output</span></div>
+<div style="display:flex;gap:8px;margin-top:6px;align-items:center"><span class="small sub" style="width:56px">Fallback</span><div class="field" style="flex:1"><span class="av s ai" style="background:#C96442;width:16px;height:16px;font-size:9px">A</span>&nbsp;Anthropic › <b>&nbsp;Claude Sonnet</b><span class="sp"></span><span class="xs mute">≈ ₹12 a run</span><span class="mute" style="margin-left:6px">▾</span></div></div>
+<div class="xs sub" style="margin-top:6px">More: temperature, max output tokens, output schema ›</div></div><div class="sec"><div class="lab"><span>SKILLS · 1</span><span class="sub" style="font-weight:400">Skills add instructions, never access</span></div>
+<div class="skill"><div style="display:flex;align-items:center;gap:8px"><span class="h3">Skill S1</span><span class="pill" style="height:18px">SKILL.md</span><span class="sp"></span><span class="xs mute">2 reference files</span></div>
+<div class="small sub" style="margin-top:2px">A review checklist: read the input against a fixed list of checks, quote the source for each finding, and rate each issue blocking, fix first or note.</div>
+<div style="display:flex;gap:4px;align-items:center;margin-top:8px;flex-wrap:wrap"><span class="xs mute" style="margin-right:2px">Asks for</span><span class="chip t">Web search</span><span class="chip t">Read website</span><span class="chip miss">! Read PDF from URL · not granted</span></div>
+<div class="xs" style="margin-top:4px;color:var(--warn)">Not granted tools stay off. Add in Tools &amp; connectors… if D1-E2 should have it.</div></div>
+<div style="display:flex;gap:8px;margin-top:8px"><span class="btn sm">Attach skill… <span class="kbd">S</span></span><span class="btn sm ghost">New skill…</span><span class="btn sm ghost">Import skill…</span></div></div><div class="sec"><div class="lab"><span>TOOLS &amp; CONNECTORS</span><span class="sub" style="font-weight:400">Drag from library or press A</span></div>
+<div class="grp"><span>Built-in</span></div>
+<div class="chips"><span class="tch">Web search · Local search <span class="h">this computer → 3 engines</span></span><span class="tch">Write document · Review 2 <span class="h">local</span></span></div>
+<div class="xs mute" style="margin-top:4px">Built-in tools come from Capabilities. <span style="color:var(--accent)">Change in Capabilities ›</span></div>
+<div class="grp"><span>Connectors</span><span>MCP</span></div>
+<div class="chips"><span class="tch">Search S3 <span class="h">search-mcp 1.4.2 · api.exa.ai · declared</span></span></div>
+<div class="grp"><span>Readers</span><span>over saved links and search results</span></div>
+<div class="chips"><span class="tch">Read website <span class="h">4 allowed hosts</span></span><span class="tch">Read URL</span><span class="tch">Search knowledge</span><span class="chip" style="height:22px;border-style:dashed;color:var(--accent)">+ Add tool</span></div>
+<div class="xs mute" style="margin-top:6px">To check pages on a schedule, add a Source that reads D1-E2's saved links. <span style="color:var(--accent)">Open Connectors ›</span></div></div></div>
+<div class="foot"><span class="dot ok" style="margin-right:4px"></span><b>Can touch</b> · reads 4 hosts, Document A, Table T1 · writes its review · sends to 5 hosts · never email or posts</div></div><div class="menu" style="right:24px;top:236px">
+<div class="grp" style="margin:0;padding:8px 8px 4px"><span class="logo" style="background:#3B7D4F;width:16px;height:16px;font-size:8px;border-radius:4px">LM</span>LM Studio <span class="pill acc">On this Mac</span></div>
+<div class="it"><div class="l1"><b>gpt-oss-20b</b><span class="sp"></span><span class="xs" style="color:var(--accent)">✓ current</span></div><div class="chips"><span class="chip t">Tools</span><span class="chip t">Structured output</span><span class="chip t">Context 32k (loaded)</span><span class="chip k">Free (local)</span></div></div>
+<div class="it on"><div class="l1"><b>qwen3-4b</b></div><div class="chips"><span class="chip no">Tools</span><span class="chip k">Context 8k</span><span class="chip k">Free (local)</span></div><div class="xs" style="color:var(--warn)">May struggle with tool calls — D1-E2 uses Web search and Read website. Document A needs about 13k of context.</div></div>
+<div class="grp" style="margin:0;padding:8px 8px 4px"><span class="logo" style="background:#C96442;width:16px;height:16px;font-size:8px;border-radius:4px">A</span>Anthropic</div>
+<div class="it"><div class="l1"><b>Claude Haiku</b></div><div class="chips"><span class="chip t">Tools</span><span class="chip t">Structured output</span><span class="chip k">Context 200k</span><span class="chip k">₹85 / 1M in</span></div></div>
+<div class="it"><div class="l1"><b>Claude Sonnet</b><span class="pill acc" style="margin-left:4px">Recommended for Reviewer</span></div><div class="chips"><span class="chip t">Tools</span><span class="chip t">Structured output</span><span class="chip k">₹255 / 1M in</span></div></div>
+<div class="sep" style="margin:4px 0"></div><div class="it"><span class="small sub">○ known from metadata · ✓ tested on this Mac · Manage Accounts…</span></div></div></div></div></div></div><p class="caption"><b>3 · Brain: Account › Model picker (dark), pointer on a local model that lacks tested tool calling.</b> One grouped menu; local and cloud look the same apart from the On this Mac badge. Hollow ○ = known from metadata, ✓ = tested here. Warnings are words, never a disabled row.</p><div class="theme "><div class="win mid"><div class="side"><div class="lights"><i></i><i></i><i></i></div><div class="nav on"><span class="ic">◎</span>Org</div><div class="nav"><span class="ic">▤</span>Inbox<span class="badge">6</span></div><div class="nav"><span class="ic">▷</span>Runs</div><div class="nav"><span class="ic">≡</span>Workflows</div><div class="nav"><span class="ic">▦</span>Tables</div><div class="nav"><span class="ic">◫</span>Dashboards</div><div class="nav"><span class="ic">₹</span>Models & Costs</div><div class="nav"><span class="ic">⚙</span>Settings</div>
+<div class="sidehead">TEAMS</div>
+<div class="nav"><span class="dot run"></span>Department 1<span class="badge">₹66</span></div>
+<div class="nav"><span class="dot ok"></span>Department 2<span class="badge">₹62</span></div>
+<div style="margin-top:auto" class="nav"><span class="ic">◌</span><span class="small sub">Doctor · all good</span></div></div><div class="main"><div class="tb"><span class="co">Company A</span><span class="meter" title="Weekly spend against budget"><svg width="16" height="16" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6" fill="none" stroke="var(--hair)" stroke-width="2"/><circle cx="8" cy="8" r="6" fill="none" stroke="var(--ink-2)" stroke-width="2" stroke-linecap="round" stroke-dasharray="7.9 37.7" transform="rotate(-90 8 8)"/></svg><b>₹128</b> of ₹600 this week</span><span class="sub" style="margin-left:4px">› D1-E2</span><span class="sp"></span>
+<span class="btn ghost sm">Search <span class="kbd">⌘K</span></span>
+<span class="btn sm">✦ Assistant <span class="kbd">⌘J</span></span>
+<span class="btn stop sm">■ Stop everything</span></div>
+<div class="content"><div style="position:absolute;inset:0;opacity:.45"><div class="canvas"></div><svg class="wires" width="100%" height="100%"><path class="wire" d="M532 124 V170"/><path class="wire" d="M360 170 H870"/><path class="wire" d="M360 170 V200"/><path class="wire" d="M870 170 V240"/><path class="wire" d="M360 342 V366"/><path class="wire" d="M154 366 H566"/><path class="wire" d="M154 366 V390"/><path class="wire" d="M360 366 V390"/><path class="wire" d="M566 366 V390"/></svg><div class="seat human" style="left:436px;top:24px;width:192px"><div class="top"><span class="av h">Y</span><div><div class="nm">Owner</div><div class="rl">Company A</div></div></div>
+<div class="occ"><span class="pill you">You</span> <span class="pill">CEO</span></div><div class="st"><span style="display:flex;gap:6px;align-items:center"><span class="dot ok"></span>Goal G1 · this quarter</span></div></div><div class="teamx" style="left:40px;top:200px;width:640px;height:330px"><div class="lbl"><span class="dot run"></span>Department 1 · 4 seats · ₹66 this week
+<span class="pill" style="font-weight:400">◇ Note N1 · 20 days left</span></div></div><div class="seat" style="left:266px;top:240px;width:188px"><div class="top"><span class="av ai" style="background:#4E6478;font-size:11px">H</span><div><div class="nm">D1-Head</div><div class="rl">Head · Department 1</div></div></div>
+<div class="occ"><span class="av s ai" style="background:#444">O</span>GPT · OpenAI</div><div class="st"><span style="display:flex;gap:6px;align-items:center"><span class="dot ok"></span>Done · Document B</span><span class="num sub">₹22</span></div></div><div class="seat" style="left:60px;top:390px;width:188px"><div class="top"><span class="av ai" style="background:#4E6478;font-size:11px">E1</span><div><div class="nm">D1-E1</div><div class="rl">Department 1</div></div></div>
+<div class="occ"><span class="av s ai" style="background:#C96442">A</span>Claude Sonnet · Anthropic</div><div class="st"><span style="display:flex;gap:6px;align-items:center"><span class="dot ok"></span>Done</span><span class="num sub">₹26</span></div></div><div class="seat sel" style="left:266px;top:390px;width:188px"><div class="top"><span class="av ai" style="background:#4E6478;font-size:11px">E2</span><div><div class="nm">D1-E2</div><div class="rl">Department 1</div></div></div>
+<div class="occ"><span class="av s ai" style="background:#3B7D4F">L</span>gpt-oss-20b · On this Mac</div><div class="st"><span style="display:flex;gap:6px;align-items:center"><span class="dot ok"></span>Done</span><span class="num sub">₹0 · 38k tok</span></div></div><div class="seat" style="left:472px;top:390px;width:188px"><div class="top"><span class="av ai" style="background:#4E6478;font-size:11px">E3</span><div><div class="nm">D1-E3</div><div class="rl">Department 1</div></div></div>
+<div class="occ"><span class="av s ai" style="background:#444">O</span>GPT · OpenAI</div><div class="st"><span style="display:flex;gap:6px;align-items:center"><span class="dot ok"></span>Done</span><span class="num sub">₹18</span></div></div><div class="team" style="left:720px;top:240px;width:300px;">
+<div style="display:flex;justify-content:space-between;align-items:center"><span class="nm">Department 2</span><span class="num sub">₹62 this week</span></div>
+<div class="small sub" style="margin-top:4px;display:flex;gap:6px;align-items:center"><span class="dot ok"></span>Done · Document A handed on</div>
+<div style="display:flex;gap:4px;margin-top:10px;align-items:center"><span class="av s ai" style="background:#566352;font-size:9px">H</span><span class="av s ai" style="background:#566352;font-size:9px">E1</span><span class="av s ai" style="background:#566352;font-size:9px">E2</span><span class="av s ai" style="background:#566352;font-size:9px">E3</span><span class="av s ai" style="background:#566352;font-size:9px">E4</span><span class="small sub" style="margin-left:6px">5 seats</span></div></div><div style="position:absolute;left:24px;top:16px" class="seg"><span>Teams</span><span class="on">Seats</span></div><div class="zoomctl"><span>−</span><span>Fit</span><span>+</span></div></div><div class="sheet"><div class="hd"><span class="av ai" style="width:36px;height:36px;background:#4E6478;font-size:13px">E2</span><div style="flex:1"><div class="h2">D1-E2</div><div class="small sub">Department 1 · reports to D1-Head</div></div><span class="pill"><span class="dot ok"></span>Done · ₹0 this week</span><span class="btn ghost sm">Esc</span></div><div class="idx"><span class="">Identity</span><span class="">Capabilities</span><span class="">Brain</span><span class="on">Skills</span><span class="">Tools</span><span class="">Knowledge</span><span class="">Tasks</span><span class="">Memory</span><span class="">Budget</span><span class="">Can touch</span></div>
+<div class="bd scroll"><div class="sec"><div class="lab"><span>BRAIN</span><span class="sub" style="font-weight:400">Instructions · model · fallback</span></div>
+<div class="ta" style="font-size:12px;line-height:17px">Review the Document A version handed to you for {run_date}. Use Skill S1. For each issue give the section, the sentence, why it matters and what to change…</div>
+<div class="xs mute" style="margin-top:4px">Also receives: Owner goal (Goal G1) · guidance Note N1 (20 days left) · 1 memory note · inputs handed across from Department 2</div>
+<div class="field" style="justify-content:space-between;margin-top:8px"><span><span class="av s ai" style="background:#3B7D4F;width:16px;height:16px;font-size:9px">LM</span> LM Studio › <b>gpt-oss-20b</b><span class="pill acc" style="margin-left:6px">On this Mac</span></span><span class="mute">▾</span></div>
+<div class="chips" style="margin-top:6px"><span class="chip t">Tools</span><span class="chip t">Structured output</span><span class="chip t">Context 32k (loaded)</span><span class="chip k">Free (local)</span></div>
+<div style="display:flex;gap:8px;margin-top:6px;align-items:center"><span class="btn sm">Test this model</span><span class="xs mute">Tested 12 Nov · 1 tool call, 1 schema output</span></div>
+<div style="display:flex;gap:8px;margin-top:6px;align-items:center"><span class="small sub" style="width:56px">Fallback</span><div class="field" style="flex:1"><span class="av s ai" style="background:#C96442;width:16px;height:16px;font-size:9px">A</span>&nbsp;Anthropic › <b>&nbsp;Claude Sonnet</b><span class="sp"></span><span class="xs mute">≈ ₹12 a run</span><span class="mute" style="margin-left:6px">▾</span></div></div>
+<div class="xs sub" style="margin-top:6px">More: temperature, max output tokens, output schema ›</div></div><div class="sec"><div class="lab"><span>SKILLS · 1</span><span class="sub" style="font-weight:400">Skills add instructions, never access</span></div>
+<div class="skill"><div style="display:flex;align-items:center;gap:8px"><span class="h3">Skill S1</span><span class="pill" style="height:18px">SKILL.md</span><span class="sp"></span><span class="xs mute">2 reference files</span></div>
+<div class="small sub" style="margin-top:2px">A review checklist: read the input against a fixed list of checks, quote the source for each finding, and rate each issue blocking, fix first or note.</div>
+<div style="display:flex;gap:4px;align-items:center;margin-top:8px;flex-wrap:wrap"><span class="xs mute" style="margin-right:2px">Asks for</span><span class="chip t">Web search</span><span class="chip t">Read website</span><span class="chip miss">! Read PDF from URL · not granted</span></div>
+<div class="xs" style="margin-top:4px;color:var(--warn)">Not granted tools stay off. Add in Tools &amp; connectors… if D1-E2 should have it.</div></div>
+<div style="display:flex;gap:8px;margin-top:8px"><span class="btn sm">Attach skill… <span class="kbd">S</span></span><span class="btn sm ghost">New skill…</span><span class="btn sm ghost">Import skill…</span></div></div><div class="sec"><div class="lab"><span>TOOLS &amp; CONNECTORS</span><span class="sub" style="font-weight:400">Drag from library or press A</span></div>
+<div class="grp"><span>Built-in</span></div>
+<div class="chips"><span class="tch">Web search · Local search <span class="h">this computer → 3 engines</span></span><span class="tch">Write document · Review 2 <span class="h">local</span></span></div>
+<div class="xs mute" style="margin-top:4px">Built-in tools come from Capabilities. <span style="color:var(--accent)">Change in Capabilities ›</span></div>
+<div class="grp"><span>Connectors</span><span>MCP</span></div>
+<div class="chips"><span class="tch">Search S3 <span class="h">search-mcp 1.4.2 · api.exa.ai · declared</span></span></div>
+<div class="grp"><span>Readers</span><span>over saved links and search results</span></div>
+<div class="chips"><span class="tch">Read website <span class="h">4 allowed hosts</span></span><span class="tch">Read URL</span><span class="tch">Search knowledge</span><span class="chip" style="height:22px;border-style:dashed;color:var(--accent)">+ Add tool</span></div>
+<div class="xs mute" style="margin-top:6px">To check pages on a schedule, add a Source that reads D1-E2's saved links. <span style="color:var(--accent)">Open Connectors ›</span></div></div></div>
+<div class="foot"><span class="dot ok" style="margin-right:4px"></span><b>Can touch</b> · reads 4 hosts, Document A, Table T1 · writes its review · sends to 5 hosts · never email or posts</div></div><div class="scrim"></div><div class="dlg" style="left:50%;top:20px;transform:translateX(-50%);width:640px">
+<div class="dh"><div style="display:flex;align-items:center;gap:8px"><span class="h2">Import skill</span><span class="pill">from skill-s1.zip</span><span class="sp"></span><span class="btn ghost sm">Esc</span></div>
+<div class="small sub" style="margin-top:2px">Read every file below. Once applied, D1-E2 follows these instructions like your own.</div></div>
+<div class="db">
+<div class="sec"><div class="lab"><span>ADDS 3 FILES</span><span class="pill warn" style="height:18px">Written outside this project</span></div>
+<div class="small mono" style="margin-bottom:6px">+ skills/skill-s1/SKILL.md <span class="mute">· 3.1 KB</span></div>
+<div class="difff">---
+name: skill-s1
+description: A review checklist. Read the input against a fixed list
+  of checks, quote the source for each finding, rate each issue.
+allowed-tools: web_search read_website read_pdf_url
+---
+# Skill S1
+Rate each issue blocking, fix first or note:
+- Blocking: the input contradicts a requirement in Reference K1 …
+- Fix first: a figure has no source, or the source is older …</div>
+<div class="small mono" style="margin-top:8px">+ references/severity.md <span class="mute">· 1.2 KB · shown in full ›</span></div>
+<div class="small mono">+ references/checks.csv <span class="mute">· 0.8 KB · shown in full ›</span></div></div>
+<div class="sec"><div class="lab"><span>NOT IMPORTED · 1</span></div>
+<div class="small mono">scripts/check.py</div><div class="xs mute">Scripts don't run in this version. Only instructions and text files are imported.</div></div>
+<div class="sec"><div class="lab"><span>ACCESS</span><span class="sub" style="font-weight:400">Nothing changes</span></div>
+<div class="small">The skill asks for <span class="mono">web_search</span>, <span class="mono">read_website</span>, <span class="mono">read_pdf_url</span>. Skills grant nothing: D1-E2 keeps exactly the tools and hosts it has now. <span class="mono">read_pdf_url</span> stays off.</div></div>
+<div class="sec" style="border-bottom:none"><div class="lab"><span>ATTACH TO</span></div>
+<div class="small"><span style="display:inline-flex;gap:6px;align-items:center;margin-right:14px"><span class="cb"></span>D1-E1</span><span style="display:inline-flex;gap:6px;align-items:center;margin-right:14px"><span class="cb on"></span>D1-E2</span><span style="display:inline-flex;gap:6px;align-items:center"><span class="cb"></span>D1-E3</span></div></div>
+</div>
+<div class="df"><span class="pill warn">⚠ High risk · outside instructions</span><span class="sp"></span><span class="btn ghost">Cancel</span><span class="btn pri">Review and apply…</span></div></div></div></div></div></div><p class="caption"><b>4 · Import skill (step 1).</b> An Agent Skills folder or zip arrives as one diff: SKILL.md and every reference file in full, flagged "Written outside this project"; scripts are left out and named; the access line states that nothing changes. The primary is "Review and apply…", because outside instructions are privilege-widening.</p><div class="row"><div class="theme"><div class="card" style="width:460px;padding:20px;box-shadow:var(--shadow-2)">
+<div class="h3">Give D1-E2 instructions written outside this project?</div>
+<div class="small" style="margin:8px 0">D1-E2 will follow "Skill S1" in every run. It adds no tools, hosts or budget.</div>
+<div class="well small kv"><span class="sub">Skill</span><span>skill-s1 · 3 files</span><span class="sub">Seats</span><span>D1-E2</span><span class="sub">Access change</span><span>None</span><span class="sub">Left out</span><span>scripts/check.py</span><span class="sub">Undo</span><span>D1-E2's sheet › Skills › Detach, or Settings › History</span></div>
+<div style="display:flex;gap:8px;justify-content:space-between;margin-top:14px;align-items:center"><span class="btn pri">Don't import</span><span class="btn">Yes, import and attach to D1-E2</span></div>
+<div class="xs mute" style="margin-top:6px">Return chooses Don't import.</div></div></div><div class="theme dark"><div class="card" style="width:460px;padding:20px;box-shadow:var(--shadow-2)">
+<div class="h3">Let D1-E2 read pages on site-g.example?</div>
+<div class="small" style="margin:8px 0">D1-E2 may open its saved link to site-g.example and search results on that host. Pages are read as outside content; after reading one, it can only open links you saved or that search returned.</div>
+<div class="well small kv"><span class="sub">Seat</span><span>D1-E2</span><span class="sub">New host</span><span class="mono">site-g.example</span><span class="sub">Tools</span><span>Read website, Read URL</span><span class="sub">Undo</span><span>D1-E2's sheet › Knowledge &amp; inbox, or Settings › History</span></div>
+<div style="display:flex;gap:8px;justify-content:space-between;margin-top:14px;align-items:center"><span class="btn pri">Keep current access</span><span class="btn">Yes, allow site-g.example</span></div>
+<div class="xs mute" style="margin-top:6px">Return keeps current access.</div></div></div></div><p class="caption"><b>5 · Second confirmations.</b> Left: importing the skill (light); the safe choice is primary and the Return default. Right: Allow host… from a saved link outside the allow-list (dark); the widening button is secondary and named by its effect.</p>
+</body></html>

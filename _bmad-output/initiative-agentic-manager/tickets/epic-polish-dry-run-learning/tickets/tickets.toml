@@ -1,0 +1,133 @@
+# Epic 10 — Polish, dry-run, learning loop and design/a11y QA. Table order is build order; `id` is permanent.
+# `covers` cites this epic's own requirement ids (its epic file's Requirements), not the initiative's: per BMad, every container numbers its own R<n>
+# and each epic line names its source as 'parent R<m>'. Outside the initiative file, write initiative ids as 'init R<m>' (final review coverage F8).
+# Engine lane (1–3) shares run mode and am-store views; proposal lane (2, 4, 5) shares the Proposal path; QA lane (7–9) touches every surface and runs last.
+# Definition of Done for every UI story (final review UX M3), whether or not its verify repeats it: axe clean in light and dark,
+# the story's path completed keyboard-only, and reduced motion honoured.
+
+[[entry]]
+id = 1
+type = "story"
+title = "Dry-run a workflow from the editor"
+description = "Tracer bullet: runs gain mode real or dry_run fixed at start; 'Dry-run with local models' in the workflow editor shows its own estimate line and starts a run that substitutes every seat's model with the chosen cheap or local model (cheapest local by default; with no local model, the cheapest model across the company's Accounts by the prices file, named with its estimate), spending against the same caps; the Runs list and Run view label it 'Dry run'. Matches key-workflow-run.html §1."
+verify = "Playwright on FakeLlm: the editor's dry-run control shows a range estimate for the substituted models; starting it creates a run with mode dry_run whose journal shows every call on the substituted model; with no local Account the control names the cheapest priced cloud model with its estimate; the Runs list row and Run view header read 'Dry run'; a cap breach stops it like a real run."
+covers = ["R1"]
+after = ["9.13", "7.5"]
+hitl = false
+risk = "medium"
+references = ["ux-agentic-manager/mockups/key-workflow-run.html §1"]
+
+[[entry]]
+id = 2
+type = "story"
+title = "The Coordinator's learning loop proposes changes from outcome reasons"
+description = "The Coordinator role template gains a learning workflow with its schedule paused until the owner sets one; the seat reads gate return and rejection notes and status-change reasons recorded since its last proposal (as UntrustedData) and raises Proposals for memory-note or instruction changes through the built-in local-write propose_change tool, whose manifest epic 4 registers (4.8), citing source rows; the card (epic 8) shows the rows and the tainted flag; nothing applies until the owner applies it; History records the apply; epic 4's injection pack (4.9) gains poisoned-reason cases. A Proposal raised by a learning run that read untrusted reasons is tainted-origin and never approvable (arch AD-10 (b), owner delegated 2026-11-19, final review 2 security H2): the owner can Dismiss it or start an own edit from it."
+verify = "On FakeLlm: with 5 'budget frozen' rejection reasons, a scheduled learning run raises one Proposal citing those 5 rows with the tainted flag; it applies only from a real click and History records it; a run with no new reasons raises nothing; the Proposal built from the 5 tainted reasons is tainted-origin and its apply is refused even with a valid confirm token, offering only Dismiss and 'Start my own edit from this'; poisoned reasons asking for a new tool or host yield zero approvable proposals and zero outbound calls."
+covers = ["R3"]
+after = [1, "8.6"]
+hitl = false
+risk = "high"
+references = ["ux-agentic-manager/mockups/key-assistant.html §1"]
+
+[[entry]]
+id = 3
+type = "story"
+title = "Dry-run data stays apart from real data"
+description = "Rows, row history, documents and Inbox items a dry-run creates carry the dry-run flag and the 'Dry run' label everywhere; v_* views, saved views, dashboards and the estimator's history exclude them unless a view or query asks explicitly; external-effect calls in a dry-run raise no approval and are recorded as 'would have asked'. Events from a dry-run (workflow_completed, step_completed, document_updated) and its hand-offs start no real run and are recorded as 'would have started' (arch AD-37, amended 2026-11-19, final review 2 security M4)."
+verify = "After a dry-run of the golden workflow: its rows show 'Dry run' in the grid when shown and are absent from v_table-t1, Table T1's default view, a pinned dashboard and the next estimate's basis; its Report R1 version, lineage and Inbox items are labelled; a scripted external-effect call appears in the journal as 'would have asked' with no Approval item. A dry-run of F2 completes and starts no real run of D1's workflow (zero runs with mode real, one 'would have started' journal line)."
+covers = ["R2"]
+after = [2, "7.5", "8.8"]
+hitl = false
+risk = "high"
+
+[[entry]]
+id = 4
+type = "story"
+title = "Memory notes from proposals stay editable"
+description = "In the seat sheet's Memory notes section, a note added by an applied learning proposal shows its proposal and source rows (each opens in Tables); the owner adds, edits and deletes any note through the config writer with History and Undo; notes keep reaching prompts in the AD-27 order."
+verify = "Playwright: after story 2's proposal is applied, D1-E2's sheet shows the new note with '5 sources' links that open them; editing the note changes seats/d1-e2.md and History; ⌘Z restores it; the next run's drill-down prompt shows the edited note under memory notes."
+covers = ["R4"]
+after = [2]
+hitl = false
+risk = "low"
+references = ["ux-agentic-manager/mockups/key-seat-sheet.html"]
+
+[[entry]]
+id = 5
+type = "story"
+title = "Developer hat approves in its subtree"
+description = "A human seat can wear the Developer hat; Proposals that change tools, models or prompts of seats in its subtree list it as approver, apply under it with 'You (Developer hat)' in History and audit, and a proposal touching a seat outside the subtree cannot be applied under that hat; the Developer card's live fact links to pending proposals in its subtree."
+verify = "Fixture org with a Developer hat over D1 on the Company A fixture: UJ-3's memory-note proposal applies under the hat and History reads 'You (Developer hat) · applied proposal'; a proposal for a seat in another team is refused under the hat with a worded reason; the Developer card shows '1 pending proposal' and opens it."
+covers = ["R5"]
+after = [4]
+hitl = false
+risk = "medium"
+references = ["ux-agentic-manager/mockups/key-assistant.html §1"]
+
+[[entry]]
+id = 6
+type = "story"
+title = "Ask a seat becomes an Inbox thread"
+description = "The one-line field at the Inbox list foot creates a Question thread addressed to the seat the owner picks (any seat; by default the top Coordinator seat, else the top head seat, and for a selected item from a department that department's head seat; ⌥↓ opens the seat picker); the seat answers in a one-step run under its caps (read access to its own tables and grants only; the answer run is epic 9 story 18's); the reply arrives in the thread, may cite rows or runs as resolving chips, and the owner can follow up in the same thread; the ledger attributes it to the seat. Matches key-inbox.html."
+verify = "Playwright on FakeLlm: typing 'Why was Report R1 returned twice this week?' and Return creates a thread; the scripted reply arrives citing Run #12 · step 6 (D1-Head's review) and two notes, each chip opening its source; a follow-up in the thread gets a second reply; the ledger shows both runs under the addressed seat; a question to a picked seat (D1-E2) is answered by D1-E2 and charged to it."
+covers = ["R6"]
+after = [5, "9.18"]
+hitl = false
+risk = "medium"
+references = ["ux-agentic-manager/mockups/key-inbox.html"]
+
+[[entry]]
+id = 7
+type = "story"
+title = "Performance budgets hold"
+description = "Adds the rule_18 tests, written to fail first, on a 30-seat fixture department: interaction latency under 100 ms for the measured set (open sheet, select seat, toggle team, grid sort, palette open), 60 fps while expanding and running on the org chart, idle memory under 300 MB without models, and cold start under 3 s; fixes regressions found; budgets run in CI and per release."
+verify = "The rule_18 suite passes on the macOS runner and its report lists each budget with the measured value; a deliberately slowed fixture component makes it fail."
+covers = ["R7"]
+after = [6]
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 8
+type = "story"
+title = "Accessibility audit passes"
+description = "Adds the rule_19 tests, written to fail first: axe on every surface in light and dark, a keyboard-only Playwright pass through every key flow (every drag has its key; single-key shortcuts off in Settings › General), ARIA tree and live-region checks, reduced motion and 200% zoom; fixes the findings; findings beyond one session become new stories."
+verify = "The rule_19 suite passes in CI: zero axe violations on every surface in both themes, the keyboard-only flows UJ-1, UJ-2, UJ-3 and Flows 4–6 complete, and the org chart announces seats as specified."
+covers = ["R8"]
+after = [7]
+hitl = false
+risk = "medium"
+references = ["ux-agentic-manager/mockups/key-states-keyboard.html"]
+
+[[entry]]
+id = 9
+type = "story"
+title = "Design QA against all thirteen mockups"
+description = "Visual snapshots of every mocked surface and spine-only surface in light and dark are compared with all thirteen mockups (every file in ux-agentic-manager/mockups/, key-connectors, key-team-sheet, key-mcp-add and key-schedule-updates included) and DESIGN.md tokens; differences are fixed or recorded as decisions; owner step: review the comparison at the milestone demo and sign it off."
+verify = "docs/design-qa.md lists every mockup section as matching or as a recorded decision, the snapshot suite passes in CI, and the owner's sign-off is recorded with its date."
+covers = ["R9"]
+after = [8]
+hitl = true
+risk = "medium"
+
+[[entry]]
+id = 10
+type = "story"
+title = "Refactor sweep"
+description = "Cleanup only, scoped at its start from the plans and review findings this epic deferred: no new behaviour; scope pushed out of another story becomes a new story."
+verify = "`just check` and CI on main are green, including rule_18 and rule_19, and every deferred finding from this epic is closed or named in a new story."
+covers = []
+after = [1, 2, 3, 4, 5, 6, 7, 8, 9]
+hitl = false
+risk = "low"
+
+[[entry]]
+id = 11
+type = "story"
+title = "Dry-run, learning and three hats end-to-end"
+description = "Closing end-to-end suite: Playwright runs UJ-3 end to end (CEO goal, Vision note, a scheduled learning proposal applied under the Developer hat, the next drill-down showing goal, note and rule in order), a dry-run of Company A's flow F1 that leaves real views untouched, and an Ask a seat thread, in browser mode on FakeLlm."
+verify = "The suite passes in CI on the macOS arm64 runner (v1 is macOS only, 2026-11-19) and its UJ-3 drill-down assertion finds the CEO goal, guidance note and new rule in order in the prompt."
+covers = []
+after = [10]
+hitl = false
+risk = "medium"

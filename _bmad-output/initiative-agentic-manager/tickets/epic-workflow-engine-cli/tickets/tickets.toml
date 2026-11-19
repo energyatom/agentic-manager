@@ -1,0 +1,191 @@
+# Epic 3 — Workflow engine and CLI with the CLI gate. Table order is build order; `id` is permanent.
+# `covers` cites this epic's own requirement ids (its epic file's Requirements), not the initiative's: per BMad, every container numbers its own R<n>
+# and each epic line names its source as 'parent R<m>'. Outside the initiative file, write initiative ids as 'init R<m>' (final review coverage F8).
+# Most entries form one lane: they share the agent loop in am-engine and the am-store migration sequence.
+
+[[entry]]
+id = 1
+type = "story"
+title = "One-step run from the CLI on FakeLlm"
+description = "Tracer bullet: `agentic run <workflow>` loads the config snapshot and pins its hash, writes run, step-run and model-call journal rows each committed before its side effect, drives one bounded agent-loop turn through LlmProvider on FakeLlm, stores the step's output, and `agentic status` lists the run, step, snapshot hash and duration from a read-only reader."
+verify = "`agentic run` of a one-step fixture workflow on FakeLlm prints the run id and succeeds; `agentic status` shows the run, its step, its snapshot hash and duration; the journal holds the run, step-run and model-call rows with audit entries."
+covers = ["R3", "R7"]
+after = ["1.3", "1.4", "1.7"]
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 2
+type = "story"
+title = "Loopback server with launch-code sign-in"
+description = "`agentic serve` binds 127.0.0.1 and keeps the per-launch session secret in memory only, never on disk (arch AD-13, amended 2026-11-18); opens the browser with a single-use 60-second launch code in the URL fragment exchanged for an HttpOnly SameSite=Strict cookie named for the port (`am_s_<port>`) plus a per-session CSRF value returned in the body and held in page memory; requires that value as X-AM-CSRF on every API request, GET included, and as the WebSocket subprotocol on the upgrade; prints an 8-character base32 pairing code as the fallback (5 attempts a minute, locked after 10 failures until restart; a failed launch-code exchange invalidates the code); checks the Host and Origin allow-lists on every request and the upgrade, sends no CORS headers, refuses loose permissions; writes a separate per-launch CLI token (0600, app data dir) that the CLI uses and that grants only the CLI class of arch AD-15, with every route tagged CLI class or UI class; serves /api/v1 run status with the one error envelope and a WebSocket event stream with seq and since=. The RULE-15 suite is written to fail first; the spike's criterion 6 tests are its seed."
+verify = "`agentic serve` opens the browser signed in once; the rule_15 trust tests fail before and pass after: rebinding Host, cross-origin fetch, cross-origin WebSocket upgrade, a missing CSRF header on a mutation, a cookie-only GET (as another localhost service would send it), a cookie-only WebSocket upgrade and one with a wrong subprotocol, a replayed launch code and one older than 60 s are refused; the 11th wrong pairing code is refused even when correct until restart; the cookie name carries the port; a 0644 data dir stops the server; no URL, log line or file under the app data dir or `.agentic/` holds the session secret; the CLI token is refused on a UI-class fixture route; a reconnect with since= replays missed events."
+covers = ["R12", "R7"]
+after = [1]
+hitl = false
+risk = "high"
+
+[[entry]]
+id = 3
+type = "story"
+title = "Steps, hand-offs and Inbox items"
+description = "Runs every step of a workflow in order through the AD-8 state machine, each a bounded agent loop (iteration, tool-call and wall-clock caps); hand-offs are next, loop-back (target, maximum default 2, reasons passed as a trusted input) and human gate, which moves the step to waiting_human with a Review item; adds the one Inbox item entity (all kinds) created only by the engine through the writer, and a Failure item when a maximum is passed. Story 4 resolves the items."
+verify = "A FakeLlm-scripted three-step fixture runs next, loops back from step 3 to step 1 with reasons that appear as a trusted input in the journal, fails with a Failure item when looping past the maximum, pauses at a gate with a Review item, and each loop cap ends its step when hit."
+covers = ["R3"]
+after = [2]
+hitl = false
+risk = "high"
+
+[[entry]]
+id = 4
+type = "story"
+title = "CLI Owner gate"
+description = "One Human-only resolve command used by the API and `agentic gate` (CLI class, arch AD-15: CLI token plus interactive TTY): on an interactive TTY it lists open items and approves, returns with a note (a loop-back to the producing step with the note as a trusted input, counted against the gate's max_returns, default 2) or rejects a Review, and answers a Question; every resolution is audited with the Human actor and hat; a non-TTY call is refused; /api/v1 gains Inbox list and resolve routes on story 2's server."
+verify = "At a gate, `agentic gate` on a TTY lists the Review; approve resumes the run; return with a note reruns the producing step with the note in its prompt and fails it past max_returns with a Failure item; reject ends the run; each resolution's audit entry reads 'You (Reviewer)'; the same resolve over /api/v1 works; piping input to `agentic gate` is refused."
+covers = ["R7", "R3"]
+after = [2, 3]
+hitl = false
+risk = "high"
+
+[[entry]]
+id = 5
+type = "story"
+title = "Labelled prompt assembly and schema repair"
+description = "Assembles every prompt in the AD-27 order as amended 2026-11-18 (role instructions, the seat's goal then backstory, each attached skill's SKILL.md body labelled skill:<id> followed by its reference-file names, CEO goals, unexpired guidance notes, memory notes, the names of the seat's reference files and saved links (titles and URLs, never content), step instruction, trusted inputs including loop-back reasons and gate notes, then untrusted data in a labelled fence) with a source label per part stored in the journal, with UntrustedData as its own type; validates the step's final message against its declared schema, repairs once, then fails the step with the validation error in words."
+verify = "A step whose seat has a goal, a backstory, one attached skill with a reference file, a reference file and a saved link, with a CEO goal, a guidance note, an expired note, a memory note, a gate note and an untrusted input, stores a journal prompt with the parts in order, each labelled (Goal, Backstory, skill:<id>, Reference files, Saved links), the skill reference and the reference file named but their content absent, the expired note absent and the untrusted part fenced; the goal, backstory and skill parts are typed Instruction and no test can build one from UntrustedData; FakeLlm's invalid output is repaired once and marked repaired; a second invalid output fails the step with the validation error in words."
+covers = ["R9", "R4"]
+after = [4, "1.12"]
+hitl = false
+risk = "high"
+
+[[entry]]
+id = 6
+type = "story"
+title = "Rows and documents written with provenance"
+description = "Adds the generic row store (table id, row id, JSON data, version, taint) and ToolGate as the only tool path, with table_write bound to the step's declared table of the seat's team and idempotent by run, step and call sequence; every row change appends a row-history after-image with its Actor and run, step and seat in the same transaction; a document step stores its Markdown output as a version per run and raises its drafts as Draft items."
+verify = "A FakeLlm-scripted step's table_write lands rows with version and taint and row history naming run, step and seat; a write to another table or from another team's seat is refused; a repeated call with the same call sequence writes once; a document step leaves one Markdown version per run and Draft items in the Inbox."
+covers = ["R8", "R10"]
+after = [5]
+hitl = false
+risk = "high"
+
+[[entry]]
+id = 7
+type = "story"
+title = "Cost settles per call and rolls up"
+description = "Each model call reserves a ledger entry (counted prompt tokens plus max output tokens times price) and settles it from usage, or at the reservation when usage is missing, in USD and company-currency micro-units (the company currency defaults from the system locale) with the price file's rate snapshot; the shipped prices.yaml and models/prices.yaml carry an updated date; `agentic status` shows spend by step, run, seat, team and ISO week in company time; local calls show zero cost with tokens and time. No cap is checked (epic 4)."
+verify = "On FakeLlm with set usage, each call's ledger entry is reserved then settled in both currencies with the rate snapshot id; a call with no usage settles at its reservation; `agentic status` shows the roll-up by step, run, seat, team and week with the price file's date; a local Account call shows zero cost with tokens and time."
+covers = ["R2"]
+after = [6]
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 8
+type = "story"
+title = "Retries, rate limits and the fallback chain"
+description = "One per-Account RateLimiter registry (concurrency and token bucket) and circuit breaker shared by all runs; every step has a timeout; only transient errors retry with jittered backoff up to a maximum, each retry its own ledger entry; on error, timeout or refusal epic 2's fallback wrapper switches models and the run log records it; if the fallback fails the step fails with a Failure item naming the next action; a manual start while a run of the same workflow is active queues behind it."
+verify = "With FakeLlm faults: a transient error retries with backoff to the maximum and a non-transient one does not; a step timeout fires; two queued runs share one Account's limit and breaker; a failing model switches to its fallback with a run-log line in EXPERIENCE.md's wording; a failing fallback fails the step with a Failure item; a second manual start queues; no call settles twice."
+covers = ["R6"]
+after = [7, "2.6"]
+hitl = false
+risk = "high"
+
+[[entry]]
+id = 9
+type = "story"
+title = "Crash resume after kill -9"
+description = "On start, every unfinished run resumes at its last committed transition; a model call without a settled entry is marked lost, re-issued and its reservation settled at the reserved amount; local-write calls replay idempotently; the run records 'Resumed after restart' with what was lost; the kill-and-resume test kills the process at each journal transition."
+verify = "The kill-and-resume test kills a FakeLlm run before a call, mid-stream, after settle and mid-table_write, restarts each time, and every run completes with at most the in-flight call re-issued, no duplicate rows, a resume note naming the lost call, and ledger totals equal to the call list."
+covers = ["R5"]
+after = [8]
+hitl = false
+risk = "high"
+
+[[entry]]
+id = 10
+type = "story"
+title = "Context overflow pauses with a Question"
+description = "Calls to a local Account set the loaded context window explicitly; before each call the assembled prompt is counted (approximate tokenizer plus margin) and, if it exceeds the window, no call is sent and the step pauses with a Question naming both sizes and offering Split input or Use fallback, answered through `agentic gate`; nothing is truncated."
+verify = "A local-Account step whose prompt exceeds the window from a recorded LM Studio fixture sends no call and raises a Question naming both sizes; answering Use fallback through `agentic gate` resumes the step on the fallback; a fitting prompt's call carries the window explicitly; no prompt in the journal is cut."
+covers = ["R1"]
+after = [9, "2.4"]
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 11
+type = "story"
+title = "agentic stop cancels running runs"
+description = "Cancellation flows through one token tree (global, run, step, call); `agentic stop` asks the running server to cancel every running step at its next safe point, aborting an in-flight stream whose call settles by the ledger rule; nothing is deleted; with no server it says nothing is running. Epic 4 adds the schedule pause and the persisted stop flag."
+verify = "`agentic stop` during a FakeLlm stream ends it within 1 s; the step ends cancelled at the safe point with its call settled; the run's rows and journal remain; with no server running the command prints that nothing is running and exits 0."
+covers = ["R7"]
+after = [10]
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 14
+type = "story"
+title = "Parallel fan-out and fan-in with quorum and timeout"
+description = "The run graph of arch AD-40 (owner REPLAN 2026-11-18): a fan-out step (`seats:` 2 to 8, one shared instruction and input) creates one step run per seat with `branch_key`, its own child cancellation token and per-call reservations against its step scope and the shared run, seat, workflow and company scopes in one atomic writer check; branches run concurrently up to `max_parallel` (default 4), each call still waiting on its Account's limiter; a fan-in step (`join: { from, wait: all | quorum, quorum, timeout, on_branch_failure: fail | continue | ask }`) waits in `waiting_branches`, re-evaluated from committed branch rows on each branch commit and on its persisted timeout deadline, then receives every finished branch output labelled `branch:<seat-id>` in declared order with missing branches named; when quorum or timeout ends the wait, unfinished branches are cancelled at their next safe point as `cancelled_at_join`; `ask` raises a Question (Continue with the finished branches, Retry the failed branch, Fail the run); resume after kill -9 re-enters each unfinished branch independently and never re-runs a finished one; `agentic validate` checks the fan-out and join fields story 1.5 wrote. Tests are written first, failing, in crates/am-e2e/tests/engine/fanout_*.rs on FakeLlm with the Company A fixture."
+verify = "Written first, failing, on FakeLlm with fixtures/company-a: (all) the fan-in of D1-Head starts only after D1-E1, D1-E2 and D1-E3 committed, and its journal prompt holds three parts labelled branch:d1-e1, branch:d1-e2, branch:d1-e3 in declared order; (quorum) with quorum 2 and D1-E3 scripted to hang, the fan-in starts after two branches and D1-E3 ends cancelled_at_join with its call settled; (timeout) with all branches hung, the timeout fails the run (policy fail) or raises a Question (policy ask) naming the missing branches; (branch failure) D1-E2 failing after its fallback fails the run under fail, continues at quorum under continue, and raises a Question under ask whose Retry re-runs only D1-E2; (reservations) each branch call writes one reservation row against its own step scope and the shared run, seat, workflow and company scopes in one writer transaction (asserted on the ledger rows; the cap check that pauses a branch is epic 4 story 2's test, moved there on 2026-11-19, final review 2 security M4, because this epic checks no cap); (cancel) `agentic stop` mid-fan-out ends every branch within 1 s at a safe point; (resume) kill -9 at each journal transition of each branch, restart: every run completes, finished branches are not re-run, at most each branch's in-flight call is re-issued, and ledger totals equal the call list; (parallel) branch calls overlap in time under FakeClock, and three branches on one Account respect its concurrency limit."
+covers = ["R13"]
+after = [11]
+hitl = false
+risk = "high"
+
+[[entry]]
+id = 15
+type = "story"
+title = "Cross-department hand-offs carry taint and provenance"
+description = "The hand-off contract of arch AD-41 (owner REPLAN 2026-11-18): a sending workflow declares `handoff: { to: <department>/<workflow>[/<step>], payload: output | document:<id> | rows:<table-id> }` and the receiving department lists it in `accepts:` (company.yaml); `agentic validate` refuses an undeclared or unaccepted hand-off with file, line and fix, and the engine refuses it at run time; delivery is a `handoff_deliveries` row written in the sending step's commit transaction, carrying the immutable payload ref (step output id, document version id, or a row snapshot at the commit seq), its taint and its provenance; delivery into a step of the same run assigns the step to the other department's seat; delivery into a workflow starts a run with origin=handoff, parent_run and handoff_id under the receiving workflow's caps; the receiving step reads the payload as an input labelled `handoff:<from-dept>/<workflow>/<step>@<version>` (inside the untrusted fence when tainted) and gains no table_write on the sender's tables; a crash between commit and start re-delivers exactly once on resume."
+verify = "Written first, failing, in crates/am-e2e/tests/engine/handoff_*.rs on FakeLlm with fixtures/company-a: Document A from D2-Head reaches D1-E1..E3 with the labelled payload part and D1's result reaches D2-Head; removing D1's accepts entry makes `agentic validate` fail naming the file, line and fix and a forced run start nothing (zero step runs, one audit entry); a payload built from a Table T1 row seeded by the fixture with taint = 1 (its Source-load and tainted-step origins are proven in epic 4 story 9 and epic 12 story 1; reordered 2026-11-19, final review 2 security M4) taints D1-E1's step (its taint flag set and its payload part fenced) and D2-Head's step after the hand-back; D1-E1 calling table_write on table-t1 is refused and audited; Document A edited after delivery leaves the delivered version unchanged in the receiving journal; kill -9 between the sending commit and the receiving start delivers exactly once after restart; the receiving run's spend lands on its own workflow's caps."
+covers = ["R14"]
+after = [14]
+hitl = false
+risk = "high"
+
+[[entry]]
+id = 16
+type = "story"
+title = "Review gates by a seat of another department"
+description = "Review gates of arch AD-42 (owner REPLAN 2026-11-18): a hand-off's `review: { seat, max_returns, timeout? }` names a reviewer seat of any department that accepts the review; a human reviewer gets a Review Inbox item resolved through story 4's Human-only command (`agentic gate`), recorded as You (<hat>); an AI reviewer runs a review step whose prompt holds its instructions and the exact delivered payload (fenced if tainted) and whose output must match the fixed verdict schema { verdict: approve | return | reject, note, branch? } (one repair, then fail); approve releases the hand-off; return loops back to the producing step (or the named branch) with the note as a trusted input when the reviewer was untainted and inside the untrusted fence, tainting the producer, when it was tainted (arch AD-10 (a), AD-42, amended 2026-11-19), counted against max_returns; reject fails the hand-off with a Failure item naming the reviewer and note; a timeout fails the gate, never approves; the verdict is stored with its actor and the payload ref, and an AI reviewer has no path to resolve an Approval, Budget ask or Proposal. Gate hardening (final review 2 security M1, owner delegated 2026-11-19): the AI reviewer's prompt holds only its instructions and the payload, never lineage; a verdict's branch must be one of the fan-out's branch_keys or the verdict is invalid; replacing a human gate with an AI reviewer is privilege-widening (epic 4 story 17)."
+verify = "Written first, failing, in crates/am-e2e/tests/engine/review_*.rs on FakeLlm with fixtures/company-a: D1-Head reviewing D2-Head's Report R1 holds the Owner's gate until its verdict commits (the hand-off stays in waiting_review); a scripted return reruns D2-Head with the note in its prompt and fails past max_returns with a Failure item; reject ends the hand-off with a Failure item naming D1-Head; an invalid verdict is repaired once then fails the step; a timeout fails the gate and nothing is approved; swapping the reviewer to the Owner raises a Review item that `agentic gate` resolves with the audit entry 'You (Reviewer)'; the AI verdict's audit entry names Seat(d1-head, run, step); a reviewer seat in a department without the accepts entry fails validation; an AI reviewer's tool list holds no resolve path (asserted on the ToolGate manifest). (hardening) the AI reviewer's journal prompt has no lineage part; a verdict naming branch d1-e9 is repaired once then fails the step; with a tainted payload scripted by the injection to approve, the hand-off moves on but no Approval, Budget ask or Proposal changes state, and a scripted return note from that reviewer reaches D2-Head inside the fence and D2-Head's step is tainted."
+covers = ["R15"]
+after = [15, 4]
+hitl = false
+risk = "high"
+
+[[entry]]
+id = 17
+type = "story"
+title = "Lineage from the journal and agentic lineage"
+description = "Lineage of arch AD-43 (owner REPLAN 2026-11-18): every step run writes its input edges to `step_inputs` (kind, ref, taint) in the transaction that starts it; every document version records its producing step run; `am-engine` computes the lineage of a document version, Inbox item or run on read through the read-only connection — the transitive walk across branches, hand-offs and parent runs joined to seat, department, hat or Account › model (fallback marked), tokens, duration, settled cost, schema repairs and review verdicts — with tainted inputs marked and a deleted run shown as removed; served at `GET /api/v1/lineage/<kind>/<id>`, printed by `agentic lineage <id>`, and exported as JSON and Markdown through the redaction layer (ids, labels, models, costs; output text only for versions that exist)."
+verify = "Written first, failing, in crates/am-e2e/tests/engine/lineage_*.rs on the Company A golden fixture: the lineage of Report R1 lists, in contribution order, D2-Head (Document A), D1-E1, D1-E2, D1-E3 (branches, each with its model, local or frontier, tokens and cost), D1-Head (fan-in), D2-Head (report) and D1-Head's review verdict, and every node and edge equals the journal (a property test over randomised FakeLlm runs compares the walk with the journal rows); the sum of node costs equals the ledger for the run chain; a tainted row's edge is marked tainted at every node below it; deleting one branch's run shows that node as removed; the JSON and Markdown exports contain no secret from the canary-key scan; `agentic lineage <document-version-id>` prints the same chain."
+covers = ["R16"]
+after = [16, 6, 7]
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 12
+type = "story"
+title = "Refactor sweep"
+description = "Cleanup only, scoped at its start from the plans and review findings this epic deferred: no new behaviour; scope pushed out of another story becomes a new story."
+verify = "`just check` and CI on main are green, including the rule_15 suite, the kill-and-resume test and the fan-out, hand-off, review and lineage suites, and every deferred finding from this epic is closed or named in a new story."
+covers = []
+after = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 14, 15, 16, 17]
+hitl = false
+risk = "low"
+
+[[entry]]
+id = 13
+type = "story"
+title = "Golden Company A run"
+description = "Closing end-to-end suite (arch AD-33, amended 2026-11-18): `just golden` runs Company A's flow F1 from templates/samples/company-a through the generic loader on scripted FakeLlm (one script per seat; only table_write and write_document called): D2-Head produces Document A, the hand-off to D1 fans out to D1-E1, D1-E2 and D1-E3, D1-Head consolidates at the fan-in, the hand-back reaches D2-Head, D1-Head's review gate returns once then approves, and the Owner's gate is answered by a scripted `agentic gate`; it snapshots tables, documents, ledger per branch, Inbox and the lineage of Report R1; golden variants cover a failed branch (policy ask), kill -9 mid-fan-out and a tainted row carried across the hand-offs; CI adds the 80% coverage gate on am-engine and am-store; `just golden-local` runs the same on a real local model. Owner step: run `just golden-local` on the owner's Mac with LM Studio and record the result. Until epic 4's ToolGate classes (4.8) and taint (4.9) exist, golden and golden-local expose only table_write and write_document to the model (a test-only tool profile masks the sample's other capabilities; final review 2 security M4, 2026-11-19); epic 4 story 13 runs the golden run with the full tool set."
+verify = "`just golden` and its variants pass in CI and their snapshots of tables, documents, ledger per branch, Inbox and lineage match; the lineage snapshot names every contributing seat with its model and cost; CI fails a branch that drops am-engine or am-store below 80% coverage; the owner's `just golden-local` record shows every step schema-valid after at most one repair each. The golden-local run's journal shows only table_write and write_document offered to the model."
+covers = ["R11", "R13", "R14", "R15", "R16"]
+after = [12, "1.5", "2.4"]
+hitl = true
+risk = "high"

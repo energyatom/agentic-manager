@@ -1,0 +1,13 @@
+# Superseded planning inputs: kept locally for the owner, never published.
+_archive/
+
+# Build and runtime output
+target/
+node_modules/
+.agentic/
+
+# Rendered screenshots and private images (mockups are HTML; renders are local only)
+*.png
+
+# OS and editor noise
+.DS_Store

@@ -1,0 +1,125 @@
+---
+type: epic
+title: "MCP, Doctor and backups"
+parent: initiative-agentic-manager
+covers: [R47, R48, R49, R60, R80]
+sources:
+  - _bmad-output/initiative-agentic-manager/initiative-agentic-manager.md
+  - _bmad-output/initiative-agentic-manager/architecture-agentic-manager/architecture-agentic-manager.md
+  - _bmad-output/initiative-agentic-manager/reference-workload.md
+  - _bmad-output/initiative-agentic-manager/ux-agentic-manager/EXPERIENCE.md
+  - _bmad-output/initiative-agentic-manager/prd-agentic-manager/prd-agentic-manager.md
+  - _bmad-output/initiative-agentic-manager/party-decisions/decisions.md
+  - _bmad-output/initiative-agentic-manager/trust-gate.md
+companions:
+  - _bmad-output/initiative-agentic-manager/architecture-agentic-manager/architecture-agentic-manager.md
+  - _bmad-output/initiative-agentic-manager/reference-workload.md
+  - _bmad-output/initiative-agentic-manager/ux-agentic-manager/EXPERIENCE.md
+  - _bmad-output/initiative-agentic-manager/ux-agentic-manager/DESIGN.md
+  - _bmad-output/initiative-agentic-manager/ux-agentic-manager/mockups/key-models-doctor-history.html
+  - _bmad-output/initiative-agentic-manager/ux-agentic-manager/mockups/key-first-run.html
+  - _bmad-output/initiative-agentic-manager/trust-gate.md
+  - _bmad-output/initiative-agentic-manager/tickets/epic-connectors-sources/epic-connectors-sources.md
+after: []
+risk: high
+---
+
+# MCP, Doctor and backups
+
+## Description
+
+The MCP add dialog showing the exact spec, rmcp over stdio and streamable HTTP, scrubbed environments, pinned versions, and description hashes that force re-approval on change; the skills library (create, import as a full-text diff, read references, never wider); Doctor with one-click fixes, the blocked-egress list, keys found in files and the health of every Source and connector Account; daily encrypted backups keeping a set number; and the Settings › About page on what the app protects against, including the stdio MCP network limit and how connectors respect robots.txt and site terms. It ends by freezing the build, with every connector from epic-connectors-sources merged, on which the owner starts the official four-week dogfood clock. Retitled from "Tools, MCP, search and Doctor" on 2026-11-18, when its search, reader, reference-file and link-list stories moved to epic-connectors-sources (initiative Notes, Placement); the folder name is kept.
+
+## Outcome
+
+The owner adds outside tools only after seeing exactly what will run, sees at a glance that every Account, MCP server and Source is healthy and contained, keeps encrypted backups, and starts the dogfood clock on a frozen build.
+
+## Requirements
+
+- R1 (retired 2026-11-18): moved to epic-connectors-sources R2 with its story (now 12.3).
+- R2 (retired 2026-11-18): moved to epic-connectors-sources R3.
+- R3 (retired 2026-11-18): moved to epic-connectors-sources R4 with the comparison spike (now 12.4).
+- R4 (retired 2026-11-18): moved to epic-connectors-sources R5 with its story (now 12.6).
+- R5 (parent R47; arch AD-26; prd RULE-13; ux MCP server add): Settings › Tools & MCP adds an MCP server only after showing its exact command, arguments, environment variable names, working directory, pinned version and declared network use; adding it is privilege-widening; approval stores a hash of the spec and its tool descriptions; its tools reach no seat until assigned and default to external-effect, and assigning or lowering a class is privilege-widening.
+- R6 (parent R47; arch AD-26, AD-20, AD-12, AD-13, AD-15; prd RULE-13): stdio servers run as children with a scrubbed environment holding only the listed variables (each value registered with the redaction layer, so an echoed value is redacted everywhere), every inherited file descriptor but stdio closed, no path to the app data dir, the workspace as working directory and the pinned version, and cannot act as the owner through the local API (no session secret on disk; the CLI token grants no decision while a stdio server is enabled), and are killed with their process group on Stop everything; streamable-HTTP servers go through the egress client; results are UntrustedData. Threshold: the RULE-13 suite passes.
+- R7 (parent R47; arch AD-26; prd RULE-13): On every connect the tool descriptions are re-hashed; a mismatch disables the server and raises a re-approval Inbox item showing what changed; its tools stay unavailable until the owner re-approves.
+- R8 (parent constraint Egress; Decision 2026-11-18; arch AD-12): A stdio server's declared network use is shown in its add dialog and in each assigned seat's What this seat can touch panel, and Settings › About, linked from Doctor, says plainly that stdio MCP network use is declared, not enforced, and that OS sandboxing comes in v1.x, that other programs running as the owner can read and change the owner's files, that reading untrusted pages can still leak a little through which listed link a model opens, that the Apply real-click check is a convenience and the sign-in split the protection, how backups and the live database are protected, and that every connector respects robots.txt and paces its requests while the owner remains responsible for each site's terms and for the owner's own crawl-service account, beside what else the app does and does not protect against (amended 2026-11-18, final review F1, F2, F11, F12; connector sentence added 2026-11-18).
+- R9 (parent R48; Sources health from init R69, owned by epic-connectors-sources; arch AD-12, AD-17, AD-31, AD-39; ux Doctor row): Doctor checks Accounts reachability (connector Accounts such as a crawl-service endpoint included), keys present in the keychain, MCP servers, Sources (each failing Source, each Source whose Account is missing and, when a Source renders, whether a browser for rendering is installed and can start sandboxed, from epic-connectors-sources' health API; restated 2026-11-18), disk space, schedules, search (Local search status, version, last health check, restarts and suspended engines; restated 2026-11-18, Open by default), file reading (seats whose linked folders or folder routes hold a type their model does not read, and file chips still untested; restated 2026-11-19, replacing local OCR), blocked egress (count and hosts from the audit log) and keys found in project files, one row each with a finding sentence; the sidebar foot reads "Doctor · all good" or "Doctor · N issues" (restated 2026-11-18, owner connector direction).
+- R10 (parent R48; ux Doctor row, Safety Surfaces): Each Doctor finding with a fix offers it in one click: Move to Keychain (a key found in a file goes to the keychain and the file keeps only its reference), Restart Local search, Choose a search provider (restated 2026-11-18), Re-approve an MCP server, Resume a paused schedule and Check again; a fix that widens access goes through the privilege-widening confirmation.
+- R11 (parent R49; arch AD-7, AD-17, AD-32; parent constraint Personal data): A `VACUUM INTO` backup is taken daily, encrypted at rest under a per-project key held only in the OS keychain, into `.agentic/backups/`, with no plaintext copy left behind; rotation keeps the configured number (default 14) and deletes older copies; Settings › Backups lists them with sizes, states they are encrypted, offers Back up now, the copy count and a one-time recovery key behind a second confirmation; Doctor warns when the key is missing; Restore is a documented manual step (decrypt, then copy) in v1, with no Restore action in the app (amended 2026-11-18, final review F6; closes the encryption half of prd OQ-7).
+- R12 (parent constraint Release shape; Decision 2026-11-18; parent constraint AI ship and rollback; parent constraint Seat anatomy safety): The injection pack, with the MCP-result sources and a poisoned imported skill added here and the web, search, reference-file, saved-link, link-list and connector sources added by epic-connectors-sources, yields zero outbound calls and zero approvable proposals on the fake provider and one real local model; the build that passes this epic's gates, with epic-connectors-sources merged, is frozen and recorded as the dogfood build, and the owner starts the official four-week clock on it (restated 2026-11-18, owner statement B and owner connector direction).
+- R13 (parent R60; parent constraint Seat anatomy safety; arch AD-38, AD-15, AD-30; ux EXPERIENCE Skills): The owner creates a skill (New skill… writes `skills/<id>/SKILL.md`), edits it as a config edit with History, and imports one from a folder or zip through the extract caps and WorkspacePath as one privilege-widening Proposal that shows SKILL.md and every reference file in full under "Written outside this project" and leaves scripts and unsupported files out by name; an attached skill's reference files are read through `read_skill_file` (read class, local, no network, confined to the calling seat's attached skills, returned as a trusted input labelled `skill:<id>/<file>`); a skill grants nothing, as ToolGate, the egress client and the touch panel never read skills. Threshold: a skill whose text and `allowed-tools` name an ungranted tool yields zero calls to it, and `read_skill_file` outside the seat's attached skills is refused (added 2026-11-18, owner statement B).
+- R14 (retired 2026-11-18): moved to epic-connectors-sources R12 with its story (now 12.11).
+- R15 (retired 2026-11-18): moved to epic-connectors-sources R10 and R11 with its stories (now 12.11 and 12.10).
+- R16 (parent R80; arch AD-46, AD-6; added 2026-11-18): Calculate & analyse gives a seat arithmetic, statistics and one read-only SELECT over the views of tables it owns or is granted, with row and time limits, through the jailed reader; no arbitrary code runs in v1.
+- R17 (parent R80, R53; arch AD-46, AD-15, AD-27, AD-43; added 2026-11-18): Files workspace confines a seat's reads and writes to its own owner-only workspace folder; Memory injects its notes and lets it propose new ones that the owner applies; Hand-off & ask lets it ask a seat of its department, or one a declared hand-off connects it to, answered by that seat's one-step run under its caps and recorded in lineage.
+
+## Constraints
+
+- MCP (parent; prd RULE-13; arch AD-26): owned here; the RULE-13 suite lands as `crates/am-e2e/tests/trust/rule_13_*.rs`, written to fail first.
+- Egress (parent; prd RULE-9; arch AD-12; Decision 2026-11-18): every HTTP MCP call goes through the egress client; stdio MCP network use is declared and disclosed, not enforced, in v1.
+- Untrusted content (parent; prd RULE-8; arch AD-10): every MCP result is UntrustedData; the injection pack gains MCP and skill cases here (web, search and connector cases come from epic-connectors-sources).
+- Actions (parent; prd RULE-10; arch AD-11): MCP tools default to external-effect; read_skill_file is read class; v1 registers no send tools.
+- Secrets (parent; prd RULE-12; arch AD-17): Doctor finds keys in files; MCP children never inherit keys; backup keys live only in the keychain.
+- Local and private (parent; prd RULE-5): blocked calls are listed in Doctor; no telemetry.
+- Personal data (parent; prd Data and compliance): deleted rows persist in backups only until rotation drops them.
+- Propose, then approve (parent; prd RULE-3): adding an MCP server, assigning an MCP tool, importing a skill and every widening fix use the two-step confirmation.
+- Mockups gate UI (parent; Decision 2026-11-18): Doctor matches `key-models-doctor-history.html` §2; the MCP add dialog matches `key-mcp-add.html`; Settings › Tools & MCP, Backups and About are spine-only.
+
+## Done when
+
+- A skill is created, imported as a full-text diff with its script left out, read through its references, and never gives D1-E1 a tool it was not granted (owner statement B, 2026-11-18).
+- Adding an MCP server shows its exact command, args, env var names, working directory, pinned version and network use before approval; its tools reach no seat until assigned; a changed tool description disables it and raises a re-approval Inbox item; Settings › About states the stdio network limit.
+- Doctor reports Accounts, keys, MCP servers, Sources, disk, schedules, search, blocked egress and keys found in files, and each one-click fix works.
+- A daily backup is taken, rotation keeps the configured number of copies, and the documented manual restore brings a copy back.
+- Merged with the RULE-13 suite and the whole injection pack (MCP, skill, web, search and connector sources) green, Playwright e2e passing, and the frozen dogfood build, including epic-connectors-sources, recorded with the clock's start date.
+
+## Boundaries
+
+- Out: OS-level sandboxing of MCP and parser children (v1.x); skill scripts (v1.x, with sandboxing); web search, readers, reference files, saved links, link lists, Knowledge search and every Source connector (epic-connectors-sources, which this epic waits on); exporting a whole seat as a SKILL.md (v1.1); email drafts via MCP (v1.x); hosting SearXNG (bring-your-own only); send tools (none in v1); backup encryption (decided before v0.9-rc, prd OQ-7, epic-desktop-release-trust-gate).
+- Out: ToolGate classes, taint, reader/actor separation and the extract child (epic-triggers-budgets-safety-floor); the seat sheet's Tools section, Tools library and What this seat can touch panel (epic-org-seats-ui; this epic supplies manifests and MCP entries to them); the Inbox UI (epic-runs-inbox-documents-ui).
+- Out: the threat model, protections-page review against tests and the release gates (epic-desktop-release-trust-gate).
+- Touch point: third-party MCP servers — launched or called, never changed; external.
+- Must not change: the four-week clock rules (only a manual repair resets it; the later move to the v0.9-rc build does not, and at least the final two clean weeks run on it) and the frozen build once recorded.
+
+## References
+
+- parent — _bmad-output/initiative-agentic-manager/initiative-agentic-manager.md, Requirements R47, R48, R49, R60; Constraints (MCP, Egress, Untrusted content, Actions, Secrets, Local and private, Personal data, Release shape, AI ship and rollback); Notes (Decisions 2026-11-18 on MCP network use and the dogfood clock)
+- architecture — _bmad-output/initiative-agentic-manager/architecture-agentic-manager/architecture-agentic-manager.md, AD-5, AD-7, AD-10, AD-11, AD-12, AD-17, AD-20, AD-26, AD-30, AD-31, AD-32, Deferred (keyed search default, sandboxing, backup encryption)
+- design — _bmad-output/initiative-agentic-manager/ux-agentic-manager/EXPERIENCE.md, Component Patterns (MCP server add, Doctor row, Tool chip / Tools library, What this seat can touch, Privilege-widening confirmation), Safety Surfaces, Voice and Tone, UJ-1 failure path
+- mockups — _bmad-output/initiative-agentic-manager/ux-agentic-manager/mockups/key-models-doctor-history.html §2; key-first-run.html (step 2 search line); key-mcp-add.html (MCP add dialog)
+- party — _bmad-output/initiative-agentic-manager/party-decisions/decisions.md, D8 (search providers) and D11 (MCP allow-listing)
+- trust gate — _bmad-output/initiative-agentic-manager/trust-gate.md, Security test suites, Disclosure and documentation
+- sibling — _bmad-output/initiative-agentic-manager/tickets/epic-connectors-sources/epic-connectors-sources.md (search, readers, Sources, Knowledge; health API for Doctor)
+
+## Notes
+
+- Waits on epic-triggers-budgets-safety-floor because: ToolGate action classes, taint and reader/actor separation, and the capped extract child.
+- Waits on epic-org-seats-ui because: Settings surfaces, the seat sheet's tool grants, the privilege-widening dialog and the wizard's Accounts screen for the keyed-search recommendation (story 4 on 5.9, 5.12 and 5.13).
+- Waits on epic-runs-inbox-documents-ui because: the drill-down's untrusted well (story 1 on 6.2) and the Inbox Proposal and Approval details for MCP re-approval (story 7 on 6.8).
+- Decision: stdio MCP servers' network use is declared, shown at add time and disclosed on the About page; the RULE-9 threshold is measured on the app's own egress client; OS-level sandboxing is v1.x; description-change re-approval stays (owner delegated, 2026-11-18; parent Notes).
+- Decision: the official dogfood clock starts on a frozen build after this epic, because the owner's own department seats need its tools and epic 12's connectors; this epic ends by freezing that build (owner, 2026-11-18; parent Notes).
+- Decision: Clean weeks (owner delegated, 2026-11-18): v1.0 also requires at least the final 2 clean weeks on the v0.9-rc build; moving to v0.9-rc does not reset the clock; the Must-not-change line is restated.
+- Decision: Refined (owner delegated, 2026-11-18): the keyed default is answered by a spike (story 2) before the keyed-provider story, as only real queries can answer it; the rest is settled by the assumptions below.
+- Decision (superseded by the 2026-11-18 split; web search moved to epic-connectors-sources, where Local search replaced Basic): Tracer bullet is story 1, a granted seat's Basic web search through manifest, ToolGate, egress client and fenced result in the run drill-down (2026-11-18).
+- Decision: Sequencing (2026-11-18): the search comparison spike is second as the least certain part; read tools, then keyed providers after the spike; the MCP lane (add, client, re-approval) shares am-mcp; Doctor checks then fixes; backups and the About page; then the refactor sweep and the closing story that runs every gate on one build, freezes it and starts the clock.
+- Assumption (restated 2026-11-18): after the split this epic holds 10 entries (5 to 13 and 16); the frozen dogfood build still needs every connector, which the epic-level wait on epic-connectors-sources and story 13's wait on its closing story 12.16 guarantee.
+- Assumption (retired 2026-11-18, Open by default): the Basic no-key search endpoint is replaced by the bundled Local search (SearXNG), epic-connectors-sources story 18.
+- Assumption: The About page is written here with every protection known at this epic; epic-desktop-release-trust-gate reviews it against the threat model and the tests before v0.9-rc.
+- Assumption: The frozen build is a git tag plus the CI-built `agentic` binary for macOS, recorded with its date in the repo's dogfood log; each clean or failed week is appended there by the owner.
+- Open question: see initiative Notes, prd OQ-7 backup encryption (owner, before story 10; otherwise a new story in epic 11).
+- Decision: MCP add mockup (owner delegated, 2026-11-18): Sally is producing ux-agentic-manager/mockups/key-mcp-add.html; story 5 matches it, with EXPERIENCE.md winning on conflict; closes the MCP add mockup open question.
+- Decision: Backups (owner delegated, 2026-11-18): Restore is a documented manual step in v1 (R11, story 10); closes the restore open question.
+- Decision: Injection pack (owner delegated, 2026-11-18): stories 1, 3 and 6 extend epic 4's injection pack (4.9) with search, web and MCP cases; there is one pack.
+- Decision: Dependencies (owner delegated, 2026-11-18): whole-epic references in stories 1 and 4 are repointed to the stories they need (6.2; 5.9, 5.12, 5.13), and story 7 pins 6.8.
+- Cross-epic: epic-polish-dry-run-learning and epic-desktop-release-trust-gate wait on story 13.
+- Decision: Final review F1, F2, F5, F6 (owner delegated, 2026-11-18): stories 1 and 3 add the search and fetch exfiltration cases to epic 4's pack, written to fail first, under ToolGate's tainted-read rule; story 6 closes inherited descriptors, registers MCP env values with redaction (canary echo test) and runs the same-user child-process test against the local API; story 10 encrypts backups at rest with a keychain-held key and picks and pins the cipher crate; story 11's About page gains the residual-risk, same-user, real-click and encryption sentences. R1, R6, R8, R11 restated.
+- Decision: Seat anatomy (owner statement B, 2026-11-18; initiative Notes): this epic owns parent R60, R61 and R62 (R13, R14, R15 added; R12 restated so the injection pack covers reference files, saved-link pages, dropped link lists and a poisoned imported skill); new stories 14 (reference files and saved links), 15 (link lists in the drop folder) and 16 (skills library, import, references, never wider; it reads epic 3 story 5's skill parts through epic 4, which this epic already waits on) come before the sweep, which now waits on them, so the frozen dogfood build includes the seat anatomy; the Assumption that the entries stay in one epic is restated for 16 entries; the Agent card UI is epic 5 story 17.
+- Decision: Split (owner connector direction, 2026-11-18; initiative Notes, Placement): with the connector stories this epic would pass 15 stories, so its search, reader, reference-file and link-list stories moved to the new epic-connectors-sources (9.1-9.4 became 12.3-12.6, 9.14 became 12.11, 9.15 became 12.10; ids 1-4, 14 and 15 here are retired, never reused), which builds before this epic; this epic is retitled "MCP, Doctor and backups" (folder kept); R1-R4, R14 and R15 are retired with pointers, R8, R9 and R12 restated; story 5 waits on the Settings stories directly instead of the keyed-search story, story 8's Doctor gains the Sources check from 12.14, story 11's About page gains the connector sentence after 12.12, and story 13 freezes the build only after 12.16. The frozen build still carries every tool and connector the owner's departments need.
+- Waits on epic-connectors-sources because: the Source health API and connector Accounts Doctor checks (8 on 12.14), the crawl-service and robots facts the About page states (11 on 12.12), and every connector merged before the freeze (13 on 12.16).
+- Decision: Owner decisions 2026-11-18 (initiative Notes, Free local crawling, Generic engine principle): R9 restated so Doctor's Sources check also reports whether a browser for rendering is installed and can start sandboxed (from epic 12 stories 14 and 17's health API), and connector Accounts name a crawl-service endpoint rather than Firecrawl; the earlier data constraint is now Personal data. Story 8 extended in place; its `after` (12.14, which waits on 12.17) is unchanged.
+- Decision: Owner REPLAN (owner, 2026-11-18, reference-company spec and Amendment 2; initiative Notes): every fixture seat in this epic is a Company A seat; story 13 freezes the dogfood build on which the owner runs the owner's own departments with at least one cross-department flow; the search-comparison assumption moved with the comparison to epic 12 (story 4, restated); no requirement, entry or order changes.
+- Decision: Built-ins (owner addition, 2026-11-18; initiative Notes): new stories 17 "Calculate & analyse: arithmetic, statistics and read-only SQL" and 18 "Files workspace, Memory and Hand-off & ask tools" build before the sweep (12), so the frozen dogfood build (13) carries every built-in capability; story 8's Doctor checks Local search and local OCR and story 9 offers Restart Local search and Choose a search provider instead of "Add a search key"; R9 and R10 restated; R16 and R17 added. The stale story-1 tracer and Basic-search assumption above describe the epic before the 2026-11-18 split and Open by default.
+- Decision: Final review 2 (owner delegated, 2026-11-19; initiative Notes): story 6's MCP cwd is .agentic/workspace/mcp/<server-id>/; story 17 adds calculate limits and the allow-list authorizer for query_table; story 18 adds taint at rest for workspace files, tainted-origin memory Proposals, fenced ask_seat questions, no ask_seat in answer runs and the asker's scopes on answer spend.
+- Decision: Owner answers (owner, 2026-11-19; initiative Notes): story 8's OCR check also reports a Local OCR service the owner runs (epic 12 story 21: reachable, last error), so story 8 also waits on 12.21; PaddleOCR's own MCP server, if the owner adds it, is an ordinary MCP server under this epic's rules (AD-26). No entry added, dropped or reordered.
+- Decision: Folder access (owner, 2026-11-19; initiative Notes): story 8's local OCR check becomes a file-reading check fed by epic 12 story 22's health API, so it waits on 12.22 instead of the dropped 12.20 and 12.21; PaddleOCR's own MCP server, if the owner adds it, stays an ordinary MCP server under this epic's rules. R9 restated. No entry added or dropped.

@@ -1,0 +1,103 @@
+# Epic 2 — Accounts and model routing. Table order is build order; `id` is permanent.
+# `covers` cites this epic's own requirement ids (its epic file's Requirements), not the initiative's: per BMad, every container numbers its own R<n>
+# and each epic line names its source as 'parent R<m>'. Outside the initiative file, write initiative ids as 'init R<m>' (final review coverage F8).
+# 2026-11-19 owner folder-access direction: entry 9 (native file parts, file chips and their probes) added after 7, before the sweep (8).
+
+[[entry]]
+id = 1
+type = "story"
+title = "Add an Anthropic Account from the CLI and call it"
+description = "Tracer bullet: `agentic accounts add|list|test|remove` writes the Account to models/accounts.yaml through the config writer, stores the key only in the keychain through SecretStore (read from the terminal without echo), shows it masked, and `test` streams one short reply from the spike's Anthropic adapter through a first EgressClient that admits only the Account's pinned host. Delivers R1's Anthropic part; story 3 adds OpenAI and compatible Accounts. No real key is used here: the owner's real-key step waits for story 5's redaction layer and leak scan (final review F7a, 2026-11-18)."
+verify = "On recorded fixtures with FakeSecretStore and a canary key, `agentic accounts add` prompts without echo, `agentic accounts list` shows the key masked, models/accounts.yaml holds only a keychain reference, and `agentic accounts test` streams a reply."
+covers = ["R1"]
+after = ["1.8"]
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 2
+type = "story"
+title = "Egress client blocks everything unlisted"
+description = "Completes am-net EgressClient: each request carries seat and Account; hosts must be on the seat's allow-list or the Account's pinned host; private, link-local, loopback and metadata addresses are blocked except local-lmstudio and local-ollama at their ports; DNS pinned per request; at most 3 redirects, each re-checked; bodies capped; auth stripped on a host change; every block audited; a clippy rule bans reqwest clients elsewhere and a CI test asserts no telemetry host. Story 4 relies on its loopback exception."
+verify = "The rule_09 trust tests fail before and pass after (with the no-telemetry test, so every dogfood build carries it: CI fails if any host outside configured Accounts, seat allow-lists and the release host appears in the binary's egress configuration): an unlisted host, a private, link-local, loopback or metadata address, a DNS-rebinding answer and a redirect to any of these are refused and each refusal is in the audit log; a 4th redirect and an oversize body are cut; auth headers are dropped on a host change; a reqwest client built outside am-net fails clippy."
+covers = ["R5"]
+after = [1]
+hitl = false
+risk = "high"
+
+[[entry]]
+id = 3
+type = "story"
+title = "OpenAI and compatible Accounts"
+description = "Delivers R1's OpenAI and OpenAI-compatible part: one OpenAI-chat-compatible adapter behind LlmProvider (built from the spike's) streams text and tool calls with usage and cancels mid-stream, for OpenAI cloud and for a compatible endpoint whose user-entered base URL is shown plainly and pinned as the Account's host (a loopback `127.0.0.1:<port>` such as a llama.cpp or vLLM server is accepted when it is not the app's own port, arch AD-12; private and LAN ranges are refused); story 4 reuses it for the local servers."
+verify = "Recorded-fixture tests stream text and two tool calls with usage from OpenAI and from a compatible endpoint, cancel mid-stream within 1 s, and a call to any host but the Account's pinned one is refused; `agentic accounts add` accepts both kinds and lists them masked."
+covers = ["R1"]
+after = [1]
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 4
+type = "story"
+title = "LM Studio and Ollama appear on their own"
+description = "The reserved Accounts local-lmstudio (127.0.0.1:1234) and local-ollama (127.0.0.1:11434) always resolve; discovery toggles their health, lists their models and reads each loaded context window (LM Studio's models endpoint, Ollama's running-model field as the spike confirmed); calls go through the compatible adapter and the egress loopback exception; nothing else is probed. Epic 3 sets the window on calls and handles overflow. Owner step: confirm on the owner's Mac with both servers running."
+verify = "With LM Studio and Ollama running, `agentic accounts list` shows both healthy, badged On this Mac, with their models and loaded context windows; with both stopped they show unhealthy and `agentic validate` still passes; a test proves only 127.0.0.1:1234 and :11434 were contacted."
+covers = ["R2"]
+after = [2, 3]
+hitl = true
+risk = "medium"
+
+[[entry]]
+id = 5
+type = "story"
+title = "Keys never leave the keychain"
+description = "Hardens SecretStore over keyring's macOS Keychain store (the only v1 store, arch AD-17, AD-47; its port contract tests also run against FakeSecretStore in the Linux portability job), makes SecretString unprintable and unserialisable and materialised only in am-net request building, adds the always-on redaction layer for tracing and audit (registered secrets and known key patterns), and runs the canary leak scan over logs, journal, audit and config in CI; epic 4 extends the scan to exports. Owner step (moved here from story 1 so a real key first meets the redaction layer and the leak scan, final review F7a): add the owner's real Anthropic key with `agentic accounts add`, run `agentic accounts test` once, then run the leak scan over the owner's own logs and journal."
+verify = "The rule_12 trust tests fail before and pass after: a canary key added as an Account appears in no log, audit entry, journal table or config file, a forced error that embeds it is redacted, and printing or serialising a SecretString fails to compile; keychain store, read and delete pass on the macOS runner and the port contract tests pass in the Linux portability job; the owner's record shows the owner's real key streamed a reply and the leak scan over the owner's logs and journal found it nowhere."
+covers = ["R6"]
+after = [2]
+hitl = true
+risk = "high"
+
+[[entry]]
+id = 6
+type = "story"
+title = "Seat model, fallback and Recommended model"
+description = "Resolves each seat to Account › Model and fallback from one model list grouped by Account with local Accounts first, pre-fills the company default model, picks the role's Recommended model from the role template's preferences among existing Accounts, and returns worded capability warnings without refusing; a FallbackProvider wrapper switches a call to the fallback on error, timeout or refusal and audits the switch. Epic 3's agent loop calls it; epic 5 renders the picker from it."
+verify = "Resolving each Company A sample seat returns Account › Model, its fallback, the Recommended model and any warning in EXPERIENCE.md's wording, never a refusal; a seat with no model gets the company default; a FakeLlm error makes the wrapper call the fallback and the switch is in the audit log."
+covers = ["R3"]
+after = [4, "1.5"]
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 7
+type = "story"
+title = "Capability chips and Test this model"
+description = "Ships the default capabilities file, merges models/capabilities.yaml over it and marks every chip known; `agentic accounts probe <account> <model>` runs one tool call and one schema output, stores the result keyed by Account and model, and only then marks the chips tested with the date; a failed probe keeps them known and says why in words."
+verify = "Chips for a configured model read known from the shipped file and change when models/capabilities.yaml overrides them; a FakeLlm-passing probe marks them tested with a date for that Account and model only; a probe answered in prose leaves them known with the failure in words."
+covers = ["R4"]
+after = [6]
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 9
+type = "story"
+title = "Models take files: native file parts, file chips and Test this model probes them"
+description = "Owner folder-access direction 2026-11-19 (arch AD-5, AD-31; provider facts checked on their documentation the same day): LlmProvider requests gain FilePart { name, media_type, bytes }; the Anthropic adapter maps a PDF to a base64 document block, JPEG, PNG, GIF and WebP to image blocks and text files to text; the OpenAI adapter sends file parts through the Responses API (input_file for PDF, text, Word, PowerPoint and spreadsheet files; image inputs; input_audio only on audio models); the OpenAI-compatible adapter (LM Studio, Ollama, owner-typed URLs) sends images only, as base64 data URLs, and only to a model whose chips say it reads images; a part whose type the model's file chips exclude makes the adapter return Unsupported before any byte is sent, and no adapter converts a file; the shipped capabilities file gains reads_pdf, reads_images, reads_office and reads_audio per model with the provider's size limits and a per-type token estimate (a PDF page, an image by pixels, text by characters), overridable in models/capabilities.yaml, where an override reads known, never tested; `agentic accounts probe` sends, for each file chip the model claims, one tiny synthetic fixture holding a known word (a one-page PDF, a PNG, a small xlsx, a one-second WAV) and marks that chip tested with the date only when the answer names the word, a failed or refused probe keeping it known with the reason in words; usage from file inputs settles in the ledger like any call. Epic 4 story 7 (drop-folder file records), epic 5 stories 4 and 17 (file chips and badges) and epic 12 stories 11, 22 and 23 (Knowledge, Folder access, folder fan-out) use these parts and chips."
+verify = "Written first, failing, on recorded fixtures: an Anthropic request with a PDF part carries one document block with media type application/pdf and the file's base64, and a PNG part one image block; the OpenAI adapter puts an xlsx part in a Responses API input_file and a PNG in an image input; the OpenAI-compatible adapter sends a PNG as a base64 data URL to an LM Studio fixture vision model, and returns Unsupported for a PDF part, and for an image to a fixture text-only model, with zero requests reaching the fixture server; a probe whose fixture answer names the known word marks reads_pdf tested for that Account and model only, and an answer without the word keeps it known with the reason in words; a models/capabilities.yaml override setting reads_office true reads known; a PDF call's reported input tokens settle in the ledger under its step."
+covers = ["R7"]
+after = [7]
+hitl = false
+risk = "high"
+
+[[entry]]
+id = 8
+type = "story"
+title = "Refactor sweep"
+description = "Cleanup only, scoped at its start from the plans and review findings this epic deferred: no new behaviour; scope pushed out of another story becomes a new story."
+verify = "`just check` and CI on main are green, including the rule_09 and rule_12 suites, and every deferred finding from this epic is closed or named in a new story."
+covers = []
+after = [1, 2, 3, 4, 5, 6, 7, 9]
+hitl = false
+risk = "low"

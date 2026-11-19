@@ -1,0 +1,186 @@
+# Epic 11 — Desktop, release and trust gate (v0.9-rc). Table order is build order; `id` is permanent.
+# `covers` cites this epic's own requirement ids (its epic file's Requirements), not the initiative's: per BMad, every container numbers its own R<n>
+# and each epic line names its source as 'parent R<m>'. Outside the initiative file, write initiative ids as 'init R<m>' (final review coverage F8).
+# Desktop lane (1–4) shares am-desktop and the release jobs; gate lane (5–8) shares .github/workflows/release; docs lane (9–11) shares docs/.
+# Dropped 2026-11-19 (owner Mac first; id kept, never reused): 4 'Signed Windows and Linux builds' -> v1.x; the portability check lives in story 1.2's CI.
+# Every trust-gate.md rule maps to a story: signing (3), updates and key rotation (2), supply chain and CI (5), SBOM, provenance, Scorecard (6),
+# parser fuzzing (7), security suites as gates (8), SECURITY.md, threat model, protections page (9), docs (10, 11), review window (13), v1.0 gate (15).
+# 2026-11-19 owner folder-access direction: 16 bundles Local search only (OCR retired); 6, 7, 8 and 9 drop Tesseract, Leptonica, pdfium, docx and pptx and add the folder suites.
+
+[[entry]]
+id = 1
+type = "story"
+title = "Desktop app opens the project on macOS"
+description = "Tracer bullet: am-desktop (Tauri 2) links am-app in-process with no sidecar, starts the loopback server, hands the webview its session through bootstrap IPC, serves the embedded UI under a strict CSP (connect-src the loopback API origin, no remote content), exposes only session bootstrap and window control IPC with minimal capabilities, registering the updater IPC group disabled (every updater command refused) until story 2 verifies signatures (final review F7d), and adds the macOS menu items mirroring the toolbar; the rule_17 tests are written to fail first. Owner step: launch the dev build on the owner's Mac with the owner's project."
+verify = "rule_17 trust tests pass: the capability file grants only the three IPC groups and every updater command is refused in this story's build, a page attempt to load a remote script, image or font is blocked by CSP, an undeclared IPC command is rejected, and no sidecar process exists; the owner's dev build opens the owner's project on the Org view with File › Stop everything ⌘. working."
+covers = ["R1"]
+after = ["10.11"]
+hitl = true
+risk = "high"
+
+[[entry]]
+id = 2
+type = "story"
+title = "Updates are verified, newer-only and asked for"
+description = "tauri-plugin-updater with a pinned minisign public key separate from the code-signing keys reads a signed update manifest from GitHub Releases; it offers only a newer version ('Version 1.1 is ready. Install on next launch?' with the verified signature stated in Settings › Updates and the sidebar foot), installs only after consent, and refuses a downgrade or a bad signature with the reason in words; docs/update-key.md holds the key rotation plan. Matches key-schedule-updates.html §2 (Updates consent)."
+verify = "The updater IPC group from story 1 is enabled only now, and its rule_17 test is updated to expect it; against a local test release server signed with a test key: a newer signed update is offered and installs only after consent; an older version, an equal version, a manifest signed with another key and a tampered artefact are each refused with a worded reason and nothing installs; the updater contacts no host but the release host; docs/update-key.md describes rotation and the separate key's custody."
+covers = ["R4"]
+after = [1]
+hitl = false
+risk = "high"
+
+[[entry]]
+id = 16
+type = "story"
+title = "Bundle Local search in the macOS installer with its licence notice"
+description = "Owner addition 2026-11-18 (built-ins shipped in the install; arch AD-45, AD-46): the macOS arm64 release job (the only v1 target, owner 2026-11-19; arch AD-47) runs `xtask bundle-services` and places services/searxng/ (pinned Python, SearXNG at its pinned commit, Granian) read-only inside the app bundle, every Mach-O and executable in them signed with the app's identity under the hardened runtime (macOS) and covered by notarisation; the manifest hash compiled into the binary matches the shipped tree; THIRD_PARTY.md and Settings › About list SearXNG (AGPL-3.0-or-later, unmodified, separate process, with the commit and where its corresponding source is), and each GitHub Release attaches the SearXNG source archive; cargo-deny's licence policy keeps AGPL out of the linked crate graph; story 3's clean-Mac check includes a web search answered by Local search with no key. Owner step: none beyond story 3's. Signs each helper with its own entitlements (final review 2 security H5, 2026-11-19; arch AD-13): agentic-extract with com.apple.security.app-sandbox only, the bundled Python executable with app-sandbox and network.client; Local search's state folder is the Python helper's sandbox container."
+verify = "Written first, failing: on the macOS release artefact in CI, the bundled trees' hashes equal the binary's manifest, `codesign --verify --deep --strict` and `spctl --assess` pass with the Python binaries inside, and a smoke test on a clean macOS runner with no network keys starts the app, sees Local search reach running and gets a JSON search answer from a recorded engine fixture; THIRD_PARTY.md and the About page name SearXNG's licence, commit and source link; the release has the source archive attached; cargo-deny shows no AGPL crate linked. `codesign -d --entitlements -` on each helper in the notarised bundle prints exactly its set, and the sandbox self-test passes on the clean macOS runner."
+covers = ["R13", "R2", "R9"]
+after = [2, "12.18"]
+hitl = false
+risk = "high"
+
+[[entry]]
+id = 3
+type = "story"
+title = "Signed and notarised macOS installer"
+description = "Gate first (owner, 2026-11-19; the deferred stack-spike criterion 8): before any other work in this story, with the owner's Developer ID certificate and notarisation credentials (an app-specific password or App Store Connect API key) in CI secrets, a signed and notarised Tauri build that links the core in-process launches on a clean Mac (or a fresh macOS user account) and serves the UI, and the result is added to docs/spike-report.md as criterion 8's verdict; if it fails, the story stops and Sofia replans the release lane. Then: the release job builds the Apple Silicon app and installer, signs it with Developer ID from CI secrets, enables the hardened runtime, notarises and staples it, and publishes it to a draft GitHub Release; first run needs no runtime. Owner steps: install it on a clean Mac, time install to first run and to the first successful run (a Blank department seat, or the Company A sample's flow F1), and record both; the first successful run uses a local model server and no keys, with a web search step answered by Local search (RULE-20, 2026-11-18)."
+verify = "docs/spike-report.md records criterion 8 as pass from the owner's clean-Mac run of the signed and notarised build before the installer work merges; `spctl --assess` and `stapler validate` pass on the published artefact in CI; the owner's clean-Mac record shows first run under 5 minutes and the first successful run within 15 minutes of install, with no Gatekeeper warning."
+covers = ["R2"]
+after = [2, 16]
+hitl = true
+risk = "high"
+
+[[entry]]
+id = 4
+type = "story"
+title = "Signed Windows and Linux builds"
+description = "DROPPED 2026-11-19 (owner Mac first; plan file status dropped; id kept, never reused; v1.x revisits it). Historical text: Release jobs build the Windows 11 x64 installer, code-signed through the owner's chosen signing route, and the Linux x64 AppImage and .deb with a checksums file signed through Sigstore attestations; both bundle everything with no runtime to install, and Windows and Linux strings say Credential Manager and Secret Service. Owner step: provide the Windows signing certificate or account and install each build once."
+verify = "CI verifies the Windows signature (signtool verify) and the Linux checksums' signature on the published artefacts; clean Windows 11 and Ubuntu runners install each build and an automated smoke test reaches the first-run wizard; the owner's install records confirm both."
+covers = ["R3"]
+after = [3]
+hitl = true
+risk = "high"
+unknown = "Which Windows signing route will the owner use (OV or EV certificate, or a cloud signing service)?"
+
+[[entry]]
+id = 5
+type = "story"
+title = "Locked, audited and pinned supply chain"
+description = "Extends epic 1's CI baseline for releases: builds use --locked and npm ci; cargo-deny (licences, advisories, bans), cargo-audit and npm audit fail the release; a check fails any workflow step not pinned by SHA or any job token wider than it needs; the no-telemetry test runs on the release build. Owner step: require one approving review on main in branch protection and enable 2FA for maintainers."
+verify = "Seeded test branches fail the release workflow for: a GPL crate, a crate with a known advisory, an npm package with a high advisory, an unpinned Action, a job with write-all permissions and an unlocked build; the clean branch passes; the repo settings export shows required review on main."
+covers = ["R5"]
+after = [3]
+hitl = true
+risk = "high"
+
+[[entry]]
+id = 6
+type = "story"
+title = "SBOM, provenance and Scorecard"
+description = "Each release publishes a CycloneDX SBOM for the Rust and web dependencies, GitHub build provenance attestations and a checksums file for every artefact; the OpenSSF Scorecard workflow runs on main with results published, its badge is on the README, and dangerous-workflow, pinned-dependencies and token-permissions findings are fixed. The SBOM also lists every bundled non-Rust component (final review 2 security M5, 2026-11-19): the CPython build, SearXNG at its commit with its hash-locked Python dependencies, Granian, each with version, licence and sha256."
+verify = "A draft release carries the SBOM, attestations verifiable with `gh attestation verify` for each artefact, and checksums; the Scorecard run shows no dangerous-workflow, pinned-dependencies or token-permissions findings and the README badge resolves. The SBOM lists the Python runtime and every package in the SearXNG lock file with their hashes, and no OCR component (retired 2026-11-19)."
+covers = ["R6"]
+after = [5]
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 7
+type = "story"
+title = "Parser fuzzing gate"
+description = "Builds on the cargo-fuzz targets and nightly job from epic 4 story 6 (PDF text layer, xlsx, text decoding, zip; the docx and pptx targets went with their readers on 2026-11-19), adding a CSV target and corpus retention; the release workflow refuses to publish unless each target has at least one cumulative hour without an open crash; a found crash files its reproducer as a regression test. Adds fuzz targets for HTML extraction (dom_smoothie, scraper, htmd), feeds and sitemaps (feed-rs, quick-xml), the media-type sniffing of linked-folder files (leading bytes; added 2026-11-19), link lists (.url, .webloc, links.txt) and the CDP pipe framing (final review 2 security M5, 2026-11-19)."
+verify = "The nightly fuzz job runs every target and stores its corpus; a seeded crashing input makes the release gate fail and adds a regression test; with the seed removed the gate passes and reports fuzz hours per target. The gate lists the HTML, feed, sitemap, image, link-list and CDP-framing targets with their fuzz hours."
+covers = ["R7"]
+after = [6]
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 8
+type = "story"
+title = "Security suites gate every release"
+description = "The release workflow publishes nothing unless, on the signed macOS Apple Silicon build, every suite under crates/am-e2e/tests/trust/ and crates/am-e2e/tests/engine/ passes, selected by directory and never by a hand-kept list (final review 2 security M5, 2026-11-19): rule_08 to rule_19 (including rebinding, CSRF and WebSocket, path traversal and symlink escape, budget and kill-switch, secret-leak scan), connectors_*, local_search_*, capabilities_*, folder_access_*, taint_*, widening_*, sandbox_* and the cross-department engine suites, together with the golden run and injection pack on FakeLlm; the owner's real-local-model golden run and injection pack record for the same commit is required before a tag. The gate also checks entitlements per binary: the main app carries no com.apple.security.cs.disable-library-validation, allow-unsigned-executable-memory or allow-dyld-environment-variables entitlement, and each helper (agentic-extract, the Python executable) carries exactly its AD-13 App Sandbox set."
+verify = "A release run lists every trust suite as passed on the signed macOS build; a seeded failing trust test stops publishing; tagging without the owner's real-model record for that commit is refused by the gate. A test file added to tests/trust/ without being listed anywhere runs in the gate; a seeded disable-library-validation entitlement on the main app stops publishing."
+covers = ["R8"]
+after = [7]
+hitl = false
+risk = "high"
+
+[[entry]]
+id = 9
+type = "story"
+title = "SECURITY.md, threat model and protections page checked"
+description = "Publishes SECURITY.md (private disclosure channel, response target, advisory process) and docs/threat-model.md (assets, the eight attacker stories, mitigations and residual risks); reviews the Settings › About protections page from epic 9 against them so each 'protects' claim names its test id and each 'does not' is stated (prompt injection mitigated by architecture, not solved; read-tool exfiltration mitigated, not eliminated, through the link a model chooses; stdio MCP network declared, not enforced; other processes of the same OS user are outside the full threat model; the Apply real-click check is client-side only; the live database relies on OS disk encryption); a CI check fails when a claimed test id does not exist or a residual risk is missing from the page. The protections page also states (2026-11-19, final review 2 security H5): the parser and Local search run in the macOS App Sandbox; files a seat attaches to a cloud model leave this Mac for that provider (2026-11-19); the rendering browser and stdio MCP servers run as you and are not sandboxed by the app, so while either is enabled every decision is made in the app's window; Local search's engine hosts are proxied by configuration, not enforced by the OS."
+verify = "SECURITY.md and the threat model are in the repo and linked from the README; the CI check passes, and fails when a claim's test file is renamed or a residual risk is deleted from the page."
+covers = ["R9"]
+after = [8]
+hitl = false
+risk = "high"
+
+[[entry]]
+id = 10
+type = "story"
+title = "Config schema reference and validate errors documented"
+description = "Generates the config schema reference for every project file kind (company, models, tools, seats, workflows, tables, schemas, dashboards) from the schemas the loader uses, documents every `agentic validate` error code with its file, line and fix example, and a CI check fails when a schema field or error code is undocumented."
+verify = "docs/config/ holds a page per file kind and an error catalogue; the CI check fails after adding an undocumented field or error code and passes once documented; three invalid fixture files' validate output matches the documented messages."
+covers = ["R10"]
+after = [9]
+hitl = false
+risk = "low"
+
+[[entry]]
+id = 11
+type = "story"
+title = "README, how-to, contributor docs and examples"
+description = "Writes the README path from download to first run, the how-to for moving a CrewAI or Paperclip setup by hand into the project files, contributor docs (build, `just check`, story discipline, trust tests) and example projects (the Company A sample and a Blank start) that pass `agentic validate`. Owner step: hand the README to a fresh reader and record whether they reach first run unaided."
+verify = "Examples pass `agentic validate` in CI; links in docs resolve in CI; the fresh reader's record shows first run reached from the README alone, with any stumble fixed."
+covers = ["R10"]
+after = [10]
+hitl = true
+risk = "medium"
+
+[[entry]]
+id = 12
+type = "story"
+title = "Public name applied everywhere"
+description = "Applies the chosen public name to the binary, bundle id, installers, update manifest, product strings (wizard, About, server-unreachable state) and the keychain service, with a one-time migration that moves stored keys, backup keys included, from the agentic-manager service and leaves none behind."
+verify = "A build carries the new name in every artefact and string (a CI grep finds the working name only in the migration); on a machine with keys under the old service, first launch moves them, Accounts still work and the old entries are gone."
+covers = ["R11"]
+after = [11]
+hitl = false
+risk = "medium"
+unknown = "What is the public product name (prd OQ-1: Staffroom, Seatwork, Deskwork, Orgline or Cadre after trademark and registry checks)?"
+
+[[entry]]
+id = 13
+type = "story"
+title = "Refactor sweep"
+description = "Cleanup only, scoped at its start from the plans and review findings this epic deferred: no new behaviour; scope pushed out of another story becomes a new story."
+verify = "`just check`, CI and the release workflow on main are green, and every deferred finding from this epic is closed or named in a new story."
+covers = []
+after = [1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 16]
+hitl = false
+risk = "low"
+
+[[entry]]
+id = 14
+type = "story"
+title = "Tag v0.9-rc and open the review window"
+description = "Release story: on a commit where every trust-gate check from stories 1–12 is green on the signed macOS Apple Silicon build, tag v0.9-rc and publish it; owner steps: install it, continue the dogfood clock on it (recording the switch in docs/dogfood-log.md), and open the community review window of at least two weeks with a public call for review and a findings file."
+verify = "The v0.9-rc release page carries the signed, notarised macOS installer, SBOM, attestations and the green gate summary; docs/dogfood-log.md records the switch date to v0.9-rc; docs/review-window.md records the opening date and where findings go."
+covers = ["R12"]
+after = [13]
+hitl = true
+risk = "high"
+
+[[entry]]
+id = 15
+type = "story"
+title = "v1.0 gate and tag"
+description = "Closing release gate: `just release-gate v1.0` reads docs/dogfood-log.md and the trust-gate results and passes only when four consecutive clean weeks with no manual repair are recorded, counted from the frozen post-epic-9 build, at least the final two on v0.9-rc, the review window is closed with its findings published and resolved or accepted, and every trust-gate item is green; then v1.0 is tagged and published under MIT. Owner steps: record each week and run the gate."
+verify = "The gate fails on test logs with a repair in week 3, with only one week on v0.9-rc, or with an open review finding, and passes on the real log; the v1.0 release page carries the same artefacts as v0.9-rc plus the published review findings."
+covers = ["R12"]
+after = [14]
+hitl = true
+risk = "high"

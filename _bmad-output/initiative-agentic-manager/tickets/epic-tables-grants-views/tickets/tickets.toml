@@ -1,0 +1,157 @@
+# Epic 7 — Tables, grants and saved views (retitled 2026-11-18; slug kept). Table order is build order; `id` is permanent.
+# `covers` cites this epic's own requirement ids (its epic file's Requirements), not the initiative's: per BMad, every container numbers its own R<n>
+# and each epic line names its source as 'parent R<m>'. Outside the initiative file, write initiative ids as 'init R<m>' (final review coverage F8).
+# Store lane (1, 2, 4, 5) shares am-store migrations; grid lane (6–9) shares web/src tables code; 10–11 share the Team sheet and org chart.
+# Definition of Done for every UI story (final review UX M3), whether or not its verify repeats it: axe clean in light and dark,
+# the story's path completed keyboard-only, and reduced motion honoured.
+
+[[entry]]
+id = 1
+type = "story"
+title = "A table opens in the grid with its provenance"
+description = "Tracer bullet: /api/v1 lists a team's tables and pages a table's rows (from the generic row store through a read-only reader) with each row's last change; Tables (⌘5, sidebar and ⌘K) opens any table (the Company A sample's Table T1 in the tests) in a virtualised grid with columns from its schema, sticky header, sort by header and the last-changed-by cell (seat avatar and run number, You, or import source); an empty table shows ghost rows from its schema with Import a file. Matches key-tables-dashboards.html §1 (grid only)."
+verify = "After the golden FakeLlm run's fixture data is loaded, a Playwright test opens Tables › Table T1 in browser mode, sees the rows with 'D2-E1 · Run #1' style provenance, sorts by a header, scrolls 500 fixture rows smoothly with only visible rows in the DOM, and an empty table shows ghost rows and Import a file."
+covers = ["R1"]
+after = ["3.6", "5.13"]
+hitl = false
+risk = "medium"
+references = ["ux-agentic-manager/mockups/key-tables-dashboards.html §1"]
+
+[[entry]]
+id = 2
+type = "story"
+title = "Grants read as of run start"
+description = "Grants in table config (team, table or document, read-only) are validated across files; every run records start_seq, the row_history high-water mark at start; a step input naming a granted table reads it as of start_seq and a granted document at the version current at run start; table_write through a grant is refused with the error in words; adding a grant through the API is privilege-widening and needs the confirm token. The fixture in story 3 builds on this."
+verify = "On FakeLlm: a run of team B reads team A's granted table and sees exactly the rows as of its start even when team A writes rows mid-run; a re-run sees the new rows; a granted document input is the version current at start; team B's table_write to the granted table is refused; a grant to an unknown table fails `agentic validate` with file, line and fix; adding a grant without the confirm token is refused."
+covers = ["R7"]
+after = [1, "3.6"]
+hitl = false
+risk = "high"
+
+[[entry]]
+id = 3
+type = "story"
+title = "D1 reads Table T1 through a grant"
+description = "Uses the Company A fixture under fixtures/ (no sample names in crates/ or web/src): D1's workflow f2-d1 reads D2's Table T1 through story 2's grant as of its run start and writes its own document; a CI job runs it on scripted FakeLlm through the generic loader beside the golden run, including a scripted write to Table T1 that must be refused; the denylist scan stays required."
+verify = "`just fixture-grant` (and its CI job) runs D1's workflow on FakeLlm: its document version cites Table T1 rows present at run start, its scripted table_write to Table T1 is refused and logged, and the denylist scan over crates/ and web/src passes; deleting the grant from the fixture config makes the run fail at validate."
+covers = ["R10"]
+after = [2]
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 4
+type = "story"
+title = "Status changes need a declared transition and a reason"
+description = "The store's row command checks a template-defined status field: only declared transitions are allowed and each needs a non-empty reason recorded in row_history, for Seat (via table_write), Human (via the API) and Import actors alike, refused otherwise with the error in words; the seat receives the refusal as a tool error it can act on; the Company A sample's Table T1 transitions are validated against the reference company's list."
+verify = "A table-driven test tries every declared and an undeclared transition for each actor: declared with a reason succeeds and its reason appears in row history; an empty reason or an undeclared transition is refused with a worded error for all three actors; a FakeLlm step whose table_write omits the reason gets the tool error and retries with one; `agentic validate` checks Table T1's status list against the reference company."
+covers = ["R3"]
+after = [2]
+hitl = false
+risk = "high"
+
+[[entry]]
+id = 5
+type = "story"
+title = "Per-table read-only views"
+description = "On every config apply am-store regenerates a read-only SQL view v_<table-id> per config table with the table's fields as columns over current rows; views are dropped and recreated in the same transaction as the apply; reads through the jailed connection's role see only views; a write to a view is refused. epic-assistant-dashboards and epic-polish-dry-run-learning build on these views."
+verify = "Applying a config change that adds a field to Table T1 recreates v_table-t1 with the new column in the same apply; SELECT over v_table-t1 returns the current rows with typed columns; INSERT, UPDATE and DELETE on a view fail; a removed table's view is dropped; the migration is reported."
+covers = ["R9"]
+after = [4]
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 6
+type = "story"
+title = "Edit, sort, filter and search in the grid"
+description = "The grid gains a filter field, search, inline edit (double-click or Return) that writes through the row command with the Human actor shown as You, and a status menu that requires a one-line reason before it applies (story 4's command); every action has a key; refusals show on the cell in words, never toast-only. Matches key-tables-dashboards.html §1."
+verify = "Playwright, keyboard only: filter and search narrow the rows; Return edits a cell and the last-changed-by cell reads You; choosing a status without a reason keeps the menu open with the reason field required; with a reason the status and reason update; an undeclared transition shows the worded refusal on the row."
+covers = ["R1", "R3"]
+after = [1, 4]
+hitl = false
+risk = "medium"
+references = ["ux-agentic-manager/mockups/key-tables-dashboards.html §1"]
+
+[[entry]]
+id = 7
+type = "story"
+title = "Row detail with history and comments"
+description = "Selecting a row opens row detail on the right with its full history (status, actor, run, step, reason, source with untrusted sources in an untrusted well) and comments; Add a comment stores it with the Human actor and time in the database, audited, without a row change; history entries link to the run step. Matches key-tables-dashboards.html §1 row detail."
+verify = "Playwright: row detail for a golden-run Table T1 row lists New, Processed and Handed-off with seat, run, step and reason, its web source marked untrusted as plain text; adding a comment shows it with You and the time, writes an audit entry and no row_history entry; a history entry opens the run at that step."
+covers = ["R2"]
+after = [6, "6.1"]
+hitl = false
+risk = "low"
+references = ["ux-agentic-manager/mockups/key-tables-dashboards.html §1"]
+
+[[entry]]
+id = 8
+type = "story"
+title = "Saved views, a table's default view and export"
+description = "Saved view tabs above the grid store filter, sort and columns in tables/<id>.yaml through the config writer (History, Undo toast); '+ View' saves the current state; the table's default view opens first (Table T1's \"Open items\" view on the sample); Export writes the current view as CSV or xlsx with status, reason and row id columns after a secret scan that refuses a file containing a key. Matches key-tables-dashboards.html §1 tabs and toolbar."
+verify = "Playwright: Table T1 opens on its default view with its declared columns; '+ View' saves a filtered view that appears in tables/table-t1.yaml and History, and ⌘Z removes it; Export xlsx and CSV of that view produce files whose rows, status, reason and row id match the grid; a row holding a canary key makes export fail with a worded error."
+covers = ["R6", "R4"]
+after = [7]
+hitl = false
+risk = "medium"
+references = ["ux-agentic-manager/mockups/key-tables-dashboards.html §1"]
+
+[[entry]]
+id = 9
+type = "story"
+title = "CSV and xlsx import through a diff"
+description = "Import picks a CSV or xlsx file, parses it in the capped extract child with WorkspacePath checks (both from epic 4 story 6), matches rows by row id then the declared key column, and shows the Import diff (status changes, reasons added, new rows, rows with a status change but no reason kept and listed, unmatched rows with a column-mapping step and an 'Add as new rows' choice); Apply writes every change through story 4's command with the Import actor in one transaction; Cancel changes nothing. Matches key-tables-dashboards.html §2."
+verify = "A fixture xlsx edited like Flow 6 shows 'Status changes 9 · Reasons added 9 · Rows without a reason (status kept) 2' and applies only on Apply, with provenance 'xlsx import'; a CSV round-trip of story 8's export applies no change; a renamed key column shows 0 matched and the mapping step; an oversized or zip-bomb file is refused by the caps; a symlinked path outside the workspace is refused."
+covers = ["R5"]
+after = [8]
+hitl = false
+risk = "high"
+references = ["ux-agentic-manager/mockups/key-tables-dashboards.html §2"]
+
+[[entry]]
+id = 10
+type = "story"
+title = "Team sheet with grants"
+description = "Return on a team box opens the Team sheet (spine-only; same sheet shell as the seat sheet): head seat, seats (N adds one), workflows with schedule in words and Run now with its estimate, tables and documents owned, Grants (what this team shares, with whom, read-only; Add grant and Remove), guidance notes, team budget and Export department, each calling the existing commands; Add grant and raising the team budget open epic-org-seats-ui's privilege-widening confirmation (5.9) and apply through the confirm-token path; documents owned open their pages (6.9); Run now uses epic 5's estimate line (5.7); the Grants list is the screen-reader home of grant lines. Matches key-team-sheet.html."
+verify = "Playwright, keyboard only: Return on the D2 box opens its sheet with every section; Add grant of Table T1 to a second team shows 'High risk · widens access', Return keeps current access, and only the named widening button writes the grant to config with a History entry; Remove grant is undoable; axe reports no violations on the sheet."
+covers = ["R8", "R7"]
+after = [2, "5.7", "5.9", "6.9"]
+hitl = false
+risk = "medium"
+references = ["ux-agentic-manager/mockups/key-team-sheet.html", "ux-agentic-manager/EXPERIENCE.md Team sheet"]
+
+[[entry]]
+id = 11
+type = "story"
+title = "Grant lines on the org chart"
+description = "Grants live in the Team sheet's Grants list (final review 2 UX M5, owner delegated 2026-11-19); on the org chart only hovering a team of a grant draws a dotted line between the two team boxes labelled with what is shared and 'read-only' (selection shows hand-offs, story 5.18), hidden at rest, and a grant that joins the same pair as a hand-off merges into that hand-off's line label; reporting lines never change; clicking the label opens Team sheet › Grants; the granted table's grid shows the grant pill ('read by <team>'). Matches key-org.html and key-tables-dashboards.html §1."
+verify = "Playwright: at rest no grant line is drawn; hovering either granted team draws one dotted line labelled 'Table T1 · read-only' and selecting a team draws none; clicking the label opens Team sheet › Grants; keyboard focus on a team's Grants entry in the Team sheet announces the grant; Table T1's grid header shows the grant pill; visual snapshot matches in light and dark."
+covers = ["R8"]
+after = [10, "5.2"]
+hitl = false
+risk = "low"
+references = ["ux-agentic-manager/mockups/key-org.html", "ux-agentic-manager/mockups/key-tables-dashboards.html §1"]
+
+[[entry]]
+id = 12
+type = "story"
+title = "Refactor sweep"
+description = "Cleanup only, scoped at its start from the plans and review findings this epic deferred: no new behaviour; scope pushed out of another story becomes a new story."
+verify = "`just check` and CI on main are green, including the fixture-grant job and the denylist scan, and every deferred finding from this epic is closed or named in a new story."
+covers = []
+after = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+hitl = false
+risk = "low"
+
+[[entry]]
+id = 13
+type = "story"
+title = "Tables end-to-end and design QA"
+description = "Closing end-to-end suite: Playwright runs Flow 6 (Table T1's default view, export xlsx, edited re-import through the diff, Apply, provenance 'xlsx import') and a grant round (Team sheet Add grant, dotted line, D1's read of Table T1) in browser mode on the golden data; owner step: design QA of the grid, row detail, saved views, import diff and grant line against key-tables-dashboards.html §1–2 and key-org.html in light and dark at the milestone demo, with differences fixed or recorded."
+verify = "The tables e2e suite passes in CI on the macOS arm64 runner (v1 is macOS only, 2026-11-19); the owner's design QA record lists each mockup section as matching or as a recorded decision."
+covers = []
+after = [12]
+hitl = true
+risk = "medium"
+references = ["ux-agentic-manager/mockups/key-tables-dashboards.html §1–2"]

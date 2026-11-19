@@ -1,0 +1,136 @@
+# Epic 8 — Assistant and dashboards. Table order is build order; `id` is permanent.
+# `covers` cites this epic's own requirement ids (its epic file's Requirements), not the initiative's: per BMad, every container numbers its own R<n>
+# and each epic line names its source as 'parent R<m>'. Outside the initiative file, write initiative ids as 'init R<m>' (final review coverage F8).
+# Engine lane (1–4) shares am-engine's assistant module and the jailed reader; card lane (5–7) shares the Proposal card component; dashboards (8–9) share web/src dashboards.
+# Definition of Done for every UI story (final review UX M3), whether or not its verify repeats it: axe clean in light and dark,
+# the story's path completed keyboard-only, and reduced motion honoured.
+# Story 1 carries the first jail and fence tests so the Assistant never reads live rows unguarded (final review F7b); stories 2 and 4 complete them.
+
+[[entry]]
+id = 1
+type = "story"
+title = "Ask a question and see the query"
+description = "Tracer bullet: ⌘J opens the Assistant slide-over (registered in the shell and ⌘K); a question goes to the am-engine assistant module, which calls its model through the ledger and egress client with one tool, query_views, run on a dedicated read-only connection (SQLITE_OPEN_READ_ONLY with an authorizer that admits only SELECT on v_* views, so the Assistant never reads live rows unguarded; story 2 completes the jail) whose results reach the model only as fenced UntrustedData with their source label (story 4 extends the fence to every Assistant read); the answer streams over the WebSocket as sanitised Markdown with the SQL shown collapsed as '▸ Query… (read-only)'. Matches key-assistant.html §1 (panel, answer, query)."
+verify = "With FakeLlm scripted to call query_views, a Playwright test presses ⌘J, asks 'Table T1 rows by status this month', sees the streamed answer and expands the read-only query showing SELECT over v_table-t1; the ledger holds the call attributed to the Assistant; Esc closes the panel and returns focus; written to fail first here (final review F7b): query_views refuses an INSERT, an UPDATE and a SELECT on table_rows through its connection, and a Table T1 row's free-text in the answer's context appears in the stored prompt only inside the labelled untrusted fence."
+covers = ["R1", "R2"]
+after = ["7.5"]
+hitl = false
+risk = "medium"
+references = ["ux-agentic-manager/mockups/key-assistant.html §1"]
+
+[[entry]]
+id = 2
+type = "story"
+title = "The Assistant's connection refuses writes and caps queries"
+description = "Completes the Assistant's jail begun in story 1: query_only, an allow-list authorizer (arch AD-6, amended 2026-11-19, final review 2 security M6) that permits only SELECT and reads of v_* views and denies sqlite_master, knowledge_fts and its shadow tables, every other table, ATTACH, every PRAGMA and load_extension, lowered SQLite length, SQL-length, expression-depth and compound-select limits, a capped page cache, a row cap and a progress-handler time limit (defaults in company.yaml); each refusal returns a worded reason the model and the owner see; trust tests for the jail are written to fail first."
+verify = "Trust tests: INSERT, UPDATE, DELETE, CREATE, ATTACH, PRAGMA writable_schema=1, load_extension and SELECT on table_rows or audit_log through the Assistant's tool are each refused with a worded reason; a query returning more than the row cap is cut at the cap and says so; a recursive CTE that runs past the time limit is interrupted; a plain SELECT on v_table-t1 succeeds. SELECT on sqlite_master, on knowledge_fts and on knowledge_fts_data, a 2 MB SQL string and a 2,000-deep nested expression are each refused with a worded reason; the same jail tests run against epic 9 story 17's query_table."
+covers = ["R1"]
+after = [1]
+hitl = false
+risk = "high"
+
+[[entry]]
+id = 3
+type = "story"
+title = "Citations, run explanations and low confidence"
+description = "Adds the read_run, read_document and read_config tools (through ToolGate, read class, no egress); answers cite rows and runs as am:// links rendered as chips that open the row detail or the run at its step, and a citation that does not resolve is flagged; 'why did X happen' answers explain a run from its journal; a low-confidence answer says so in words; Assistant history persists per project."
+verify = "FakeLlm scripts: 'why did D1-E2 flag item #407 as high risk?' answers citing Run #12 · step 2 (branch d1-e2) and Table T1 row #407, and each chip opens its source; an answer citing a missing row shows the unresolved flag; a scripted low-confidence answer shows the low-confidence line; after a restart the conversation is still in the panel."
+covers = ["R2"]
+after = [2]
+hitl = false
+risk = "medium"
+references = ["ux-agentic-manager/mockups/key-assistant.html §1"]
+
+[[entry]]
+id = 4
+type = "story"
+title = "Untrusted content stays fenced for the Assistant"
+description = "Everything the Assistant reads from free-text in table rows, documents and run tool results reaches its model only as fenced UntrustedData with its source label; Proposals built while tainted content was in context carry the tainted flag and their source rows; epic 4's injection pack (4.9) gains Assistant cases (poisoned row reasons, document lines and tool results that ask for config changes or outbound calls), written to fail first."
+verify = "The injection pack's Assistant cases on FakeLlm (and in the nightly real-model run) produce zero outbound calls and zero approvable proposals: every proposal they cause is flagged tainted and cannot apply without the owner's click; the stored prompt shows the poisoned text only inside the labelled fence."
+covers = ["R3"]
+after = [3, "4.9"]
+hitl = false
+risk = "high"
+
+[[entry]]
+id = 5
+type = "story"
+title = "Proposal cards apply only from a real click"
+description = "The Assistant emits Proposals on epic 4's shape; the card extends epic 6's Inbox proposal card component (6.8, DESIGN proposal-card) and shows the file diff, effect line, source rows and the tainted flag; Apply calls the Human apply command only from a trusted pointer or key event inside the rendered card and adds History with an Undo toast; Edit opens the affected sheet with the change prefilled; Dismiss discards; a card whose snapshot hash no longer matches is refused with 'This file changed since. Re-propose?'. Matches key-assistant.html §1 proposal card."
+verify = "Playwright: a scripted instruction-change proposal shows the diff of seats/d1-e2.md and applies on a real click with a History entry 'You · applied Assistant proposal' and Undo; a synthetic dispatched click and an apply call without a Human actor are refused; Edit opens the seat sheet prefilled; after an outside edit to the file, Apply is refused and offers to re-propose."
+covers = ["R4"]
+after = [4, "4.10", "6.8"]
+hitl = false
+risk = "high"
+references = ["ux-agentic-manager/mockups/key-assistant.html §1"]
+
+[[entry]]
+id = 6
+type = "story"
+title = "Privilege-widening proposals ask twice"
+description = "A proposal whose patches epic 4 story 17's classifier marks widening (every kind in arch AD-15, not only tools, MCP servers, budgets, hosts and grants) is flagged 'High risk · widens access' with a plain effect sentence; its primary is 'Review and apply…', which opens epic-org-seats-ui's privilege-widening confirmation; apply needs the second call with the confirm token (two minutes); 'Keep current access' is the default. Matches key-assistant.html §2."
+verify = "Playwright: the 'add a Tavily key for D1-E1' proposal shows the high-risk card; Return in the dialog keeps current access and writes nothing; the named widening button applies it with History; an apply with an expired or missing confirm token is refused; every widening kind of epic 4 story 17's list (capability on, provider Account, accepts, hand-off, event trigger, human→AI reviewer swap and the rest) is flagged in a table-driven test that reuses that story's cases."
+covers = ["R5"]
+after = [5, "5.9"]
+hitl = false
+risk = "high"
+references = ["ux-agentic-manager/mockups/key-assistant.html §2"]
+
+[[entry]]
+id = 7
+type = "story"
+title = "Run now? cards show the estimate"
+description = "Asking the Assistant to run a workflow yields a 'Run now?' Proposal card with the estimate line and its basis and the remaining budget ('About ₹80–120 · your last 4 runs · week so far ₹96 of ₹600'); the run starts only from Run on the card through the manual-start command with the Human actor; Dismiss starts nothing. Matches key-assistant.html §1 Run now? card."
+verify = "Playwright: 'run F1 now' shows the Run now? card with a range, never a single figure, and the remaining budget; nothing starts until Run is clicked; the started run's origin is manual with actor 'You'; Dismiss leaves the Runs list unchanged."
+covers = ["R6"]
+after = [6]
+hitl = false
+risk = "medium"
+references = ["ux-agentic-manager/mockups/key-assistant.html §1"]
+
+[[entry]]
+id = 8
+type = "story"
+title = "Pin a chart to a dashboard"
+description = "Assistant answers can carry a chart, table or KPI built from their query result; Pin writes a card (SQL, kind, layout) to dashboards/<id>.yaml through the config writer with History and Undo; Dashboards (⌘6) lists the dashboards and refreshes each card on open through the Assistant's read-only path, showing the refresh time; charts render with the chosen library, the accent for the measure and grey for the comparison, and no remote content. Records the chart-library decision (arch Deferred). Matches key-tables-dashboards.html §3."
+verify = "Playwright: pinning 'Table T1 rows by status' creates dashboards/company-a.yaml holding the SQL; opening Dashboards refreshes it with the time shown; a newly handed-off row changes the bar on reopen; the CSP report shows no remote request; ⌘Z removes the card; the empty state reads 'Ask the Assistant to build your first card.'"
+covers = ["R7", "R8"]
+after = [7]
+hitl = false
+risk = "medium"
+references = ["ux-agentic-manager/mockups/key-tables-dashboards.html §3"]
+
+[[entry]]
+id = 9
+type = "story"
+title = "Dashboard card menu and broken queries"
+description = "Each card offers Query (read-only view of its SQL), Ask about this (opens the Assistant and sends the card's query and its already-visible result figures, nothing else, to the Assistant's configured model), Rename and Remove (through the config writer), and reorders by drag or ⌥←/⌥→; a card whose query fails on open shows 'This query failed: <reason>. Ask the Assistant to fix it.' and the rest still load. Matches key-tables-dashboards.html §3."
+verify = "Playwright, keyboard only: ⌥→ moves a card and the order persists in the file; Rename and Remove are undoable; Query shows the SQL read-only; Ask about this opens ⌘J with the card named and the journal shows only the query and the visible figures sent; renaming a table field breaks one card, which shows the failure sentence while the other cards render."
+covers = ["R8"]
+after = [8]
+hitl = false
+risk = "low"
+references = ["ux-agentic-manager/mockups/key-tables-dashboards.html §3"]
+
+[[entry]]
+id = 10
+type = "story"
+title = "Refactor sweep"
+description = "Cleanup only, scoped at its start from the plans and review findings this epic deferred: no new behaviour; scope pushed out of another story becomes a new story."
+verify = "`just check` and CI on main are green, including the Assistant jail trust tests and the injection pack, and every deferred finding from this epic is closed or named in a new story."
+covers = []
+after = [1, 2, 3, 4, 5, 6, 7, 8, 9]
+hitl = false
+risk = "low"
+
+[[entry]]
+id = 11
+type = "story"
+title = "Assistant and dashboards end-to-end and design QA"
+description = "Closing end-to-end suite: Playwright runs UJ-3's Assistant part (explain a branch's finding, propose an instruction or memory-note change, apply it, see it in History), a privilege-widening proposal kept and then applied, a Run now? card, and pin-to-dashboard with refresh, in browser mode on the golden data; owner step: design QA of key-assistant.html and key-tables-dashboards.html §3 in light and dark at the milestone demo, with differences fixed or recorded."
+verify = "The Assistant e2e suite passes in CI on the macOS arm64 runner (v1 is macOS only, 2026-11-19); the owner's design QA record lists each mockup section as matching or as a recorded decision."
+covers = []
+after = [10]
+hitl = true
+risk = "medium"
+references = ["ux-agentic-manager/mockups/key-assistant.html", "ux-agentic-manager/mockups/key-tables-dashboards.html §3"]

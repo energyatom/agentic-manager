@@ -1,0 +1,324 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><title>Team side sheet — Agentic Manager key screens</title>
+<style>
+/* Governing spine sections: EXPERIENCE.md Component Patterns (Team sheet, Grant line, Privilege-widening confirmation, Budget field, Guidance note); DESIGN.md Components (side-sheet, grant-line, proposal-card-risk, team-box); architecture AD-22 (grants read-only, read as of run start)
+   Spines (DESIGN.md + EXPERIENCE.md) win on any conflict with this mock. Static, offline, no JS. */
+
+:root{--font:-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI Variable Text","Segoe UI",system-ui,sans-serif;
+--mono:ui-monospace,"SF Mono",SFMono-Regular,Menlo,Consolas,monospace;}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:var(--font);font-size:13px;line-height:20px;background:#DCDCE0;color:#1D1D1F;padding:32px;-webkit-font-smoothing:antialiased}
+.theme{--bg:#F5F5F7;--surface:#FFFFFF;--surface-2:#FAFAFB;--sidebar:#ECECEF;--ink:#1D1D1F;--ink-2:#5E5E64;--ink-3:#707075;
+--hair:#E2E2E7;--control:#8E8E93;--accent:#0A63E0;--accent-fill:#0A63E0;--on-accent:#FFFFFF;--accent-soft:#E8F0FD;
+--ok:#1A7F45;--warn:#8A5200;--warn-dot:#E59A00;--warn-fill:#FFF3DC;--err:#B3261E;--err-fill:#FDECEC;--untrusted:#FFF8E6;--untrusted-edge:#D9B44A;
+--shadow-1:0 1px 2px rgba(0,0,0,.06),0 0 0 .5px rgba(0,0,0,.06);--shadow-2:0 8px 28px rgba(0,0,0,.12),0 0 0 .5px rgba(0,0,0,.08);--scrim:rgba(0,0,0,.18);
+color:var(--ink)}
+.theme.dark{--bg:#161618;--surface:#1E1E21;--surface-2:#252528;--sidebar:#1A1A1C;--ink:#F2F2F5;--ink-2:#A1A1A8;--ink-3:#8A8A91;
+--hair:#2E2E33;--control:#6A6A72;--accent:#4C94FF;--accent-fill:#2468D6;--on-accent:#FFFFFF;--accent-soft:#1F2A3D;
+--ok:#4CC27E;--warn:#F0B44C;--warn-dot:#F0B44C;--warn-fill:#3A2C12;--err:#FF7B72;--err-fill:#3A1D1D;--untrusted:#2B2616;--untrusted-edge:#8C7330;
+--shadow-1:0 0 0 .5px rgba(255,255,255,.08);--shadow-2:0 12px 32px rgba(0,0,0,.5),0 0 0 .5px rgba(255,255,255,.1);--scrim:rgba(0,0,0,.4)}
+h1.page{font-size:22px;line-height:28px;font-weight:600;margin:0 0 8px;color:#1D1D1F}
+p.lede{color:#4A4A50;max-width:900px;margin-bottom:24px}
+.caption{font-size:12px;color:#4A4A50;margin:8px 0 32px;max-width:1100px}
+.caption b{color:#1D1D1F}
+.row{display:flex;gap:24px;align-items:flex-start;flex-wrap:wrap}
+/* window */
+.win{width:1280px;height:780px;border-radius:12px;overflow:hidden;box-shadow:0 24px 60px rgba(0,0,0,.18),0 0 0 .5px rgba(0,0,0,.2);display:grid;grid-template-columns:216px 1fr;background:var(--bg);position:relative}
+.win.sm{width:960px;height:640px}
+.win.tall{height:1010px}
+.side{background:var(--sidebar);border-right:.5px solid var(--hair);padding:12px 8px;display:flex;flex-direction:column;gap:2px}
+.lights{display:flex;gap:8px;padding:4px 8px 16px}.lights i{width:12px;height:12px;border-radius:50%;background:#FF5F57;display:block}.lights i:nth-child(2){background:#FEBC2E}.lights i:nth-child(3){background:#28C840}
+.nav{display:flex;align-items:center;gap:8px;padding:4px 8px;border-radius:6px;color:var(--ink);height:28px}
+.nav .ic{width:16px;text-align:center;color:var(--ink-2);font-size:12px}
+.nav.on{background:var(--accent-soft);color:var(--accent);font-weight:600}.nav.on .ic{color:var(--accent)}
+.nav .badge{margin-left:auto;font-size:11px;font-weight:600;color:var(--ink-2);font-variant-numeric:tabular-nums}
+.nav.on .badge{color:var(--accent)}
+.sidehead{font-size:11px;font-weight:600;color:var(--ink-3);padding:16px 8px 4px;letter-spacing:.02em}
+.main{display:grid;grid-template-rows:48px 1fr;min-width:0;position:relative}
+.tb{display:flex;align-items:center;gap:8px;padding:0 16px;border-bottom:.5px solid var(--hair);background:var(--surface)}
+.co{font-weight:600;font-size:14px}
+.meter{display:inline-flex;align-items:center;gap:6px;height:24px;padding:0 10px 0 6px;border-radius:12px;background:var(--surface-2);box-shadow:inset 0 0 0 .5px var(--hair);font-variant-numeric:tabular-nums;font-size:12px;color:var(--ink-2)}
+.meter b{color:var(--ink);font-weight:600}
+.meter.amber{background:var(--warn-fill);color:var(--warn)}.meter.amber b{color:var(--warn)}
+.meter.stop{background:var(--err-fill);color:var(--err)}.meter.stop b{color:var(--err)}
+.meter.run b{color:var(--ink)}
+.sp{flex:1}
+.kbd{font-family:var(--font);font-size:11px;color:var(--ink-3);border:.5px solid var(--control);border-radius:4px;padding:0 4px;line-height:16px;display:inline-block}
+.btn{display:inline-flex;align-items:center;gap:6px;height:28px;padding:0 12px;border-radius:6px;font-size:13px;font-weight:500;background:var(--surface);color:var(--ink);box-shadow:inset 0 0 0 .5px var(--control);white-space:nowrap}
+.btn.pri{background:var(--accent-fill);color:var(--on-accent);box-shadow:none}
+.btn.ghost{box-shadow:none;background:transparent;color:var(--ink-2)}
+.btn.stop{color:var(--err);box-shadow:inset 0 0 0 .5px var(--control)}
+.btn.danger{background:var(--err);color:#fff;box-shadow:none}
+.btn.sm{height:24px;padding:0 8px;font-size:12px}
+.content{overflow:hidden;position:relative;background:var(--bg)}
+.pad{padding:24px}
+.h2{font-size:17px;line-height:24px;font-weight:600}
+.h3{font-size:13px;font-weight:600}
+.sub{color:var(--ink-2)}
+.mute{color:var(--ink-3)}
+.small{font-size:12px;line-height:16px}
+.xs{font-size:11px;line-height:16px}
+.num{font-variant-numeric:tabular-nums}
+.mono{font-family:var(--mono);font-size:12px;line-height:18px}
+.card{background:var(--surface);border-radius:10px;box-shadow:var(--shadow-1)}
+.sep{height:.5px;background:var(--hair);margin:12px 0}
+.dot{width:8px;height:8px;border-radius:50%;display:inline-block;background:var(--control);flex:none}
+.dot.run{background:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
+.dot.ok{background:var(--ok)}.dot.wait{background:var(--warn-dot)}.dot.err{background:var(--err)}.dot.idle{background:var(--control)}
+.pill{display:inline-flex;align-items:center;gap:4px;height:20px;padding:0 8px;border-radius:10px;font-size:11px;font-weight:500;background:var(--surface-2);box-shadow:inset 0 0 0 .5px var(--hair);color:var(--ink-2);white-space:nowrap}
+.pill.acc{background:var(--accent-soft);color:var(--accent);box-shadow:none}
+.pill.warn{background:var(--warn-fill);color:var(--warn);box-shadow:none}
+.pill.err{background:var(--err-fill);color:var(--err);box-shadow:none}
+.pill.you{background:var(--ink);color:var(--surface);box-shadow:none;font-weight:600}
+.chip{display:inline-flex;align-items:center;gap:4px;height:20px;padding:0 6px;border-radius:4px;font-size:11px;color:var(--ink-2);box-shadow:inset 0 0 0 .5px var(--control)}
+.chip.t{color:var(--ink);background:var(--surface-2)}
+.chip.t::before{content:"✓";color:var(--ok);font-weight:700}
+.chip.k::before{content:"○";color:var(--ink-3)}
+.chip.no{color:var(--warn);box-shadow:inset 0 0 0 .5px var(--warn-dot)}
+.chip.no::before{content:"!";font-weight:700}
+.av{width:28px;height:28px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;font-size:12px;font-weight:600;color:#fff;flex:none}
+.av.s{width:20px;height:20px;font-size:10px}
+.av.ai{background:linear-gradient(135deg,#7D8597,#5C6273)}
+.av.h{background:linear-gradient(135deg,#3A3A3F,#1D1D1F);box-shadow:0 0 0 2px var(--surface),0 0 0 3px var(--ink)}
+.dark .av.h{background:linear-gradient(135deg,#E8E8EC,#BDBDC4);color:#1D1D1F}
+/* seat card */
+.seat{position:absolute;width:192px;background:var(--surface);border-radius:10px;box-shadow:var(--shadow-1);padding:10px 12px}
+.seat .top{display:flex;gap:8px;align-items:center}
+.seat .nm{font-weight:600;font-size:13px;line-height:16px}
+.seat .rl{font-size:11px;line-height:14px;color:var(--ink-2)}
+.seat .occ{margin-top:8px;font-size:12px;line-height:16px;color:var(--ink-2);display:flex;gap:6px;align-items:center}
+.seat .st{margin-top:4px;font-size:12px;line-height:16px;display:flex;gap:6px;align-items:center;justify-content:space-between}
+.seat.sel{box-shadow:0 0 0 2px var(--accent),var(--shadow-1)}
+.seat.human{background:var(--surface-2);box-shadow:inset 0 0 0 .5px var(--control)}
+.team{position:absolute;background:var(--surface);border-radius:12px;box-shadow:var(--shadow-1);padding:12px 14px}
+.team .nm{font-weight:600;font-size:14px}
+.teamx{position:absolute;border-radius:14px;background:rgba(127,127,140,.06);box-shadow:inset 0 0 0 .5px var(--hair)}
+.teamx .lbl{position:absolute;left:14px;top:10px;font-size:12px;font-weight:600;color:var(--ink-2);display:flex;gap:8px;align-items:center}
+.canvas{position:absolute;inset:0;background-image:radial-gradient(var(--hair) 1px,transparent 1px);background-size:16px 16px}
+svg.wires{position:absolute;inset:0;pointer-events:none}
+.wire{stroke:var(--control);stroke-width:1;fill:none}
+.grant{stroke:var(--accent);stroke-width:1.25;fill:none;stroke-dasharray:3 4}
+.adv{stroke:var(--ink-3);stroke-width:1;fill:none;stroke-dasharray:2 3}
+.glabel{position:absolute;font-size:11px;background:var(--surface);color:var(--accent);padding:0 6px;border-radius:8px;box-shadow:inset 0 0 0 .5px var(--accent)}
+.note{position:absolute;font-size:11px;line-height:16px;background:var(--surface);border-radius:6px;padding:4px 8px;box-shadow:inset 0 0 0 .5px var(--control);color:var(--ink-2)}
+.zoomctl{position:absolute;right:16px;bottom:16px;display:flex;gap:2px;background:var(--surface);border-radius:8px;box-shadow:var(--shadow-1);padding:2px}
+.zoomctl span{width:28px;height:24px;display:flex;align-items:center;justify-content:center;color:var(--ink-2);font-size:12px}
+/* sheet */
+.scrim{position:absolute;inset:0;background:var(--scrim)}
+.sheet{position:absolute;top:0;right:0;bottom:0;width:440px;background:var(--surface);box-shadow:var(--shadow-2);overflow:hidden;display:flex;flex-direction:column}
+.sheet .hd{padding:16px 20px;border-bottom:.5px solid var(--hair);display:flex;gap:12px;align-items:center}
+.sheet .bd{padding:4px 20px 20px;overflow:hidden;flex:1}
+.sec{padding:14px 0;border-bottom:.5px solid var(--hair)}
+.sec:last-child{border-bottom:none}
+.sec .lab{font-size:11px;font-weight:600;color:var(--ink-3);letter-spacing:.02em;margin-bottom:8px;display:flex;justify-content:space-between}
+.field{height:28px;border-radius:6px;box-shadow:inset 0 0 0 .5px var(--control);padding:0 8px;display:flex;align-items:center;gap:8px;background:var(--surface)}
+.ta{border-radius:6px;box-shadow:inset 0 0 0 .5px var(--control);padding:8px;font-size:12px;line-height:18px;color:var(--ink);background:var(--surface)}
+.menu{position:absolute;background:var(--surface);border-radius:10px;box-shadow:var(--shadow-2);padding:6px;width:420px}
+.menu .grp{font-size:11px;font-weight:600;color:var(--ink-3);padding:8px 8px 4px;display:flex;gap:8px;align-items:center}
+.menu .it{padding:6px 8px;border-radius:6px;display:flex;flex-direction:column;gap:4px}
+.menu .it.on{background:var(--accent-soft)}
+.menu .it .l1{display:flex;align-items:center;gap:8px}
+.chips{display:flex;gap:4px;flex-wrap:wrap}
+.list{display:flex;flex-direction:column}
+.li{display:flex;gap:10px;align-items:flex-start;padding:10px 12px;border-bottom:.5px solid var(--hair)}
+.li.on{background:var(--accent-soft)}
+.well{border-radius:8px;background:var(--surface-2);box-shadow:inset 0 0 0 .5px var(--hair);padding:10px 12px}
+.untr{border-radius:8px;background:var(--untrusted);border-left:3px solid var(--untrusted-edge);padding:8px 12px;background-image:repeating-linear-gradient(135deg,transparent 0 6px,rgba(217,180,74,.07) 6px 12px)}
+.untr .tag{font-size:11px;font-weight:600;color:var(--warn);display:flex;gap:6px;align-items:center;margin-bottom:4px}
+.grid{width:100%;border-collapse:collapse;font-size:12px}
+.grid th{position:sticky;top:0;text-align:left;font-weight:600;color:var(--ink-2);font-size:11px;padding:6px 10px;border-bottom:.5px solid var(--hair);background:var(--surface-2);white-space:nowrap}
+.grid td{padding:7px 10px;border-bottom:.5px solid var(--hair);white-space:nowrap;vertical-align:middle}
+.grid.wrap td{white-space:normal}
+.grid tr.on td{background:var(--accent-soft)}
+.tabs{display:flex;gap:4px}
+.tab{height:26px;padding:0 10px;border-radius:6px;display:flex;align-items:center;font-size:12px;color:var(--ink-2)}
+.tab.on{background:var(--surface);color:var(--ink);font-weight:600;box-shadow:var(--shadow-1)}
+.seg{display:inline-flex;background:var(--surface-2);border-radius:7px;padding:2px;box-shadow:inset 0 0 0 .5px var(--hair)}
+.seg span{height:22px;padding:0 10px;border-radius:5px;display:flex;align-items:center;font-size:12px;color:var(--ink-2)}
+.seg span.on{background:var(--surface);color:var(--ink);font-weight:600;box-shadow:var(--shadow-1)}
+.pop{position:absolute;background:var(--surface);border-radius:10px;box-shadow:var(--shadow-2);padding:14px}
+.toast{position:absolute;left:50%;bottom:20px;transform:translateX(-50%);background:var(--ink);color:var(--surface);border-radius:8px;padding:8px 12px;display:flex;gap:12px;align-items:center;font-size:12px;box-shadow:var(--shadow-2)}
+.toast b{color:var(--surface)}
+.toast .u{color:var(--surface);font-weight:600;text-decoration:underline}
+.step{display:grid;grid-template-columns:28px 1fr auto;gap:12px;padding:12px 14px;background:var(--surface);border-radius:10px;box-shadow:var(--shadow-1);align-items:start}
+.step .n{width:24px;height:24px;border-radius:50%;background:var(--surface-2);box-shadow:inset 0 0 0 .5px var(--control);display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:600;color:var(--ink-2)}
+.step.done .n{background:var(--ok);color:#fff;box-shadow:none}
+.step.running .n{background:var(--accent-fill);color:#fff;box-shadow:0 0 0 4px var(--accent-soft)}
+.step.waiting .n{background:var(--warn-dot);color:#1D1D1F;box-shadow:none}
+.handoff{display:flex;align-items:center;gap:8px;padding:4px 0 4px 26px;font-size:11px;color:var(--ink-3)}
+.handoff .ln{width:1px;height:16px;background:var(--control);margin-right:6px}
+.handoff.loop{color:var(--ink-2)}
+.handoff.gate{color:var(--warn)}
+.kpi{font-size:28px;line-height:32px;font-weight:600;font-variant-numeric:tabular-nums}
+.bar{height:6px;border-radius:3px;background:var(--hair);overflow:hidden}.bar i{display:block;height:100%;background:var(--accent);border-radius:3px}
+.wiz{width:620px;min-height:520px;padding-bottom:24px!important;border-radius:12px;background:var(--surface);box-shadow:0 24px 60px rgba(0,0,0,.16),0 0 0 .5px rgba(0,0,0,.18);padding:32px 40px;position:relative;display:flex;flex-direction:column}
+.wiz .steps{display:flex;gap:6px;margin-bottom:24px}.wiz .steps i{height:4px;flex:1;border-radius:2px;background:var(--hair)}.wiz .steps i.on{background:var(--accent)}
+.wiz .t{font-size:22px;line-height:28px;font-weight:600;margin-bottom:6px}
+.wiz .foot{margin-top:auto;padding-top:20px;display:flex;justify-content:space-between;align-items:center;gap:16px}
+.opt{border-radius:10px;box-shadow:inset 0 0 0 .5px var(--control);padding:14px 16px;display:flex;gap:12px;align-items:flex-start}
+.opt.on{box-shadow:inset 0 0 0 2px var(--accent);background:var(--accent-soft)}
+.acct{border-radius:10px;box-shadow:inset 0 0 0 .5px var(--hair);padding:12px 14px;display:flex;gap:12px;align-items:center;background:var(--surface-2)}
+.logo{width:28px;height:28px;border-radius:7px;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;color:#fff;flex:none}
+.cmd{position:absolute;left:50%;top:72px;transform:translateX(-50%);width:560px;background:var(--surface);border-radius:12px;box-shadow:var(--shadow-2);overflow:hidden}
+.cmd .in{height:48px;display:flex;align-items:center;padding:0 16px;font-size:15px;border-bottom:.5px solid var(--hair);gap:8px}
+.cmd .r{padding:8px 16px;display:flex;align-items:center;gap:10px}
+.cmd .r.on{background:var(--accent-soft)}
+.state{width:300px;min-height:200px;border-radius:12px;background:var(--surface);box-shadow:var(--shadow-1);padding:36px 20px 20px;display:flex;flex-direction:column;justify-content:flex-start;align-items:flex-start;gap:12px;position:relative;overflow:hidden}
+.skel{background:linear-gradient(90deg,var(--hair),var(--surface-2));border-radius:4px;height:10px}
+.cap{position:absolute;top:8px;left:12px;font-size:10px;font-weight:600;color:var(--ink-3);letter-spacing:.04em;text-transform:uppercase}
+.proposal{flex:none;border-radius:10px;box-shadow:inset 0 0 0 .5px var(--control);overflow:hidden;background:var(--surface)}
+.proposal .ph{padding:10px 12px;display:flex;gap:8px;align-items:center;border-bottom:.5px solid var(--hair)}
+.proposal .diff{font-family:var(--mono);font-size:11px;line-height:18px;padding:8px 12px;background:var(--surface-2)}
+.proposal .diff .m{color:var(--err)}.proposal .diff .p{color:var(--ok)}
+.proposal .pf{padding:8px 12px;display:flex;gap:8px;justify-content:flex-end;border-top:.5px solid var(--hair)}
+.proposal.risk{box-shadow:inset 0 0 0 1.5px var(--warn-dot)}
+.msg{padding:8px 12px;border-radius:10px;max-width:92%}
+.msg.me{background:var(--accent-fill);color:#fff;margin-left:auto}
+.cite{display:inline-flex;align-items:center;height:18px;padding:0 6px;border-radius:4px;background:var(--accent-soft);color:var(--accent);font-size:11px;font-weight:500;margin-right:4px}
+/* cross-department primitives (added 2026-11-18, reference company replan) */
+.flow{stroke:var(--ink-2);stroke-width:1.25;fill:none;stroke-dasharray:7 4}
+.flow.hot{stroke:var(--ink);stroke-width:1.5}
+.flabel{position:absolute;font-size:11px;line-height:18px;background:var(--surface);color:var(--ink-2);padding:0 7px;border-radius:9px;box-shadow:inset 0 0 0 .5px var(--control);white-space:nowrap}
+.flabel b{color:var(--ink);font-weight:600}
+.dept{display:inline-flex;align-items:center;height:16px;padding:0 6px;border-radius:4px;font-size:10px;font-weight:600;letter-spacing:.02em;color:var(--ink-2);box-shadow:inset 0 0 0 .5px var(--control);background:var(--surface);white-space:nowrap}
+.legend{position:absolute;display:flex;gap:14px;align-items:center;font-size:11px;color:var(--ink-3)}
+.legend svg{vertical-align:middle;margin-right:4px}
+.xhand{display:flex;align-items:center;gap:8px;padding:4px 0 4px 26px;font-size:11px;color:var(--ink-2)}
+.xhand .ln{width:1px;height:16px;background:var(--ink-2);margin-right:6px}
+.xhand .arrow{color:var(--ink-2)}
+.fan{display:grid;gap:8px;padding:10px;border-radius:10px;background:var(--surface-2);box-shadow:inset 0 0 0 .5px var(--hair)}
+.fan .fh{display:flex;align-items:center;gap:8px;font-size:12px}
+.branch{background:var(--surface);border-radius:8px;box-shadow:var(--shadow-1);padding:8px 10px;font-size:12px;line-height:16px;min-width:0}
+.branch .bn{display:flex;gap:6px;align-items:center;font-weight:600;font-size:12px}
+.branch .bm{color:var(--ink-2);font-size:11px;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.branch .bs{display:flex;justify-content:space-between;align-items:center;margin-top:6px;font-size:11px}
+.branch.on{box-shadow:0 0 0 2px var(--accent),var(--shadow-1)}
+.trig{display:flex;align-items:center;gap:8px;padding:8px 12px;border-radius:8px;background:var(--surface);box-shadow:var(--shadow-1);font-size:12px}
+.trig .tg{color:var(--ink-2)}
+.lin{position:relative;padding-left:18px}
+.lin::before{content:"";position:absolute;left:7px;top:6px;bottom:6px;width:1px;background:var(--control)}
+.lnode{position:relative;display:grid;grid-template-columns:auto 1fr auto;gap:8px;align-items:start;padding:7px 10px;border-radius:8px;background:var(--surface);box-shadow:var(--shadow-1);margin-bottom:6px;font-size:12px;line-height:16px}
+.lnode::before{content:"";position:absolute;left:-15px;top:14px;width:9px;height:9px;border-radius:50%;background:var(--surface);box-shadow:inset 0 0 0 1.5px var(--control)}
+.lnode.gate::before{border-radius:2px;transform:rotate(45deg);box-shadow:inset 0 0 0 1.5px var(--warn-dot)}
+.lnode.open{box-shadow:0 0 0 1.5px var(--accent),var(--shadow-1)}
+.lnode .ln1{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.lnode .ln2{color:var(--ink-2);font-size:11px;margin-top:2px}
+.lnode .lr{text-align:right;font-size:11px;color:var(--ink-2);white-space:nowrap;font-variant-numeric:tabular-nums}
+.lin .lin{margin-left:10px}
+
+.win.xtall{height:1200px}
+.win.x14{height:1420px}
+.proposal.risk .diff{margin:0 1.5px}
+.dlg{position:absolute;background:var(--surface);border-radius:12px;box-shadow:var(--shadow-2);overflow:hidden;display:flex;flex-direction:column}
+.dlg .dh{padding:16px 20px 12px;border-bottom:.5px solid var(--hair)}
+.dlg .db{padding:0 20px}
+.dlg .sec{padding:10px 0}
+.dlg .df{padding:12px 20px;border-top:.5px solid var(--hair);display:flex;gap:8px;align-items:center;margin-top:auto}
+.kv{display:grid;grid-template-columns:116px 1fr;row-gap:6px;column-gap:12px;align-items:baseline}
+.cb{width:14px;height:14px;border-radius:4px;box-shadow:inset 0 0 0 1px var(--control);display:inline-block;flex:none;background:var(--surface)}
+.mrow{display:flex;gap:10px;align-items:center;padding:5px 0}
+.grow{display:flex;gap:10px;align-items:flex-start;padding:10px 12px;border-radius:8px;background:var(--surface-2);box-shadow:inset 0 0 0 .5px var(--hair)}
+.gic{width:24px;height:24px;border-radius:6px;background:var(--accent-soft);color:var(--accent);display:flex;align-items:center;justify-content:center;font-size:12px;flex:none}
+.sublab{font-size:11px;font-weight:600;color:var(--ink-2);margin:10px 0 6px}
+.tt{width:100%;border-collapse:collapse;font-size:12px;line-height:16px}
+.tt th{text-align:left;font-size:11px;font-weight:600;color:var(--ink-2);padding:5px 8px;background:var(--surface-2);border-bottom:.5px solid var(--hair)}
+.tt td{padding:7px 8px;border-bottom:.5px solid var(--hair);vertical-align:top}
+.setnav{position:absolute;left:0;top:0;bottom:0;width:200px;border-right:.5px solid var(--hair);background:var(--surface-2);padding:16px 8px}
+.setnav div{height:28px;display:flex;align-items:center;padding:0 10px;border-radius:6px;font-size:13px}
+.setnav div.on{background:var(--accent-soft);color:var(--accent);font-weight:600}
+.diffbox{font-family:var(--mono);font-size:11px;line-height:18px;padding:8px 12px;border-radius:8px;background:var(--surface-2);box-shadow:inset 0 0 0 .5px var(--hair);white-space:pre-wrap}
+.diffbox .m{color:var(--err)}.diffbox .p{color:var(--ok)}
+</style></head><body>
+<h1 class="page">Team side sheet</h1><p class="lede">Opened by Return on a selected team box. Same sheet shell as the Seat sheet. Hand-offs are what moves between departments in workflows; grants are what a team shares with other teams and what it receives. Grants are always read-only and appear as dotted accent lines, hand-offs as dashed arrows, both hidden at rest: selecting a department draws its hand-offs, and grant lines are drawn only on hover and behind this sheet, the home of grants.</p>
+<div class="theme "><div class="win x14"><div class="side"><div class="lights"><i></i><i></i><i></i></div><div class="nav on"><span class="ic">◎</span>Org</div><div class="nav"><span class="ic">▤</span>Inbox<span class="badge">6</span></div><div class="nav"><span class="ic">▷</span>Runs</div><div class="nav"><span class="ic">≡</span>Workflows</div><div class="nav"><span class="ic">▦</span>Tables</div><div class="nav"><span class="ic">⇄</span>Connectors</div><div class="nav"><span class="ic">◫</span>Dashboards</div><div class="nav"><span class="ic">¤</span>Models & Costs</div><div class="nav"><span class="ic">⚙</span>Settings</div>
+<div class="sidehead">TEAMS</div>
+<div class="nav"><span class="dot ok"></span>Department 1<span class="badge">₹66</span></div>
+<div class="nav"><span class="dot ok"></span>Department 2<span class="badge">₹62</span></div>
+<div style="margin-top:auto" class="nav"><span class="ic">◌</span><span class="small sub">Doctor · all good</span></div></div><div class="main"><div class="tb"><span class="co">Company A</span><span class="meter" title="Weekly spend against budget"><svg width="16" height="16" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6" fill="none" stroke="var(--hair)" stroke-width="2"/><circle cx="8" cy="8" r="6" fill="none" stroke="var(--ink-2)" stroke-width="2" stroke-linecap="round" stroke-dasharray="7.9 37.7" transform="rotate(-90 8 8)"/></svg><b>₹128</b> of ₹600 this week</span><span class="sub" style="margin-left:4px">› Department 1</span><span class="sp"></span>
+<span class="btn ghost sm">Search <span class="kbd">⌘K</span></span>
+<span class="btn sm">✦ Assistant <span class="kbd">⌘J</span></span>
+<span class="btn stop sm">■ Stop everything</span></div>
+<div class="content"><div style="position:absolute;inset:0;opacity:.5"><div class="canvas"></div><svg class="wires" width="100%" height="100%"><defs><marker id="arr" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L8 4 L0 8 z" fill="var(--ink-2)"/></marker></defs><path class="wire" d="M306 124 V170 H158 V200"/><path class="wire" d="M306 170 H470 V200"/><path class="grant" d="M200 350 C 200 410, 470 410, 470 298"/><path class="grant" d="M110 350 C 110 520, 560 520, 560 298"/><path class="flow" d="M352 240 H296" marker-end="url(#arr)"/><path class="flow" d="M292 272 H348" marker-end="url(#arr)"/></svg><div class="seat human" style="left:210px;top:24px;width:192px"><div class="top"><span class="av h">Y</span><div><div class="nm">Owner</div><div class="rl">Company A</div></div></div>
+<div class="occ"><span class="pill you">You</span> <span class="pill">CEO · 4 hats</span></div><div class="st"><span style="display:flex;gap:6px;align-items:center"><span class="dot ok"></span>Goal G1 · this quarter</span></div></div><div class="team" style="left:24px;top:200px;width:268px;box-shadow:0 0 0 2px var(--accent),var(--shadow-1);">
+<div style="display:flex;justify-content:space-between;align-items:center"><span class="nm">Department 1</span><span class="num sub">₹66</span></div>
+<div class="small sub" style="margin-top:4px;display:flex;gap:6px;align-items:center"><span class="dot ok"></span>Done · Document B handed back</div>
+<div style="display:flex;gap:4px;margin-top:10px;align-items:center"><span class="av s ai" style="background:#4E6478;">H</span><span class="av s ai" style="background:#4E6478;font-size:9px">E1</span><span class="av s ai" style="background:#4E6478;font-size:9px">E2</span><span class="av s ai" style="background:#4E6478;font-size:9px">E3</span><span class="small sub" style="margin-left:6px">4 seats</span></div>
+<div class="small" style="margin-top:10px;padding:6px 8px;border-radius:6px;background:var(--surface-2);color:var(--ink-2)">◇ Note N1 · 20 days left</div></div><div class="team" style="left:352px;top:200px;width:236px">
+<div style="display:flex;justify-content:space-between"><span class="nm">Department 2</span><span class="num sub">₹62</span></div>
+<div class="small sub" style="margin-top:4px;display:flex;gap:6px;align-items:center"><span class="dot ok"></span>Done · next Mon 17:00</div>
+<div style="display:flex;gap:4px;margin-top:10px;align-items:center"><span class="av s ai" style="background:#566352;">H</span><span class="av s ai" style="background:#566352;font-size:9px">E1</span><span class="av s ai" style="background:#566352;font-size:9px">E2</span><span class="av s ai" style="background:#566352;font-size:9px">E3</span><span class="av s ai" style="background:#566352;font-size:9px">E4</span><span class="small sub" style="margin-left:6px">5 seats</span></div></div><div class="glabel" style="left:196px;top:384px">Department 2 reads Document B · read-only</div><div class="glabel" style="left:194px;top:466px">Department 1 reads Table T1 · read-only</div></div><div class="sheet"><div class="hd"><span class="av ai" style="width:36px;height:36px;border-radius:10px;font-size:14px;background:#4E6478">D1</span><div style="flex:1"><div class="h2">Department 1</div><div class="small sub">Team · reports to Owner</div></div><span class="pill acc"><span class="dot ok"></span>Done · ₹66</span><span class="btn ghost sm">Esc</span></div><div class="bd">
+<div class="sec" style="padding-bottom:10px"><div class="lab"><span>SEATS · 4</span><span class="sub" style="font-weight:400">N adds one from a role template</span></div>
+<div class="small" style="display:flex;gap:8px;align-items:center;margin-bottom:6px"><span class="sub">Head seat</span><div class="field" style="height:24px;flex:1;justify-content:space-between"><span><b>D1-Head</b> <span class="sub">· consolidates</span></span><span class="mute">▾</span></div></div><div class="mrow" style="padding:3px 0"><span class="av s ai" style="background:#4E6478;">H</span><span class="h3">D1-Head</span> <span class="pill acc" style="height:16px;font-size:10px;padding:0 6px">Head</span><span class="small sub" style="flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">Head · consolidates</span><span class="xs mute">GPT</span><span class="num small sub" style="width:30px;text-align:right">₹22</span></div><div class="mrow" style="padding:3px 0"><span class="av s ai" style="background:#4E6478;font-size:9px">E1</span><span class="h3">D1-E1</span><span class="small sub" style="flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">Reviewer</span><span class="xs mute">Claude Sonnet</span><span class="num small sub" style="width:30px;text-align:right">₹26</span></div><div class="mrow" style="padding:3px 0"><span class="av s ai" style="background:#4E6478;font-size:9px">E2</span><span class="h3">D1-E2</span><span class="small sub" style="flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">Reviewer</span><span class="xs mute">gpt-oss-20b · local</span><span class="num small sub" style="width:30px;text-align:right">₹0</span></div><div class="mrow" style="padding:3px 0"><span class="av s ai" style="background:#4E6478;font-size:9px">E3</span><span class="h3">D1-E3</span><span class="small sub" style="flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">Reviewer</span><span class="xs mute">GPT · OpenAI</span><span class="num small sub" style="width:30px;text-align:right">₹18</span></div></div>
+<div class="sec"><div class="lab"><span>WORKFLOWS</span></div>
+<div style="display:flex;gap:12px;align-items:flex-start"><div style="flex:1"><div class="h3">Flow F2</div><div class="xs sub">Starts when Table T1 is updated (Department 2) · loop-protected</div><div class="xs sub" style="margin-top:4px">Also takes part in <b style="color:var(--ink)">Flow F1</b> (Department 2) · steps 2–3</div></div>
+<div style="text-align:right"><span class="btn sm">▷ Run now</span><div class="xs sub num" style="margin-top:4px">About <b style="color:var(--ink)">₹30–45</b> · last 4 runs</div></div></div></div>
+<div class="sec"><div class="lab"><span>TABLES AND DOCUMENTS</span></div>
+<div class="small" style="display:grid;grid-template-columns:20px 1fr auto;row-gap:6px;align-items:center"><span class="sub">▤</span><span><b>Document B</b> <span class="sub">· document</span></span><span class="num xs sub">7 versions</span></div></div>
+<div class="sec"><div class="lab"><span>HAND-OFFS</span><span class="sub" style="font-weight:400">Between departments · dashed arrows on the org chart</span></div>
+<div class="grow"><span class="gic" style="background:var(--surface);color:var(--ink-2);box-shadow:inset 0 0 0 .5px var(--control)">⇢</span><div style="flex:1"><div class="small"><b>In:</b> Document A ← Department 2 <span class="sub">· Flow F1, step 1 → 2</span></div>
+<div class="xs sub" style="margin-top:4px">Fans out to D1-E1, D1-E2, D1-E3. Read-only; arrives with its lineage.</div></div></div>
+<div class="grow" style="margin-top:6px"><span class="gic" style="background:var(--surface);color:var(--ink-2);box-shadow:inset 0 0 0 .5px var(--control)">⇢</span><div style="flex:1"><div class="small"><b>Out:</b> Document B → Department 2 <span class="sub">· step 3 → 4</span></div>
+<div class="xs sub" style="margin-top:4px">D1-Head also holds the review gate on Report R1 before it reaches the Owner.</div></div></div>
+<div class="grow" style="margin-top:6px"><span class="gic" style="background:var(--surface);color:var(--ink-2);box-shadow:inset 0 0 0 .5px var(--control)">⚡</span><div style="flex:1"><div class="small"><b>Started by:</b> Table T1 updated in Department 2 <span class="sub">· Flow F2</span></div>
+<div class="xs sub" style="margin-top:4px">Loop-protected: chain depth at most 3 and a chain spend cap; runs from a dry run start nothing.</div></div></div></div>
+<div class="sec"><div class="lab"><span>GRANTS</span><span class="sub" style="font-weight:400">Read-only · dotted lines on the org chart</span></div>
+<div class="sublab">Shares</div>
+<div class="grow"><span class="gic">▤</span><div style="flex:1"><div class="small"><b>Document B</b> → Department 2 <span class="pill" style="height:18px;margin-left:4px">read-only</span></div>
+<div class="xs sub" style="margin-top:4px">Snapshot at run start: their runs read it as it was when each run began. Never writable.</div>
+<div class="xs mute" style="margin-top:2px">Used by D2-Head · granted 4 Nov by You (Developer hat)</div></div><span class="btn ghost sm">Remove</span></div>
+<div class="sublab">Receives</div>
+<div class="grow"><span class="gic">▦</span><div style="flex:1"><div class="small"><b>Table T1</b>, <b>Document A</b> ← Department 2 <span class="pill" style="height:18px;margin-left:4px">read-only</span></div></div></div>
+<div style="display:flex;gap:8px;align-items:center;margin-top:10px"><span class="chip" style="height:24px;border:1px dashed var(--accent);box-shadow:none;color:var(--accent)">+ Add grant…</span><span class="xs mute">Widens access, so it asks twice</span></div></div>
+<div class="sec"><div class="lab"><span>GUIDANCE NOTES</span><span class="sub" style="font-weight:400">Vision Creator</span></div>
+<div class="small" style="padding:6px 8px;border-radius:6px;background:var(--surface-2);color:var(--ink-2)">◇ Note N1 · 20 days left · <span class="mute">You (Vision Creator)</span></div></div>
+<div class="sec"><div class="lab"><span>TEAM BUDGET</span><span class="sub" style="font-weight:400">Stop and ask on breach</span></div>
+<div class="small num">₹150 per triggered run · ₹250 per manual run · ₹300 per week</div><div class="bar" style="margin-top:6px"><i style="width:22%"></i></div>
+<div class="xs mute num" style="margin-top:4px">₹66 of ₹300 this week · lowering saves at once; raising any cap asks twice</div></div>
+<div class="small sub" style="padding-top:12px">Export department… · Remove team (move its seats first)</div>
+</div></div></div></div></div></div><p class="caption"><b>1 · Department 1's sheet.</b> Order: head seat → seats → workflows (what starts each, Run now with its estimate, and workflows of other departments it takes part in) → tables and documents owned → hand-offs (in, out, started by) → grants (shares / receives) → guidance notes → team budget → export. Opening the sheet draws its hand-off and grant lines on the dimmed chart behind (the only place besides hover where grant lines are drawn). A grant is read-only and snapshot at run start: the receiving team reads the table as it was when its run began.</p><div class="theme dark"><div class="win "><div class="side"><div class="lights"><i></i><i></i><i></i></div><div class="nav on"><span class="ic">◎</span>Org</div><div class="nav"><span class="ic">▤</span>Inbox<span class="badge">6</span></div><div class="nav"><span class="ic">▷</span>Runs</div><div class="nav"><span class="ic">≡</span>Workflows</div><div class="nav"><span class="ic">▦</span>Tables</div><div class="nav"><span class="ic">⇄</span>Connectors</div><div class="nav"><span class="ic">◫</span>Dashboards</div><div class="nav"><span class="ic">¤</span>Models & Costs</div><div class="nav"><span class="ic">⚙</span>Settings</div>
+<div class="sidehead">TEAMS</div>
+<div class="nav"><span class="dot ok"></span>Department 1<span class="badge">₹66</span></div>
+<div class="nav"><span class="dot ok"></span>Department 2<span class="badge">₹62</span></div>
+<div style="margin-top:auto" class="nav"><span class="ic">◌</span><span class="small sub">Doctor · all good</span></div></div><div class="main"><div class="tb"><span class="co">Company A</span><span class="meter" title="Weekly spend against budget"><svg width="16" height="16" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6" fill="none" stroke="var(--hair)" stroke-width="2"/><circle cx="8" cy="8" r="6" fill="none" stroke="var(--ink-2)" stroke-width="2" stroke-linecap="round" stroke-dasharray="7.9 37.7" transform="rotate(-90 8 8)"/></svg><b>₹128</b> of ₹600 this week</span><span class="sub" style="margin-left:4px">› Department 1</span><span class="sp"></span>
+<span class="btn ghost sm">Search <span class="kbd">⌘K</span></span>
+<span class="btn sm">✦ Assistant <span class="kbd">⌘J</span></span>
+<span class="btn stop sm">■ Stop everything</span></div>
+<div class="content"><div style="position:absolute;inset:0;opacity:.5"><div class="canvas"></div><svg class="wires" width="100%" height="100%"><defs><marker id="arr" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L8 4 L0 8 z" fill="var(--ink-2)"/></marker></defs><path class="wire" d="M306 124 V170 H158 V200"/><path class="wire" d="M306 170 H470 V200"/><path class="grant" d="M200 350 C 200 410, 470 410, 470 298"/><path class="grant" d="M110 350 C 110 520, 560 520, 560 298"/><path class="flow" d="M352 240 H296" marker-end="url(#arr)"/><path class="flow" d="M292 272 H348" marker-end="url(#arr)"/></svg><div class="seat human" style="left:210px;top:24px;width:192px"><div class="top"><span class="av h">Y</span><div><div class="nm">Owner</div><div class="rl">Company A</div></div></div>
+<div class="occ"><span class="pill you">You</span> <span class="pill">CEO · 4 hats</span></div><div class="st"><span style="display:flex;gap:6px;align-items:center"><span class="dot ok"></span>Goal G1 · this quarter</span></div></div><div class="team" style="left:24px;top:200px;width:268px;box-shadow:0 0 0 2px var(--accent),var(--shadow-1);">
+<div style="display:flex;justify-content:space-between;align-items:center"><span class="nm">Department 1</span><span class="num sub">₹66</span></div>
+<div class="small sub" style="margin-top:4px;display:flex;gap:6px;align-items:center"><span class="dot ok"></span>Done · Document B handed back</div>
+<div style="display:flex;gap:4px;margin-top:10px;align-items:center"><span class="av s ai" style="background:#4E6478;">H</span><span class="av s ai" style="background:#4E6478;font-size:9px">E1</span><span class="av s ai" style="background:#4E6478;font-size:9px">E2</span><span class="av s ai" style="background:#4E6478;font-size:9px">E3</span><span class="small sub" style="margin-left:6px">4 seats</span></div>
+<div class="small" style="margin-top:10px;padding:6px 8px;border-radius:6px;background:var(--surface-2);color:var(--ink-2)">◇ Note N1 · 20 days left</div></div><div class="team" style="left:352px;top:200px;width:236px">
+<div style="display:flex;justify-content:space-between"><span class="nm">Department 2</span><span class="num sub">₹62</span></div>
+<div class="small sub" style="margin-top:4px;display:flex;gap:6px;align-items:center"><span class="dot ok"></span>Done · next Mon 17:00</div>
+<div style="display:flex;gap:4px;margin-top:10px;align-items:center"><span class="av s ai" style="background:#566352;">H</span><span class="av s ai" style="background:#566352;font-size:9px">E1</span><span class="av s ai" style="background:#566352;font-size:9px">E2</span><span class="av s ai" style="background:#566352;font-size:9px">E3</span><span class="av s ai" style="background:#566352;font-size:9px">E4</span><span class="small sub" style="margin-left:6px">5 seats</span></div></div><div class="glabel" style="left:196px;top:384px">Department 2 reads Document B · read-only</div><div class="glabel" style="left:194px;top:466px">Department 1 reads Table T1 · read-only</div></div><div class="sheet"><div class="hd"><span class="av ai" style="width:36px;height:36px;border-radius:10px;font-size:14px;background:#4E6478">D1</span><div style="flex:1"><div class="h2">Department 1</div><div class="small sub">Team · reports to Owner</div></div><span class="pill acc"><span class="dot ok"></span>Done · ₹66</span><span class="btn ghost sm">Esc</span></div><div class="bd">
+<div class="sec" style="opacity:.55"><div class="lab"><span>TABLES AND DOCUMENTS</span></div>
+<div class="small"><b>Document B</b> <span class="sub">· document · 7 versions</span></div></div>
+<div class="sec"><div class="lab"><span>GRANTS</span><span class="sub" style="font-weight:400">Adding one</span></div>
+<div class="grow" style="opacity:.7"><span class="gic">▤</span><div style="flex:1"><div class="small"><b>Document B</b> → Department 2 <span class="pill" style="height:18px">read-only</span></div></div></div>
+<div class="sublab" style="margin-top:14px">New grant</div>
+<div class="kv small"><span class="sub">Share</span><div class="field" style="justify-content:space-between"><span>▤ <b>Review 2</b> · D1-E2's document</span><span class="mute">▾</span></div>
+<span class="sub">With team</span><div class="field" style="justify-content:space-between"><span>Department 2 · 5 seats</span><span class="mute">▾</span></div>
+<span class="sub">Access</span><span>Read-only <span class="xs mute">· grants are never writable</span></span>
+<span class="sub">Reads as of</span><span>Each run's start <span class="xs mute">· latest version when the run began</span></span></div>
+<div class="proposal risk" style="margin-top:14px"><div class="ph"><span class="pill warn">⚠ High risk · widens access</span><span class="h3">Share Review 2</span></div>
+<div class="small" style="padding:8px 12px">Effect: <b>All 5 seats in Department 2 will be able to read every version of Review 2, including the pages it quotes.</b> Nothing in Department 1 becomes writable.</div>
+<div class="diff"><span class="mute">company.yaml · teams.department-1</span><br><span class="p">+ grants:</span><br><span class="p">+ &nbsp;&nbsp;- document: review-2</span><br><span class="p">+ &nbsp;&nbsp;&nbsp;&nbsp;to: department-2</span><br><span class="p">+ &nbsp;&nbsp;&nbsp;&nbsp;access: read</span></div>
+<div class="pf"><span class="btn sm ghost">Cancel</span><span class="btn sm pri">Review and apply…</span></div></div>
+<div class="xs mute" style="margin-top:8px">Nothing is saved until the second step. Esc cancels.</div></div>
+<div class="sec" style="opacity:.55"><div class="lab"><span>GUIDANCE NOTES</span></div><div class="small sub">◇ Note N1 · 20 days left</div></div>
+</div></div></div></div></div></div><p class="caption"><b>2 · Add grant, step 1 (dark).</b> The new grant is a high-risk card: a warning edge, the plain effect sentence and the config diff. Its primary is "Review and apply…"; nothing is written yet.</p><div class="row"><div class="theme"><div class="card" style="width:460px;padding:20px;box-shadow:var(--shadow-2)">
+<div class="h3">Let Department 2 read Review 2?</div>
+<div class="small" style="margin:8px 0">All 5 seats in Department 2 will be able to read every version of Review 2, including the pages it quotes. They cannot change it.</div>
+<div class="well small kv"><span class="sub">Shared item</span><span>Review 2 (document, 7 versions)</span><span class="sub">With team</span><span>Department 2</span><span class="sub">Seats gaining read</span><span>D2-Head, D2-E1, D2-E2, D2-E3, D2-E4</span><span class="sub">Access</span><span>Read-only, as of each run's start</span><span class="sub">Undo</span><span>Team sheet › Grants › Remove, or Settings › History</span></div>
+<div style="display:flex;gap:8px;justify-content:space-between;margin-top:14px;align-items:center"><span class="btn pri">Keep current access</span><span class="btn">Yes, share Review 2 read-only</span></div>
+<div class="xs mute" style="margin-top:6px">Return keeps current access. The widening button is never the default.</div></div></div><div class="theme"><div class="card" style="width:640px;height:700px;position:relative;overflow:hidden;background:var(--bg)"><div class="canvas"></div><svg class="wires" width="100%" height="100%"><defs><marker id="arr" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L8 4 L0 8 z" fill="var(--ink-2)"/></marker></defs><path class="wire" d="M306 124 V170 H158 V200"/><path class="wire" d="M306 170 H470 V200"/><path class="grant" d="M200 350 C 200 410, 470 410, 470 298"/><path class="grant" d="M110 350 C 110 520, 560 520, 560 298"/><path class="flow" d="M352 240 H296" marker-end="url(#arr)"/><path class="flow" d="M292 272 H348" marker-end="url(#arr)"/></svg><div class="seat human" style="left:210px;top:24px;width:192px"><div class="top"><span class="av h">Y</span><div><div class="nm">Owner</div><div class="rl">Company A</div></div></div>
+<div class="occ"><span class="pill you">You</span> <span class="pill">CEO · 4 hats</span></div><div class="st"><span style="display:flex;gap:6px;align-items:center"><span class="dot ok"></span>Goal G1 · this quarter</span></div></div><div class="team" style="left:24px;top:200px;width:268px;">
+<div style="display:flex;justify-content:space-between;align-items:center"><span class="nm">Department 1</span><span class="num sub">₹66</span></div>
+<div class="small sub" style="margin-top:4px;display:flex;gap:6px;align-items:center"><span class="dot ok"></span>Done · Document B handed back</div>
+<div style="display:flex;gap:4px;margin-top:10px;align-items:center"><span class="av s ai" style="background:#4E6478;">H</span><span class="av s ai" style="background:#4E6478;font-size:9px">E1</span><span class="av s ai" style="background:#4E6478;font-size:9px">E2</span><span class="av s ai" style="background:#4E6478;font-size:9px">E3</span><span class="small sub" style="margin-left:6px">4 seats</span></div>
+<div class="small" style="margin-top:10px;padding:6px 8px;border-radius:6px;background:var(--surface-2);color:var(--ink-2)">◇ Note N1 · 20 days left</div></div><div class="team" style="left:352px;top:200px;width:236px">
+<div style="display:flex;justify-content:space-between"><span class="nm">Department 2</span><span class="num sub">₹62</span></div>
+<div class="small sub" style="margin-top:4px;display:flex;gap:6px;align-items:center"><span class="dot ok"></span>Done · next Mon 17:00</div>
+<div style="display:flex;gap:4px;margin-top:10px;align-items:center"><span class="av s ai" style="background:#566352;">H</span><span class="av s ai" style="background:#566352;font-size:9px">E1</span><span class="av s ai" style="background:#566352;font-size:9px">E2</span><span class="av s ai" style="background:#566352;font-size:9px">E3</span><span class="av s ai" style="background:#566352;font-size:9px">E4</span><span class="small sub" style="margin-left:6px">5 seats</span></div></div><div class="glabel" style="left:196px;top:384px">Department 2 reads Document B · read-only</div><div class="glabel" style="left:194px;top:466px">Department 1 reads Table T1 · read-only</div>
+<div class="xs mute" style="position:absolute;left:24px;bottom:16px;right:24px">Pointer over Department 1. Grant (dotted) and hand-off (dashed arrow) lines hide at rest; reporting lines never change on hover. Clicking a label opens Team sheet › Grants or Hand-offs.</div></div></div></div><p class="caption"><b>3 · Step 2 and the org chart.</b> Left: the privilege-widening confirmation restates item, team, seats, access and undo; "Keep current access" is primary and the Return default. Right: grant lines are dotted accent curves labelled with what is read and "read-only"; hand-offs are dashed ink arrows (labelled on the full chart, key-org.html §2). Screen readers get the same facts from the Grants list, not from the canvas.</p>
+</body></html>

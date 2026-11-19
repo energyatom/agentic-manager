@@ -1,0 +1,162 @@
+# Epic 6 — Runs, Inbox and Documents UI (v0.2). Table order is build order; `id` is permanent.
+# `covers` cites this epic's own requirement ids (its epic file's Requirements), not the initiative's: per BMad, every container numbers its own R<n>
+# and each epic line names its source as 'parent R<m>'. Outside the initiative file, write initiative ids as 'init R<m>' (final review coverage F8).
+# Lanes after the run view: the run and Inbox lane (2, 3, then 6-9, because a Failure's fix button uses story 3's Re-run step)
+# and the editor lane (4, 5) beside it.
+# Cross-epic prerequisites pin the epic 3, 4 and 5 stories each entry needs (initiative breakdown, Decision 2026-11-18).
+# Definition of Done for every UI story (final review UX M3), whether or not its verify repeats it: axe clean in light and dark,
+# the story's path completed keyboard-only, and reduced motion honoured.
+
+[[entry]]
+id = 1
+type = "story"
+title = "Live run view"
+description = "Tracer bullet: the Runs list (newest first by day; workflow, trigger scheduled, manual or catch-up, status dot, duration, estimate against actual; filters by team, workflow and status) opens the Run view, whose header shows trigger, start, elapsed and 'Estimate ₹80–120 · ₹45 so far' and whose step list shows each step's live status (done, running pulsing, waiting on you, queued, failed), time, tokens and cost from the WebSocket, replaying missed events with since= after a reconnect; the running step is auto-selected; a seat card's status opens the run at that step; step changes are announced politely. Matches key-workflow-run.html §2 (left column) and §3."
+verify = "Playwright starts a FakeLlm run of Company A's flow F1 and watches the steps light up in order with tokens and cost equal to `agentic status`; dropping and restoring the WebSocket replays missed events with no gap; clicking a running seat's status on the Org view opens the run at that step; the finished header shows estimate, actual and verdict; the empty Runs list reads 'No runs yet.' with its button."
+covers = ["R3"]
+after = ["5.7", "5.13", "3.2"]
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 2
+type = "story"
+title = "Drill-down shows every call"
+description = "The Run view's right column has Log, Calls and Output tabs: each model call shows its prompt parts in assembly order with their labels (role instructions, CEO goal, guidance, memory, step instruction, trusted inputs, the untrusted fence), each tool call with secrets redacted, each result from web, file, MCP or free-text in table rows inside an untrusted well (plain text with no links, images or HTML, Show all, and the consequence line when an external-effect tool was held), the response, schema validation ✓ or 'Output repaired once', retries, fallback switches and 'Resumed after restart · lost 1 in-flight call'. Matches key-workflow-run.html §2 (drill-down)."
+verify = "Playwright opens a FakeLlm step whose script includes a goal, a guidance note, a repaired output, a fallback and an injection-pack PDF: the parts show in order with labels, the PDF text sits in the untrusted well labelled with its source and its embedded HTML and link render as plain text with no network request, the repair chip and fallback line show, and a canary key in a tool argument appears redacted."
+covers = ["R4"]
+after = [1]
+hitl = false
+risk = "high"
+
+[[entry]]
+id = 3
+type = "story"
+title = "Run controls"
+description = "Run now (⌘R, estimate first, Return starts), Pause and Resume (a pause flag checked at step boundaries holds the run before its next step; no new run state), Cancel run, Re-run step (continues a run failed at that step) and Re-run from step… (used by story 6's Failure fix button; a new manual run linked to its source, reusing the earlier steps' outputs) arrive as Human commands in the engine, API and Run view, each audited with the Human actor; nothing is deleted; Esc never cancels a run. Matches key-workflow-run.html §2 (controls) and key-states-keyboard.html §1 (Step failed)."
+verify = "On FakeLlm through Playwright: Pause lets the running step finish and holds the run before its next step, and Resume continues it; Cancel run ends it cancelled with its journal kept; a run failed at step 1 continues with Re-run step; Re-run from step 3 starts a new run whose steps 1–2 reuse the source outputs and whose journal links the source run; each action has an audit entry 'You'; the ledger shows no call settled twice."
+covers = ["R5"]
+after = [2, "3.9", "3.11"]
+hitl = false
+risk = "high"
+
+[[entry]]
+id = 4
+type = "story"
+title = "Workflow editor as a step list"
+description = "Workflows › editor: a vertical step list (number, title, seat avatar and name, output, tools) with hand-off labels in words between steps ('then', '↺ loop back…', '◆ waits for you…'); selecting a step opens its editor (seat, instruction, inputs as named references, expected output or schema, hand-off segmented control with loop-back target, maximum default 2 and reason required, or the human seat); steps reorder by drag or ⌥↑/⌥↓ and + Add step appends; every edit writes the workflow file as a config edit with Undo and shows file:line errors inline; epic 5's estimate line under Run now recalculates within 300 ms. Matches key-workflow-run.html §1."
+verify = "Playwright changes step 4's loop-back maximum to 3, reorders two steps by keyboard and adds a step: the workflow file holds each change with a History entry, `agentic validate` passes, ⌘Z undoes the last one, an unknown seat id shows its file:line fix inline, and the estimate line updates within 300 ms."
+covers = ["R1"]
+after = [1]
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 5
+type = "story"
+title = "Schedule picker and workflow caps"
+description = "The editor's schedule line reads the trigger back in the core's words ('Every Tuesday at 08:00 · if the Mac was asleep, run once on wake') and Edit opens the picker (daily, weekly on a day, monthly; time; timezone defaulting to the company timezone (from the Mac's system locale); raw cron behind More; catch-up once, skip or all) writing the trigger as a config edit; the caps panel edits scheduled and manual per-run caps, the per-week cap and On breach under 'An estimate never raises a cap.', raising a cap through epic 5's privilege-widening confirmation. Matches key-workflow-run.html §1 (schedule and caps) and key-schedule-updates.html §1 (schedule picker). Event triggers (epic 4 story 15) are edited here too: 'When <event>' read back in the core's words, the chain depth limit shown, and a trigger whose target workflow is in another department opening the two-step privilege-widening confirmation (added 2026-11-18, owner REPLAN)."
+verify = "Playwright sets weekly Tuesday 08:00 in a fixture timezone (Europe/Berlin) with catch-up skip and the line reads it back in the core's words; raw cron '0 8 * * 2' gives the same sentence; raising the scheduled cap opens the confirmation and Return keeps the old value; the workflow file and History show each applied change.; an event trigger 'When f2-d1 completes' on F1 reads back in words, and adding it from D1's workflow to D2's opens the confirmation"
+covers = ["R2"]
+after = [4, "5.9", "4.5", "4.15"]
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 6
+type = "story"
+title = "Inbox and While you were away"
+description = "Inbox (⌘2): items of every kind sorted by kind urgency then age and paginated by week, each with a kind glyph, title and source line; the detail opens on the right and its primary button names the outcome (Return activates it only when the detail has focus); Question items take an answer (Split input or Use fallback included), Failure items show what happened, what was tried and spent and a fix button (Re-run step, story 3's command), Budget asks offer 'Raise to ₹X once…' through the two-step confirmation or 'Leave stopped', Draft items open their document; the digest card opens after more than 30 minutes away or a restart (runs fired including catch-up on wake, items waiting, spend since last seen, failures and fixes) and dismisses to one line; the sidebar count and tab title track open items; empty reads 'Nothing needs you.' Matches key-inbox.html §1 and key-states-keyboard.html §1 (empty Inbox, budget stop, context overflow)."
+verify = "Playwright with FakeClock past a catch-up and a FakeLlm run raising a Question, a Failure and a Budget ask sees the digest name the catch-up run and the spend; answering Use fallback resumes the step; Leave stopped keeps it waiting; Raise once needs the second confirmation; the tab title shows the count; with none left the empty state shows; the list loads the previous week only on request."
+covers = ["R6"]
+after = [3, "5.9", "4.3"]
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 7
+type = "story"
+title = "Review gate in the Inbox"
+description = "The Review item shows the producing seat's output as a table or document with per-item include and return toggles; Approve (Return), Edit (E, inline then approve), Return with note (R, note required, looped back to the producing seat and counted against max_returns) and Reject (confirmed) go through the same Human command as `agentic gate`; the primary counts the outcome ('Approve 5, return 1') with the cost to continue; History and audit read 'You (Reviewer)'. Matches key-inbox.html §1 (Review detail). A Review whose payload is tainted or crossed a department is resolved only here, in the UI (the CLI prints `agentic open --item <id>`; arch AD-15, amended 2026-11-19, final review 2 security H5); a return note the owner writes is trusted input, while one written by a tainted AI reviewer arrives fenced (arch AD-10)."
+verify = "Playwright at the golden run's gate toggles one row to return with a note, sees 'Approve 5, return 1' with the cost to continue, presses Return, and the run continues with the note as a trusted input in the producing step's prompt; returning past max_returns gives a Failure item; Reject asks first; the audit entry reads 'You (Reviewer)'. `agentic gate` on the golden run's cross-department Review prints the open-item hint and resolves nothing once this story lands."
+covers = ["R7"]
+after = [6, "3.4"]
+hitl = false
+risk = "high"
+
+[[entry]]
+id = 8
+type = "story"
+title = "Approvals and proposals in the Inbox"
+description = "Approval items show tool, host, exact arguments, size and first record in a payload well (View all opens the full payload read-only), the untrusted consequence line when the step read untrusted content, and Approve once (Return) or Deny, with no always-allow; Proposal items show the diff, effect line and source references (tainted ones flagged) with Apply, Edit (opens the affected sheet prefilled) or Dismiss, and privilege-widening ones are flagged 'High risk · widens access' and applied only through the two-step confirmation; Apply needs a real pointer or key event and the confirm token (epic 4 story 3, through epic 5's dialog); built on epic 4's Proposal shape (4.10); epic 8 extends this proposal card, including its Run now? card. Matches key-inbox.html §2 and the proposal card of key-assistant.html."
+verify = "Playwright approves the fixture external-effect tool once and the executed arguments equal the well byte for byte; Deny gives the step a tool error; an import Proposal applies as one History entry; a privilege-widening one keeps current access on Return and applies only through the named button; a script and an image in a payload render as text with no network request."
+covers = ["R8"]
+after = [7, "4.8", "4.10"]
+hitl = false
+risk = "high"
+
+[[entry]]
+id = 9
+type = "story"
+title = "Documents with citations and export"
+description = "Documents render through the sanitising renderer (no raw HTML, scripts or remote images; links show their host) with a version picker per run, an estimate against actual header, am:// citations that open the cited row or run and flag any that does not resolve, Copy draft on each draft with 'Drafts only. Agentic Manager never sends email.', and Export Markdown and PDF working offline; settles the deferred PDF export choice (server-side renderer or webview print) as a Decision. Matches key-inbox.html §3."
+verify = "Playwright opens the golden run's Report R1: every action line's citation opens its row or run, a planted unresolved citation is flagged, a planted script and remote image render inert with no network request, Copy draft copies the draft text, an older version opens from the picker, and both exports work with the network blocked and keep the citations as links."
+covers = ["R9"]
+after = [8, "3.6"]
+hitl = false
+risk = "high"
+
+[[entry]]
+id = 12
+type = "story"
+title = "Seat Tasks on the Agent card"
+description = "Adds the Agent card's Tasks section and its index entry (owner statement B, 2026-11-18; EXPERIENCE.md Tasks): a core read model over the config snapshot's workflows and the runs table returns, per seat, every step it performs with step number and title, workflow, trigger read back in the core's words (or Manual) and last run (status, finished time, cost), served under /api/v1 with ts-rs types and pushed on the WebSocket when a step's seat changes or a run of one of those steps finishes; the section lists them read-only, Return or click opens that step in story 4's workflow editor, and the empty state reads 'D1-E1 has no tasks yet. Add it to a workflow step.' with Open workflows. Matches key-seat-sheet.html §1 (Tasks)."
+verify = "Written first, failing: Playwright on the Company A fixture shows D2-Head's Tasks with 'Produce Document A · f1' and 'Write Report R1 · f1', the trigger as the core reads it back and, after a FakeLlm run, its status, time and cost equal to `agentic status`; Return opens the workflow editor with step 1 selected; reassigning step 1 to D2-E1 in the editor moves the row from D2-Head's Tasks to D2-E1's without a reload; a seat with no steps shows the empty sentence and button; the section has no editable control, and ⌥6 reaches it; axe passes in light and dark."
+covers = ["R11"]
+after = [4, 1, "5.17"]
+hitl = false
+risk = "low"
+
+[[entry]]
+id = 13
+type = "story"
+title = "Fan-out, hand-offs and review gates in the editor and run view"
+description = "Matches `mockups/key-workflow-run.html` as Sally updates it for the 2026-11-18 REPLAN: in story 4's workflow editor a fan-out step is one card with its seats side by side (add or remove a seat, 2 to 8) and its fan-in card states the join in words ('Waits for all 3 · times out after 30 min · if one fails: ask me'), editable through a sheet (all or quorum, timeout, on branch failure); a cross-department hand-off is a divider naming the receiving department, payload and acceptance; a review gate is a step card naming the reviewer seat and its department; adding or widening a hand-off or acceptance opens epic 5's privilege-widening confirmation; in story 1's run view the branches run in parallel lanes, each with status, tokens, cost and duration, the fan-in shows its wait ('Waiting for D1-E3 · 2 of 3 done · times out 09:30') and its Question when policy is ask, each hand-off crossing shows its payload version and an untrusted badge when tainted, a review step shows its verdict and note, and parent and child runs of a hand-off or trigger chain link both ways; drill-down labels branch and hand-off parts as the journal does. Changing a review gate's reviewer from a human seat to an AI seat, or removing a human gate, opens the privilege-widening confirmation (epic 4 story 17; 2026-11-19)."
+verify = "Written first, failing: Playwright on the Company A fixture edits F1's fan-out (adds and removes a seat) and fan-in (quorum 2, timeout 10 min, policy continue) and the workflow file and History show each change; adding a hand-off opens the confirmation and Return changes nothing; a FakeLlm run shows three branch lanes updating independently with costs equal to `agentic status`, the fan-in wait sentence, the hand-off divider with the untrusted badge on the poisoned-row variant, D1-Head's return note and the link to the parent run; a branch timeout under ask shows the Question with Continue with 2 of 3; visual snapshots match key-workflow-run.html's fan-out state in light and dark; keyboard reaches every lane and axe passes. Swapping F1's Owner gate reviewer to D1-Head opens the confirmation and Return changes nothing."
+covers = ["R12"]
+after = [4, 2, "3.14", "3.15", "3.16"]
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 14
+type = "story"
+title = "Lineage from the Inbox and Documents"
+description = "Matches `mockups/key-inbox.html` (Lineage) as Sally updates it for the 2026-11-18 REPLAN: every Inbox item and document version with an output gets a Lineage button (and L as its shortcut) opening a side panel that renders `GET /api/v1/lineage` (epic 3 story 17) as a vertical trace from the output back to its first inputs: each node shows seat and department, step and branch, Account › model with a local or frontier badge and the fallback marked, its inputs (untrusted ones marked), tokens, time and cost, and review verdicts with their notes; totals per department and for the chain; each node opens its run drill-down; Export saves JSON or Markdown offline; a removed node shows 'Removed'; plain words throughout, no raw ids unless More is open."
+verify = "Written first, failing: Playwright on the golden Company A run opens Report R1's Inbox item, presses Lineage and finds nodes D2-Head ← D1-Head (review) ← D1-Head ← D1-E1 / D1-E2 / D1-E3 ← D2-Head with models, badges and costs equal to the API and the ledger; the poisoned-row variant marks the untrusted input on every node below it; a node opens the run drill-down; both exports download with the network blocked and the JSON equals the API response; the same panel opens from the document page; visual snapshots match key-inbox.html's lineage state in light and dark; screen readers announce each node; axe passes."
+covers = ["R13"]
+after = [9, 6, "3.17"]
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 10
+type = "story"
+title = "Refactor sweep"
+description = "Cleanup only, scoped at its start from the plans and review findings this epic deferred: no new behaviour; scope pushed out of another story becomes a new story."
+verify = "`just check`, the web lint and unit tests and Playwright on main are green, and every deferred finding from this epic is closed or named in a new story."
+covers = []
+after = [1, 2, 3, 4, 5, 6, 7, 8, 9, 12, 13, 14]
+hitl = false
+risk = "low"
+
+[[entry]]
+id = 11
+type = "story"
+title = "v0.2 end to end and design QA"
+description = "Closing end-to-end suite: Playwright runs UJ-1 on FakeLlm through the browser on the Company A fixture (F1 started by F2's trigger chain after a catch-up on wake, the fan-out lanes and fan-in, D1-Head's review, the digest, the Owner's gate returning Report R1 once then approving, the report with resolving citations and its Lineage, both exports) and its failure paths (a scripted tool failure falls back, fails with a Failure naming the fix, and Re-run step continues; a D1-E3 branch timeout under policy ask offers Continue with 2 of 3), in light and dark, keyboard-only, with axe and the 100 ms interaction budget recorded; captures the workflow-run and Inbox screens for design QA. Owner steps: design QA at the demo against key-workflow-run and key-inbox, then tag v0.2 from main."
+verify = "UJ-1 and its failure path pass in CI in both themes and keyboard-only with no axe violation and interactions under 100 ms; the owner's design QA record marks key-workflow-run and key-inbox passed or names new stories; the v0.2 tag exists on main."
+covers = ["R10"]
+after = [10]
+hitl = true
+risk = "medium"
