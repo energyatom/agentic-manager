@@ -8,7 +8,7 @@ Each verdict links its runnable test or recorded demo.
 
 | # | Criterion | Verdict | Evidence |
 |---|---|---|---|
-| 1 | Provider port (Anthropic + OpenAI-compatible, streaming, tool calls, usage, cancel within 1 s) | **Provisional: owner run pending (not yet a verdict).** AD-1 requires the frontier half live; on 2026-11-19 there was no Anthropic key in the Keychain and LM Studio was not running. The recorded-fixture tests pass. | [`c1_providers.rs`](../crates/am-e2e/tests/spike/c1_providers.rs): both adapters return the tool call with usage, stream text, and stop well within the 1 s deadline after cancel. Live: `live_anthropic_c1`, `live_lm_studio_c1` (see "Owner runs"). |
+| 1 | Provider port (Anthropic + OpenAI-compatible, streaming, tool calls, usage, cancel within 1 s) | **Pass (live).** Frontier half on the owner's Anthropic key (`claude-opus-5-5`). LM Studio half on `google/gemma-4-e4b`. A second local run on the reasoning model `qwen/qwen3.5-9b` streamed no answer text before the cancel; that is a finding for epic 2 (finding 8), not a failure of the criterion. | [`c1_providers.rs`](../crates/am-e2e/tests/spike/c1_providers.rs): recorded-fixture tests for both adapters, and the live tests `live_anthropic_c1` and `live_lm_studio_c1`. [Live run log below](#c1-live-run-2026-11-20). |
 | 2 | `kill -9` mid-run, resume on SQLite WAL | **Pass** | [`c2_crash_resume.rs`](../crates/am-e2e/tests/spike/c2_crash_resume.rs): SIGKILL lands while step 3's call is in flight. On restart the run resumes at step 3. Exactly one call is marked lost, settled at its reservation and re-issued. Every step completes exactly once, the ledger reconciles to the micro-dollar and the audit chain verifies. |
 | 3 | Cron + timezone + catch-up after sleep/wake | **Provisional: owner run pending (not yet a verdict).** The automated tests pass; the macOS sleep/wake lid demo, which the criterion names, has not been run. | [`c3_scheduler.rs`](../crates/am-e2e/tests/spike/c3_scheduler.rs): 09:30 Asia/Kolkata fires at 04:00Z. A three-day clock jump gives exactly one catch-up (`once`); the same holds across a restart from persisted `next_fire`. The `skip` and `all` policies are covered. Demo: `agentic spike c3`. |
 | 4 | Files to models | **Provisional: owner run pending (not yet a verdict).** The synthetic-fixture tests pass; the recorded run on the owner's folder (`AM_SPIKE_DOCS_DIR`, set later by the owner's decision of 2026-11-19) has not been run. | [`c4_files_to_models.rs`](../crates/am-e2e/tests/spike/c4_files_to_models.rs) and [table below](#c4-on-synthetic-fixtures). Every refusal is worded and made before any request (zero bytes sent). The confinement cases pass: a symlink file and a symlinked folder leaving the root, `../`, an absolute path, and a write on a read-only root are all refused and audited. |
@@ -19,19 +19,18 @@ Each verdict links its runnable test or recorded demo.
 | 9 | Agent productivity | **Pass** | A fresh Claude Code subagent built the ToolGate `max_uses_per_step` rule and its 7 tests ([`toolgate.rs`](../crates/am-engine/src/toolgate.rs)) with no human code edits. It wrote the tests failing first and passed `just check` on its second run. Summary [below](#c9-subagent-summary). |
 
 **REPLAN count (criteria 1–7 and 9): provisional.** Of the eight counted
-criteria, five have a verdict (2, 5, 6, 7 and 9: all pass, 0 failures) and
-three are provisional until the owner's runs land:
+criteria, six have a verdict (1, 2, 5, 6, 7 and 9: all pass, 0 failures) and
+two are provisional until the owner's runs land:
 
-- criterion 1: the Anthropic key in the Keychain, and LM Studio with a tool-capable model;
 - criterion 3: the lid demo;
 - criterion 4: `AM_SPIKE_DOCS_DIR` with `.known-words`, plus a vision model in LM Studio.
 
 stack-spike.md allows "pending" only for criterion 5, so the count is not final
-and no replan decision can be taken until these three runs report. A failure
-in any of them counts toward the threshold of two.
+and no replan decision can be taken until these two runs report. A failure
+in either counts toward the threshold of two.
 
 CI on `spike/1-1`: run
-[44588243540](https://github.com/energyatom/agentic-manager/actions/runs/44588243540).
+[44597696551](https://github.com/energyatom/agentic-manager/actions/runs/44597696551) (head `ec1c16f`, after the review fixes).
 Both jobs passed: macOS arm64 `just check`, and Linux portability (build and
 tests).
 
@@ -52,9 +51,13 @@ tests).
     v0.40.16. The older `docs/api.md` example omits the field. Ollama is not
     installed here, so this comes from the documentation and source, as
     planned.
-  - **LM Studio:** `GET /api/v1/models`, loaded instance `context_length`
-    (AD-31). The live reading is **pending**: LM Studio was not running.
-    `agentic spike local-context` prints the response when it is.
+  - **LM Studio:** `GET /api/v1/models` →
+    `models[].loaded_instances[].config.context_length` (integer; the model's
+    ceiling is `models[].max_context_length`). Read live on 2026-11-20 with
+    `agentic spike local-context`: `qwen/qwen3.5-9b` and `google/gemma-4-e4b`
+    both loaded at 32768 (ceiling 262144 for qwen3.5-9b). The same response
+    reports `capabilities.vision`, `capabilities.trained_for_tool_use` and
+    `capabilities.reasoning` (`allowed_options`, `default`).
 - **Unsafe-code exceptions:** none. Every crate has `#![forbid(unsafe_code)]`
   and the workspace lint `unsafe_code = "forbid"`. Unsafe code inside
   dependencies (SQLite, rustls/aws-lc, security-framework, tauri) stays inside
@@ -100,6 +103,16 @@ tests).
      C4 either, because `strip_prefix` refuses.
 
    Both C4 tests fail only when both layers are removed (see the mutation table).
+8. **Reasoning models stream their thinking in a separate field.** On the
+   live C1 run, LM Studio served `qwen/qwen3.5-9b` (reasoning on by default,
+   per `capabilities.reasoning`) as `delta.reasoning_content` chunks before any
+   `delta.content`. The OpenAI-compatible adapter reads only `content`, so the
+   probe saw no answer text within its 20 s wait and cancelled with zero text
+   deltas. The tool call, usage and cancel (0.3 ms) all worked. The epic 2
+   provider stories should either surface `reasoning_content` as its own stream
+   event or switch reasoning off per request where the server allows it, and
+   should choose which from the model's `capabilities.reasoning`. No code was
+   changed in the spike.
 
 ## Test-first evidence (mutation runs)
 
@@ -140,6 +153,21 @@ The worded refusal reads: "The model claude-opus-5-5 cannot read sheet.xlsx
 (application/vnd.openxmlformats-officedocument.spreadsheetml.sheet). Choose a
 model that reads this file type, or route the file to another seat. Nothing
 was sent."
+
+## C1 live run (2026-11-20)
+
+The owner stored the Anthropic key in the Keychain (service `agentic-manager`,
+account `spike-anthropic`) and loaded `qwen/qwen3.5-9b` and
+`google/gemma-4-e4b` in LM Studio (32768 context each). The command, run once
+per local model:
+`AM_LIVE=1 AM_SPIKE_LOCAL_MODEL=<model> cargo nextest run -p am-e2e spike::c1_providers::live --run-ignored only --no-capture`.
+
+| Provider / model | Tool call | Tool-turn usage | Text deltas before cancel | Stop after cancel | Usage after cancel | Result |
+|---|---|---|---|---|---|---|
+| Anthropic `claude-opus-5-5` (run 1) | `lookup_word {"word": "otter"}` | 412 in / 50 out | 6 | 1.86 ms, `Cancelled` | none, so it settles at the reservation (partial seen: 41 in / 9 out) | PASS |
+| Anthropic `claude-opus-5-5` (run 2) | `lookup_word {"word": "otter"}` | 412 in / 50 out | 5 | 0.58 ms, `Cancelled` | none (partial seen: 41 in / 9 out) | PASS |
+| LM Studio `google/gemma-4-e4b` | `lookup_word {"word":"otter"}` | 92 in / 77 out | 12 | 0.33 ms, `Cancelled` | none | PASS |
+| LM Studio `qwen/qwen3.5-9b` | `lookup_word {"word":"otter"}` | 301 in / 66 out | 0 | 0.28 ms, `Cancelled` | none | FAIL: no `content` deltas within 20 s (finding 8) |
 
 ## C5 live run (2026-11-19)
 
@@ -197,16 +225,14 @@ The code was committed unchanged (commit `7ead7ff`).
 
 ## Owner runs still to do
 
-1. **Anthropic key (criterion 1 frontier half, criterion 4 frontier half).**
-   Run `security add-generic-password -s agentic-manager -a spike-anthropic -w`;
-   it prompts for the key, so the key never lands in shell history. The model
+1. **Anthropic key: done 2026-11-20** (account `spike-anthropic`; criterion 1
+   passed live). Criterion 4's frontier half uses the same key. The model
    defaults to `claude-opus-5-5`; `AM_SPIKE_ANTHROPIC_MODEL` changes it.
-2. **LM Studio** on 127.0.0.1:1234. Name the model in `AM_SPIKE_LOCAL_MODEL`
-   (required; the first listed model is never guessed, since it may be an
-   embedding or text-only model): a tool-capable model for criterion 1 and a
-   vision-capable model for criterion 4. If one model does not do both, run the
-   two live tests separately with different values.
-3. **Live tests:**
+2. **LM Studio: done 2026-11-20** for criterion 1. For criterion 4 set
+   `AM_SPIKE_LOCAL_MODEL=google/gemma-4-e4b`, the vision-capable model that
+   passed criterion 1. Do not use a reasoning model such as `qwen/qwen3.5-9b`
+   until finding 8 is handled.
+3. **Live tests (criterion 4 still to run):**
    `AM_SPIKE_DOCS_DIR=<folder> AM_SPIKE_C4_OUT=<file.md> just spike-live`.
    Each live test prints `skipped: <reason>` when its input is absent. Or use
    the commands:
