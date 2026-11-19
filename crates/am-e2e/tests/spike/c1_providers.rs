@@ -12,6 +12,13 @@ use am_testkit::{FakeEgress, FakeResponse, recorded};
 
 use super::live;
 
+/// A cancel that is ignored would hang the probe; fail instead.
+async fn within<T>(f: impl std::future::Future<Output = T>) -> T {
+    tokio::time::timeout(Duration::from_secs(10), f)
+        .await
+        .expect("the probe did not finish within 10 s (cancel ignored?)")
+}
+
 fn anthropic_fake() -> Arc<FakeEgress> {
     let egress = FakeEgress::new();
     egress.respond_if(
@@ -33,7 +40,9 @@ fn anthropic_fake() -> Arc<FakeEgress> {
 async fn anthropic_streams_tool_call_with_usage_and_cancels_within_1s() {
     let egress = anthropic_fake();
     let provider = Arc::new(AnthropicProvider::new(egress.clone(), "spike-anthropic"));
-    let r = c1_probe(provider, "claude-opus-5-5", 2048).await.unwrap();
+    let r = within(c1_probe(provider, "claude-opus-5-5", 2048))
+        .await
+        .unwrap();
 
     let call = r.tool_call.clone().expect("a tool call");
     assert_eq!(call.name, "lookup_word");
@@ -104,7 +113,9 @@ async fn openai_compatible_streams_tool_call_with_usage_and_cancels_within_1s() 
     let egress = openai_fake();
     let provider = Arc::new(OpenAiCompatProvider::lm_studio(egress.clone()));
     assert_eq!(provider.account_id(), "local-lmstudio");
-    let r = c1_probe(provider, "local-tool-model", 2048).await.unwrap();
+    let r = within(c1_probe(provider, "local-tool-model", 2048))
+        .await
+        .unwrap();
     let call = r.tool_call.clone().expect("a tool call");
     assert_eq!(call.id, "call_fixture01");
     assert_eq!(call.arguments_json, r#"{"word": "otter"}"#);

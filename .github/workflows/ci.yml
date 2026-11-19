@@ -1,0 +1,57 @@
+# Spike CI (E1 story 1): macOS arm64 runs the minimal `just check` and builds
+# the `agentic` binary; a Linux portability job builds every crate but
+# am-desktop and runs the tests (AD-47). Actions are pinned by commit SHA and
+# the token is read-only. Story 1.2 adds check-deps, cargo-deny/audit and the
+# denylist scan.
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_TARGET_DIR: target
+  RUST_TOOLCHAIN: "1.100.0"
+
+jobs:
+  macos:
+    name: macOS arm64 (just check)
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Rust toolchain (rust-toolchain.toml)
+        run: rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component rustfmt,clippy
+      - uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
+        with:
+          tool: just,cargo-nextest@0.9.152
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: just check
+        run: just check
+      - name: Build the agentic binary
+        run: cargo build -p am-app --bin agentic
+
+  linux:
+    name: Linux portability (core build + tests)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Rust toolchain (rust-toolchain.toml)
+        run: rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component rustfmt,clippy
+      - uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
+        with:
+          tool: cargo-nextest@0.9.152
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Build every crate but am-desktop
+        run: cargo build --workspace --exclude am-desktop --all-targets
+      - name: Tests
+        run: cargo nextest run --workspace --exclude am-desktop
