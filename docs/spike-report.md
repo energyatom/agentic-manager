@@ -22,7 +22,7 @@ Each verdict links its runnable test or recorded demo.
 criteria, seven have a verdict (1, 2, 4, 5, 6, 7 and 9: all pass, 0 failures)
 and one is provisional until the owner's run lands:
 
-- criterion 3: a sleep demo that wakes more than 60 s after a fire time (attempt 1 was inconclusive).
+- criterion 3: a sleep demo that wakes more than 60 s after a fire time (attempt 1 was inconclusive). The owner closed story 1 on 2026-11-20 with this demo owed on 2026-11-21; its result is appended here.
 
 stack-spike.md allows "pending" only for criterion 5, so the count is not final
 and no replan decision can be taken until this run reports. Even a failure of

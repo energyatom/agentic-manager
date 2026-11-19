@@ -3,7 +3,7 @@ title: 'Stack spike: nine criteria and a verdict'
 type: feature
 ticket: '1'
 created: '2026-11-19'
-status: built
+status: done
 baseline_revision: '61e4f78d156e326e338eea562e1b0ffad245a5e2'
 route: full
 route_source: auto
