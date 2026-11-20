@@ -3,7 +3,7 @@ title: 'Blank department, role templates and the Company A sample'
 type: feature
 ticket: '5'
 created: '2026-11-20'
-status: built
+status: done
 baseline_revision: '1975f0f0947c32dbfd17acf6f929793e8701a833'
 route: full
 route_source: auto
