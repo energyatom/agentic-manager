@@ -10,6 +10,7 @@
 //! - [`FakeClock`]: a `Clock` that moves only when told (`set`, `advance`).
 //! - [`FakeSecretStore`]: an in-memory `SecretStore` for canary values.
 //! - [`CollectEvents`] (an `EventSink`) and [`CollectAudit`] (an `AuditSink`).
+//! - [`InMemoryConfigHistory`]: a `ConfigHistory` without SQLite, for am-config's tests.
 //! - [`recorded`] and [`fixture`]: paths and bytes under `fixtures/`.
 #![forbid(unsafe_code)]
 
@@ -611,5 +612,148 @@ impl CollectAudit {
 impl AuditSink for CollectAudit {
     fn record(&self, event: AuditEvent) {
         self.0.lock().unwrap().push(event);
+    }
+}
+
+// ------------------------------------------------------- config history
+
+/// An in-memory `ConfigHistory` for am-config's tests, without SQLite or
+/// audit. It checks only that an intent's `ref_entry` names an existing entry
+/// and that a commit, reconcile or drop names a pending intent; it does not
+/// check hashes, kinds or paths as `am_store::StoreConfigHistory` does. Ids
+/// are UUID-shaped counters (`00000000-0000-7000-8000-000000000001`, …).
+#[derive(Default)]
+pub struct InMemoryConfigHistory {
+    state: Mutex<HistoryState>,
+}
+
+#[derive(Default)]
+struct HistoryState {
+    next: u64,
+    intents: Vec<am_domain::PendingIntent>,
+    entries: Vec<am_domain::HistoryEntry>,
+}
+
+fn history_now() -> String {
+    jiff::Timestamp::now()
+        .strftime("%Y-%m-%dT%H:%M:%S%.3fZ")
+        .to_string()
+}
+
+impl InMemoryConfigHistory {
+    fn state(&self) -> Result<std::sync::MutexGuard<'_, HistoryState>, am_domain::HistoryError> {
+        self.state
+            .lock()
+            .map_err(|_| am_domain::HistoryError::Store("poisoned".into()))
+    }
+
+    fn complete(
+        &self,
+        intent_id: String,
+    ) -> Result<am_domain::HistoryEntry, am_domain::HistoryError> {
+        let mut st = self.state()?;
+        let pos = st
+            .intents
+            .iter()
+            .position(|p| p.id == intent_id)
+            .ok_or(am_domain::HistoryError::NoIntent(intent_id))?;
+        let p = st.intents.remove(pos);
+        let seq = st.entries.last().map_or(1, |e| e.seq + 1);
+        let entry = am_domain::HistoryEntry {
+            id: p.id,
+            seq,
+            at: history_now(),
+            actor: p.actor,
+            file: p.intent.file,
+            kind: p.intent.kind,
+            ref_entry: p.intent.ref_entry,
+            before_sha256: p.intent.before_sha256,
+            after_sha256: p.intent.after_sha256,
+            before: p.intent.before,
+            after: p.intent.after,
+            diff: p.intent.diff,
+        };
+        st.entries.push(entry.clone());
+        Ok(entry)
+    }
+}
+
+impl am_domain::ConfigHistory for InMemoryConfigHistory {
+    fn begin_intent(
+        &self,
+        actor: am_domain::Actor,
+        intent: am_domain::NewIntent,
+    ) -> Result<String, am_domain::HistoryError> {
+        let mut st = self.state()?;
+        if let Some(r) = &intent.ref_entry
+            && !st.entries.iter().any(|e| &e.id == r)
+        {
+            return Err(am_domain::HistoryError::Store(format!(
+                "no History entry {r}"
+            )));
+        }
+        st.next += 1;
+        let id = format!("00000000-0000-7000-8000-{:012x}", st.next);
+        st.intents.push(am_domain::PendingIntent {
+            id: id.clone(),
+            at: history_now(),
+            actor,
+            intent,
+        });
+        Ok(id)
+    }
+
+    fn commit_entry(
+        &self,
+        _actor: am_domain::Actor,
+        intent_id: String,
+    ) -> Result<am_domain::HistoryEntry, am_domain::HistoryError> {
+        self.complete(intent_id)
+    }
+
+    fn drop_intent(
+        &self,
+        _actor: am_domain::Actor,
+        intent_id: String,
+    ) -> Result<(), am_domain::HistoryError> {
+        let mut st = self.state()?;
+        let before = st.intents.len();
+        st.intents.retain(|p| p.id != intent_id);
+        if st.intents.len() == before {
+            return Err(am_domain::HistoryError::NoIntent(intent_id));
+        }
+        Ok(())
+    }
+
+    fn reconcile_intent(
+        &self,
+        _actor: am_domain::Actor,
+        intent_id: String,
+    ) -> Result<am_domain::HistoryEntry, am_domain::HistoryError> {
+        self.complete(intent_id)
+    }
+
+    fn pending_intents(&self) -> Result<Vec<am_domain::PendingIntent>, am_domain::HistoryError> {
+        Ok(self.state()?.intents.clone())
+    }
+
+    fn entries(
+        &self,
+        file: Option<String>,
+    ) -> Result<Vec<am_domain::HistoryEntry>, am_domain::HistoryError> {
+        Ok(self
+            .state()?
+            .entries
+            .iter()
+            .filter(|e| file.as_ref().is_none_or(|f| &e.file == f))
+            .cloned()
+            .collect())
+    }
+
+    fn entry(
+        &self,
+        id: String,
+    ) -> Result<Option<am_domain::HistoryEntry>, am_domain::HistoryError> {
+        Ok(self.state()?.entries.iter().find(|e| e.id == id).cloned())
     }
 }

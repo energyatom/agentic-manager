@@ -38,3 +38,6 @@ tracing.workspace = true
 [dev-dependencies]
 am-store = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true
+# Story 1.8's serve test seeds config intents by their sha256.
+sha2.workspace = true
+hex.workspace = true

@@ -654,7 +654,10 @@ fn a_chain_written_by_1_6_binaries_verifies_after_migrating_and_writing() {
         .unwrap();
 
     let (text, count, head) = export(&store);
-    assert_eq!(count, 2 + 1 + 2, "two old, one migration, two new");
+    // One migration entry per step from version 2 (one step when story 1.7
+    // wrote this; story 1.8 added the config History tables).
+    let steps = (SCHEMA_VERSION - 2) as u64;
+    assert_eq!(count, 2 + steps + 2, "two old, the migrations, two new");
     let all = entries(&text);
     // The old entries were never recomputed.
     for (e, (seq, h)) in all.iter().zip(&old_rows) {

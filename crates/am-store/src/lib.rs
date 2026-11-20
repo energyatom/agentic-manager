@@ -16,23 +16,27 @@
 //!   [`Store::open`] on a bare path remains for the spike's callers.
 //!
 //! The spike keeps the minimal journal: runs, step runs, model calls, the
-//! ledger (reserve, then settle), triggers and fires.
+//! ledger (reserve, then settle), triggers and fires. Config History (the
+//! intent rows and History entries of AD-16's apply order) is in
+//! [`StoreConfigHistory`].
 #![forbid(unsafe_code)]
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, mpsc};
 use std::thread;
 
-use am_domain::{Actor, Usage};
+use am_domain::{Actor, NewIntent, Usage};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use serde_json::{Value, json};
 
 pub mod audit;
+mod config_history;
 mod fsx;
 mod migrations;
 pub mod project;
 
 pub use audit::{ChainBreak, ChainOk, verify_jsonl};
+pub use config_history::StoreConfigHistory;
 pub use migrations::{AppliedMigration, OpenReport, SCHEMA_VERSION};
 use project::ProjectLock;
 pub use project::{LockHolder, open_project};
@@ -83,6 +87,8 @@ pub enum StoreError {
     WriterGone,
     #[error("{0}")]
     Invalid(String),
+    #[error("no pending config intent {0}")]
+    NoConfigIntent(String),
 }
 
 impl StoreError {
@@ -171,13 +177,36 @@ pub enum WriteCommand {
         outcome: String,
         hash: Option<String>,
     },
+    /// Config History (AD-16, story 1.8, see [`StoreConfigHistory`]): the
+    /// intent row, committed before the file is written. `id` becomes the
+    /// History entry's id. Audited `config.intent_opened`.
+    BeginConfigIntent {
+        id: String,
+        intent: NewIntent,
+    },
+    /// Deletes the intent and inserts its History entry in one transaction,
+    /// audited `config.edited`, `config.undone` or `config.restored`.
+    CommitConfigEntry {
+        intent_id: String,
+    },
+    /// Deletes an intent whose file was never written (`config.intent_dropped`).
+    DropConfigIntent {
+        intent_id: String,
+    },
+    /// At startup: completes an intent whose file holds its new bytes, as
+    /// [`WriteCommand::CommitConfigEntry`] but audited `config.reconciled`.
+    ReconcileConfigIntent {
+        intent_id: String,
+    },
 }
 
 impl WriteCommand {
     /// The audit entry's action, target and redacted `args` (AD-25): ids,
     /// content hashes, counts and statuses only. Content fields (a step's
-    /// `output`) appear only as their sha256 hex; nothing is copied.
-    fn audit_entry(&self) -> (String, String, Option<Value>) {
+    /// `output`) appear only as their sha256 hex; nothing is copied. The
+    /// config History commands build theirs from the intent row in the
+    /// transaction instead (`None` here).
+    fn audit_entry(&self) -> Option<(String, String, Option<Value>)> {
         let output_sha256 = |o: &Option<String>| o.as_deref().map(audit::sha256_hex);
         let tokens = |u: &Option<Usage>| {
             (
@@ -185,7 +214,7 @@ impl WriteCommand {
                 u.map(|u| u.output_tokens as i64),
             )
         };
-        match self {
+        Some(match self {
             WriteCommand::CreateRun {
                 run_id,
                 workflow,
@@ -296,6 +325,10 @@ impl WriteCommand {
                     "scheduled_for": scheduled_for,
                 })),
             ),
+            WriteCommand::BeginConfigIntent { .. }
+            | WriteCommand::CommitConfigEntry { .. }
+            | WriteCommand::DropConfigIntent { .. }
+            | WriteCommand::ReconcileConfigIntent { .. } => return None,
             WriteCommand::Audit {
                 action,
                 target,
@@ -306,7 +339,7 @@ impl WriteCommand {
                 target.clone(),
                 hash.as_ref().map(|h| json!({"sha256": h})),
             ),
-        }
+        })
     }
 }
 
@@ -486,6 +519,7 @@ fn apply(conn: &mut Connection, actor: &Actor, cmd: &WriteCommand) -> Result<(),
     }
     let tx = conn.transaction()?;
     let now = now_ts();
+    let mut config_entry = None;
     match cmd {
         WriteCommand::CreateRun {
             run_id,
@@ -594,8 +628,22 @@ fn apply(conn: &mut Connection, actor: &Actor, cmd: &WriteCommand) -> Result<(),
             )?;
         }
         WriteCommand::Audit { .. } => {}
+        WriteCommand::BeginConfigIntent { id, intent } => {
+            config_entry = Some(config_history::begin(&tx, actor, id, intent, &now)?);
+        }
+        WriteCommand::CommitConfigEntry { intent_id } => {
+            config_entry = Some(config_history::complete(&tx, intent_id, false, &now)?);
+        }
+        WriteCommand::ReconcileConfigIntent { intent_id } => {
+            config_entry = Some(config_history::complete(&tx, intent_id, true, &now)?);
+        }
+        WriteCommand::DropConfigIntent { intent_id } => {
+            config_entry = Some(config_history::drop_intent(&tx, intent_id)?);
+        }
     }
-    let (action, target, args) = cmd.audit_entry();
+    let Some((action, target, args)) = config_entry.or_else(|| cmd.audit_entry()) else {
+        return Err(StoreError::Invalid("the command has no audit entry".into()));
+    };
     let outcome = match cmd {
         WriteCommand::Audit { outcome, .. } => outcome.clone(),
         _ => "ok".to_string(),

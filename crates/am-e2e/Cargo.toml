@@ -20,6 +20,11 @@ path = "tests/cli_validate.rs"
 
 # Every file in tests/trust/ has a target named after it; `trust_targets_listed`
 # fails when one is missing, so the release gate runs them all (AD-33).
+# Story 1.8: config writer, History, Undo and Restore on a real store.
+[[test]]
+name = "config_history"
+path = "tests/config_history.rs"
+
 [[test]]
 name = "trust_targets"
 path = "tests/trust_targets.rs"
@@ -30,6 +35,7 @@ path = "tests/trust/rule_16_audit_log.rs"
 
 [dev-dependencies]
 am-app.workspace = true
+am-config = { workspace = true, features = ["test-support"] }
 am-domain.workspace = true
 am-engine.workspace = true
 am-store.workspace = true

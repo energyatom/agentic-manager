@@ -12,21 +12,28 @@
 //! across files; secret-looking values are errors; YAML comments are warnings
 //! because the app's writer does not keep them. A seat's capabilities are
 //! expanded into its grants by the fixed table in `am_domain::capability`
-//! (AD-46); a skill never adds a grant (AD-38). The writer, History, the
+//! (AD-46); a skill never adds a grant (AD-38).
+//!
+//! [`ConfigWriter`] is the only code that writes these files: canonical key
+//! order, Markdown bodies kept byte for byte, atomic replace, History through
+//! the `am_domain::ConfigHistory` port, Undo and Restore (story 1.8). The
 //! watcher and config migrations come in later stories.
 #![forbid(unsafe_code)]
 
+mod canon;
 mod checks;
 mod cron;
 pub mod entities;
 mod fields;
 mod finding;
 mod kinds;
+mod linediff;
 mod node;
 mod refs;
 mod schema_check;
 mod skills;
 mod snapshot;
+mod writer;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -34,6 +41,11 @@ use std::path::{Path, PathBuf};
 pub use entities::*;
 pub use finding::{Finding, Severity};
 pub use snapshot::ConfigSnapshot;
+#[cfg(feature = "test-support")]
+pub use writer::FailPoint;
+pub use writer::{
+    ConfigEdit, ConfigWriter, EditOp, ReconcileReport, WriteError, canonical_bytes, config_files,
+};
 
 use finding::Report;
 use refs::{Known, Refs};
@@ -82,6 +94,14 @@ const MODEL_FILES: &[&str] = &["accounts", "prices", "capabilities"];
 
 /// Reads and checks the project at `root`.
 pub fn load(root: &Path) -> Result<Loaded, LoadError> {
+    load_with(root, BTreeMap::new())
+}
+
+/// [`load`], reading each file named in `overrides` (project-relative path
+/// to bytes) from there instead of from disk, so the writer checks an edit
+/// before anything is written. Only existing files are overridden: the
+/// folders are still listed from disk.
+pub fn load_with(root: &Path, overrides: BTreeMap<String, Vec<u8>>) -> Result<Loaded, LoadError> {
     if !root.exists() {
         return Err(LoadError::NotFound(root.to_path_buf()));
     }
@@ -93,6 +113,7 @@ pub fn load(root: &Path) -> Result<Loaded, LoadError> {
             project: root.to_path_buf(),
             home: std::env::var_os("HOME").map(PathBuf::from),
         },
+        overrides,
         ..Loader::default()
     };
     loader.read_all(root);
@@ -102,6 +123,8 @@ pub fn load(root: &Path) -> Result<Loaded, LoadError> {
 #[derive(Default)]
 struct Loader {
     places: kinds::Places,
+    /// Bytes to read instead of a file's (see [`load_with`]).
+    overrides: BTreeMap<String, Vec<u8>>,
     reports: BTreeMap<String, Report>,
     files: BTreeMap<String, Vec<u8>>,
     refs: Refs,
@@ -131,7 +154,11 @@ impl Loader {
     /// The file's text, recorded for the hash; `None` (with a finding) when
     /// it cannot be read as UTF-8.
     fn read(&mut self, root: &Path, rel: &str) -> Option<String> {
-        let bytes = match std::fs::read(root.join(rel)) {
+        let read = match self.overrides.get(rel) {
+            Some(b) => Ok(b.clone()),
+            None => std::fs::read(root.join(rel)),
+        };
+        let bytes = match read {
             Ok(b) => b,
             Err(e) => {
                 self.report(rel).error(

@@ -344,3 +344,72 @@ fn serve_with_a_missing_project_folder_is_a_usage_error() {
     }
     assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
 }
+
+/// Story 1.8 (AD-16 startup rule): serve reconciles the config writer's
+/// pending intents before it serves: one whose file holds its new bytes is
+/// completed, one whose file does not is dropped, both audited by the system.
+#[test]
+fn serve_reconciles_interrupted_config_writes_at_start() {
+    use am_domain::{Actor, ConfigHistory, HistoryKind, NewIntent};
+    use sha2::{Digest, Sha256};
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let sha = |b: &[u8]| hex::encode(Sha256::digest(b));
+    let old = b"schema_version: 1\nname: Old\n".to_vec();
+    let new = b"schema_version: 1\nname: New\n".to_vec();
+    // The file already holds the new bytes (a crash after the rename).
+    std::fs::write(root.join("company.yaml"), &new).unwrap();
+    let (done, dropped) = {
+        let (store, _) = am_store::open_project(root).unwrap();
+        let history = am_store::StoreConfigHistory::new(&store).unwrap();
+        let intent = |before: &[u8], after: &[u8]| NewIntent {
+            file: "company.yaml".into(),
+            kind: HistoryKind::Edit,
+            ref_entry: None,
+            before_sha256: sha(before),
+            after_sha256: sha(after),
+            before: before.to_vec(),
+            after: after.to_vec(),
+            diff: String::new(),
+        };
+        let owner = Actor::Human {
+            person: "owner".into(),
+            hat: "Owner".into(),
+        };
+        let done = history
+            .begin_intent(owner.clone(), intent(&old, &new))
+            .unwrap();
+        let dropped = history
+            .begin_intent(owner, intent(&new, b"schema_version: 1\n"))
+            .unwrap();
+        (done, dropped)
+    };
+
+    let mut serve = Serve::start(root);
+    serve.wait_serving();
+    assert!(
+        serve.seen.iter().any(
+            |l| l.contains("completed the interrupted write of company.yaml") && l.contains(&done)
+        ),
+        "{:?}",
+        serve.seen
+    );
+    assert!(
+        serve
+            .seen
+            .iter()
+            .any(|l| l.contains("dropped the unwritten config change") && l.contains(&dropped)),
+        "{:?}",
+        serve.seen
+    );
+    serve.kill();
+
+    let (store, _) = am_store::open_project(root).unwrap();
+    let history = am_store::StoreConfigHistory::new(&store).unwrap();
+    assert!(history.pending_intents().unwrap().is_empty());
+    let entries = history.entries(None).unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].id, done);
+    assert_eq!(std::fs::read(root.join("company.yaml")).unwrap(), new);
+}

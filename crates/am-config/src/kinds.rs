@@ -40,6 +40,133 @@ const COLUMN_TYPES: &[&str] = &[
     "text", "number", "integer", "boolean", "date", "datetime", "url", "status", "json",
 ];
 
+/// The top-level keys of `company.yaml`, in schema order: the loader's allow-list
+/// and the writer's canonical order (story 1.8).
+pub(crate) const COMPANY_KEYS: &[&str] = &[
+    "schema_version",
+    "name",
+    "description",
+    "timezone",
+    "currency",
+    "week_start",
+    "max_chain_depth",
+    "teams",
+    "hats",
+];
+
+/// The top-level keys of `models/accounts.yaml`, in schema order: the loader's allow-list
+/// and the writer's canonical order (story 1.8).
+pub(crate) const ACCOUNTS_KEYS: &[&str] = &["schema_version", "accounts"];
+
+/// The top-level keys of `models/prices.yaml`, in schema order: the loader's allow-list
+/// and the writer's canonical order (story 1.8).
+pub(crate) const PRICES_KEYS: &[&str] = &["schema_version", "updated", "models", "services"];
+
+/// The top-level keys of `models/capabilities.yaml`, in schema order: the loader's allow-list
+/// and the writer's canonical order (story 1.8).
+pub(crate) const CAPABILITIES_KEYS: &[&str] = &["schema_version", "models"];
+
+/// The top-level keys of `tools.yaml`, in schema order: the loader's allow-list
+/// and the writer's canonical order (story 1.8).
+pub(crate) const TOOLS_KEYS: &[&str] = &[
+    "schema_version",
+    "egress_hosts",
+    "search",
+    "builtin",
+    "mcp_servers",
+];
+
+/// The top-level keys of a skill's `SKILL.md` frontmatter, in schema order: the loader's allow-list
+/// and the writer's canonical order (story 1.8).
+pub(crate) const SKILL_KEYS: &[&str] = &[
+    "name",
+    "description",
+    "license",
+    "metadata",
+    "allowed-tools",
+];
+
+/// The top-level keys of a seat file's frontmatter, in schema order: the loader's allow-list
+/// and the writer's canonical order (story 1.8).
+pub(crate) const SEAT_KEYS: &[&str] = &[
+    "schema_version",
+    "id",
+    "name",
+    "role",
+    "team",
+    "description",
+    "reports_to",
+    "goal",
+    "backstory",
+    "avatar",
+    "model",
+    "fallback",
+    "capabilities",
+    "skills",
+    "tools",
+    "budget",
+    "knowledge",
+    "links",
+    "folders",
+    "text_fallback",
+];
+
+/// The top-level keys of `workflows/<id>.yaml`, in schema order: the loader's allow-list
+/// and the writer's canonical order (story 1.8).
+pub(crate) const WORKFLOW_KEYS: &[&str] = &[
+    "schema_version",
+    "id",
+    "name",
+    "team",
+    "description",
+    "triggers",
+    "caps",
+    "steps",
+];
+
+/// The top-level keys of `tables/<id>.yaml`, in schema order: the loader's allow-list
+/// and the writer's canonical order (story 1.8).
+pub(crate) const TABLE_KEYS: &[&str] = &[
+    "schema_version",
+    "id",
+    "name",
+    "team",
+    "description",
+    "key",
+    "columns",
+    "views",
+    "grants",
+];
+
+/// The top-level keys of `dashboards/<id>.yaml`, in schema order: the loader's allow-list
+/// and the writer's canonical order (story 1.8).
+pub(crate) const DASHBOARD_KEYS: &[&str] = &[
+    "schema_version",
+    "id",
+    "name",
+    "team",
+    "description",
+    "cards",
+];
+
+/// The top-level keys of `sources/<id>.yaml`, in schema order: the loader's allow-list
+/// and the writer's canonical order (story 1.8).
+pub(crate) const SOURCE_KEYS: &[&str] = &[
+    "schema_version",
+    "id",
+    "name",
+    "description",
+    "type",
+    "owner_seat",
+    "account",
+    "scope",
+    "trigger",
+    "limits",
+    "output",
+    "render",
+    "terms_checked",
+];
+
 fn value(t: Option<Text>) -> Option<String> {
     t.map(|t| t.value)
 }
@@ -171,20 +298,7 @@ fn web_url(rep: &mut Report, t: &Text, name: &str) -> bool {
 /// `company.yaml`.
 pub(crate) fn company(rep: &mut Report, refs: &mut Refs, root: &Node) -> Option<Company> {
     let f = fields(rep, root, "company.yaml")?;
-    f.allow(
-        rep,
-        &[
-            "schema_version",
-            "name",
-            "description",
-            "timezone",
-            "currency",
-            "week_start",
-            "max_chain_depth",
-            "teams",
-            "hats",
-        ],
-    );
+    f.allow(rep, COMPANY_KEYS);
     let name = f.req_text(rep, "name", "My company");
     let description = value(f.text(rep, "description"));
     let tz = f
@@ -288,7 +402,7 @@ pub(crate) fn accounts(rep: &mut Report, root: &Node) -> Vec<Account> {
     let Some(f) = fields(rep, root, "models/accounts.yaml") else {
         return Vec::new();
     };
-    f.allow(rep, &["schema_version", "accounts"]);
+    f.allow(rep, ACCOUNTS_KEYS);
     let mut out = Vec::new();
     let mut ids = Vec::new();
     for item in f.list(rep, "accounts") {
@@ -389,7 +503,7 @@ pub(crate) fn prices(rep: &mut Report, root: &Node) -> Prices {
     let Some(f) = fields(rep, root, "models/prices.yaml") else {
         return Prices::default();
     };
-    f.allow(rep, &["schema_version", "updated", "models", "services"]);
+    f.allow(rep, PRICES_KEYS);
     let updated = f.text(rep, "updated").filter(|t| {
         let ok = t.value.parse::<jiff::civil::Date>().is_ok();
         if !ok {
@@ -475,7 +589,7 @@ pub(crate) fn capabilities(rep: &mut Report, root: &Node) -> Capabilities {
     let Some(f) = fields(rep, root, "models/capabilities.yaml") else {
         return Capabilities::default();
     };
-    f.allow(rep, &["schema_version", "models"]);
+    f.allow(rep, CAPABILITIES_KEYS);
     let mut models = Vec::new();
     for item in f.list(rep, "models") {
         let Some(m) = fields(rep, item, "model capabilities") else {
@@ -527,16 +641,7 @@ pub(crate) fn tools(rep: &mut Report, refs: &mut Refs, root: &Node) -> ToolsConf
     let Some(f) = fields(rep, root, "tools.yaml") else {
         return ToolsConfig::default();
     };
-    f.allow(
-        rep,
-        &[
-            "schema_version",
-            "egress_hosts",
-            "search",
-            "builtin",
-            "mcp_servers",
-        ],
-    );
+    f.allow(rep, TOOLS_KEYS);
     let mut egress_hosts = Vec::new();
     for h in f.texts(rep, "egress_hosts") {
         let ok = !h.value.is_empty()
@@ -766,16 +871,7 @@ pub(crate) fn skill(
     body_line: u32,
 ) -> Option<Skill> {
     let f = fields(rep, root, "SKILL.md")?;
-    f.allow(
-        rep,
-        &[
-            "name",
-            "description",
-            "license",
-            "metadata",
-            "allowed-tools",
-        ],
-    );
+    f.allow(rep, SKILL_KEYS);
     let name = f.req_text(rep, "name", id).filter(|n| {
         let ok = n.value == id;
         if !ok {
@@ -1347,31 +1443,7 @@ pub(crate) fn seat(
     body: &str,
 ) -> Option<Seat> {
     let f = fields(rep, root, "seat")?;
-    f.allow(
-        rep,
-        &[
-            "schema_version",
-            "id",
-            "name",
-            "role",
-            "team",
-            "description",
-            "reports_to",
-            "goal",
-            "backstory",
-            "avatar",
-            "model",
-            "fallback",
-            "capabilities",
-            "skills",
-            "tools",
-            "budget",
-            "knowledge",
-            "links",
-            "folders",
-            "text_fallback",
-        ],
-    );
+    f.allow(rep, SEAT_KEYS);
     id_is_stem(rep, &f, stem, "md");
     let name = f.req_text(rep, "name", "Seat name");
     let role = f.req_text(rep, "role", "Analyst");
@@ -1537,19 +1609,7 @@ pub(crate) fn workflow(
     root: &Node,
 ) -> Option<Workflow> {
     let f = fields(rep, root, "workflow")?;
-    f.allow(
-        rep,
-        &[
-            "schema_version",
-            "id",
-            "name",
-            "team",
-            "description",
-            "triggers",
-            "caps",
-            "steps",
-        ],
-    );
+    f.allow(rep, WORKFLOW_KEYS);
     id_is_stem(rep, &f, stem, "yaml");
     let name = f.req_text(rep, "name", "Workflow name");
     let team = f.req_id(rep, "team");
@@ -1739,20 +1799,7 @@ fn is_column_id(id: &str) -> bool {
 /// `tables/<id>.yaml`.
 pub(crate) fn table(rep: &mut Report, refs: &mut Refs, stem: &str, root: &Node) -> Option<Table> {
     let f = fields(rep, root, "table")?;
-    f.allow(
-        rep,
-        &[
-            "schema_version",
-            "id",
-            "name",
-            "team",
-            "description",
-            "key",
-            "columns",
-            "views",
-            "grants",
-        ],
-    );
+    f.allow(rep, TABLE_KEYS);
     id_is_stem(rep, &f, stem, "yaml");
     let name = f.req_text(rep, "name", "Table name");
     let team = f.req_id(rep, "team");
@@ -1939,17 +1986,7 @@ pub(crate) fn dashboard(
     root: &Node,
 ) -> Option<Dashboard> {
     let f = fields(rep, root, "dashboard")?;
-    f.allow(
-        rep,
-        &[
-            "schema_version",
-            "id",
-            "name",
-            "team",
-            "description",
-            "cards",
-        ],
-    );
+    f.allow(rep, DASHBOARD_KEYS);
     id_is_stem(rep, &f, stem, "yaml");
     let name = f.req_text(rep, "name", "Dashboard name");
     let team = f.id(rep, "team");
@@ -2297,24 +2334,7 @@ pub(crate) fn source(
     text: &str,
 ) -> Option<Source> {
     let f = fields(rep, root, "source")?;
-    f.allow(
-        rep,
-        &[
-            "schema_version",
-            "id",
-            "name",
-            "description",
-            "type",
-            "owner_seat",
-            "account",
-            "scope",
-            "trigger",
-            "limits",
-            "output",
-            "render",
-            "terms_checked",
-        ],
-    );
+    f.allow(rep, SOURCE_KEYS);
     id_is_stem(rep, &f, stem, "yaml");
     let source_type = f.choice(rep, "type", SOURCE_TYPES);
     if f.absent("type") {
