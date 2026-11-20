@@ -95,7 +95,7 @@ context:
 ## Tasks & Acceptance
 
 **Execution:**
-- [x] `crates/am-store/tests/project.rs` and `crates/am-e2e/tests/project_open.rs` -- FIRST: one test per matrix row. The second-process row runs two `agentic serve --project` processes; the stale-lock row is a child process that holds the lock and is then killed. Add the `compile_fail` doctest on `Writer::exec`. Run them and paste the red output into Implementation Notes.
+- [x] `crates/am-store/tests/project.rs` and `crates/am-e2e/tests/project_open.rs` (moved to `crates/am-app/tests/serve_project.rs` after CI; see Implementation Notes) -- FIRST: one test per matrix row. The second-process row runs two `agentic serve --project` processes; the stale-lock row is a child process that holds the lock and is then killed. Add the `compile_fail` doctest on `Writer::exec`. Run them and paste the red output into Implementation Notes.
 - [x] `crates/am-store/migrations/*.sql` and `crates/am-store/src/migrations.rs` -- the embedded numbered files, the backup hook and the report.
 - [x] `crates/am-store/src/project.rs` and `crates/am-store/src/lib.rs` -- `.agentic/` creation and the permission check, the lock and the project open.
 - [x] `crates/am-app/src/main.rs` -- `serve --project`.
@@ -132,7 +132,7 @@ The no-Actor row already held before this story (`Actor` had no `Default`): `car
 
 **Changes outside the listed files (recorded).**
 - `crates/am-store/src/fsx.rs` (new): owner-only folder and file helpers, Unix modes behind `#[cfg(unix)]` with a compiling plain branch; `open_project` returns `StoreError::Unsupported` ("not supported on this platform yet") off Unix.
-- `crates/am-e2e/Cargo.toml`: the `project_open` test target and `serde_json` (workspace pin, no new crate) as a dev-dependency. The e2e tests build the binary with `cargo build -p am-app --bin agentic --message-format=json` (the `CARGO` that built the test) and take its path from cargo's artifact report: with toolchain 1.100 the test binaries live under the build dir (`target/debug/build/am-e2e/<hash>/`), so a path derived from the test executable is wrong. The first test in a cold tree spends ~15 s on that build.
+- (Superseded by the CI move below.) `crates/am-e2e/Cargo.toml`: the `project_open` test target and `serde_json` (workspace pin, no new crate) as a dev-dependency. The e2e tests build the binary with `cargo build -p am-app --bin agentic --message-format=json` (the `CARGO` that built the test) and take its path from cargo's artifact report: with toolchain 1.100 the test binaries live under the build dir (`target/debug/build/am-e2e/<hash>/`), so a path derived from the test executable is wrong. The first test in a cold tree spends ~15 s on that build.
 
 **Interpretations (recorded, not decisions).**
 - "Nothing written" for a newer database means the database: `state.db`'s bytes are unchanged and no backup is taken. Opening still creates `.agentic/.gitignore` if missing and writes the lock record, both inside `.agentic/`.
@@ -152,6 +152,8 @@ The no-Actor row already held before this story (`Actor` had no `Default`): `car
 - **Command assertion:** the recorded command must equal this test process's own arguments joined as `LockHolder::current` joins them.
 - **Bare-path open:** the `Store::open` doc now says AD-7's backup-first rule applies to bare paths too: a migration of an existing database creates `backups/` (0700) beside the given file. No behaviour change.
 - **Checks run:** `cargo nextest run -p am-store -p am-e2e -E 'package(am-store) | binary(project_open)'` 27 passed. `cargo test --doc -p am-store` passed. `cargo clippy --workspace --all-targets -D warnings`, fmt and `cargo xtask check-deps` clean. The full `just check` is left to the coordinator.
+
+**CI fix (2026-11-20): the serve tests moved to am-app.** CI on macOS failed `serve_with_a_missing_project_folder_is_a_usage_error`: spawning `agentic` returned `NotFound`. Each test process ran its own `cargo build -p am-app --bin agentic`, and cargo re-links the uplifted `target/debug/agentic` on every build, even a fresh one. So one test's build removed the file at the moment another test spawned it. Linux passed by luck. The file moved from `crates/am-e2e/tests/project_open.rs` to `crates/am-app/tests/serve_project.rs` and now uses `env!("CARGO_BIN_EXE_agentic")`: cargo builds that binary before the integration tests and never rewrites it while they run. Every test and assertion is kept. Removed: the `agentic_bin` cargo-build helper, am-e2e's `project_open` `[[test]]` target, am-e2e's `serde_json` dev-dependency (nothing else used it) and am-e2e's `test-support` feature on am-store. am-app gained dev-dependencies on am-store with `test-support` and on tempfile (workspace pins). `cargo nextest run -p am-app -E 'binary(serve_project)'` passed 8 of 8 on five runs in a row, and `cargo xtask check-deps` passes.
 
 **For the architect (decision (a)).** Fourth Stack conflict: the Stack names rusqlite_migration, but its `=2.7.0` requires `rusqlite ^0.41` while the Stack pins rusqlite `=0.43.0`. am-store keeps a project-owned `user_version` migrator under AD-7's rules (numbered embedded SQL, forward-only, newer database refused, `VACUUM INTO` backup first, each migration reported). AD-7's wording "applied by rusqlite_migration" no longer matches the code.
 
@@ -193,7 +195,7 @@ Caller checks before the review:
 ## Verification
 
 **Commands:**
-- `cargo nextest run -p am-store -p am-e2e -E 'package(am-store) | binary(project_open)'` -- expected: red first (recorded), then green.
+- `cargo nextest run -p am-store -p am-app -E 'package(am-store) | binary(serve_project)'` -- expected: red first (recorded, under the file's earlier name `am-e2e` `binary(project_open)`), then green.
 - `cargo test --doc -p am-store` -- expected: the `compile_fail` doctest passes.
 - `just check` -- expected: green.
 

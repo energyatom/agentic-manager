@@ -1,7 +1,7 @@
 //! Story 1.6: `agentic serve --project <path>` as the owner runs it. Each
-//! test runs the real `agentic` binary (built here with `cargo build -p am-app
-//! --bin agentic` into this test's target directory) on a temporary project
-//! and checks its output, its exit code and the files and modes on disk.
+//! test runs the real `agentic` binary (`CARGO_BIN_EXE_agentic`, built by
+//! cargo before these tests) on a temporary project and checks its output,
+//! its exit code and the files and modes on disk.
 #![forbid(unsafe_code)]
 #![cfg(unix)]
 
@@ -9,7 +9,6 @@ use std::io::{BufRead, BufReader, Read};
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::OnceLock;
 use std::sync::mpsc::{Receiver, channel};
 use std::time::{Duration, Instant};
 
@@ -17,39 +16,10 @@ use am_store::SCHEMA_VERSION;
 
 const WAIT: Duration = Duration::from_secs(60);
 
-/// The `agentic` binary, built once per test process with this build's
-/// cargo and environment; its path comes from cargo's own artifact report.
+/// The `agentic` binary; cargo builds it before the integration tests run
+/// and never rewrites it while they do.
 fn agentic_bin() -> &'static Path {
-    static BIN: OnceLock<PathBuf> = OnceLock::new();
-    BIN.get_or_init(|| {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let out = Command::new(env!("CARGO"))
-            .args([
-                "build",
-                "-q",
-                "-p",
-                "am-app",
-                "--bin",
-                "agentic",
-                "--message-format=json",
-                "--offline",
-                "--locked",
-            ])
-            .current_dir(&root)
-            .stderr(Stdio::inherit())
-            .output()
-            .unwrap();
-        assert!(out.status.success(), "building agentic failed");
-        let bin = String::from_utf8(out.stdout)
-            .unwrap()
-            .lines()
-            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
-            .filter(|m| m["reason"] == "compiler-artifact" && m["target"]["name"] == "agentic")
-            .find_map(|m| m["executable"].as_str().map(PathBuf::from))
-            .expect("cargo reported no agentic executable");
-        assert!(bin.exists(), "{} missing", bin.display());
-        bin
-    })
+    Path::new(env!("CARGO_BIN_EXE_agentic"))
 }
 
 fn mode(path: &Path) -> u32 {
