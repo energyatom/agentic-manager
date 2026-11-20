@@ -1,0 +1,10 @@
+schema_version: 1
+accounts:
+  - id: anthropic
+    provider: anthropic
+    name: Anthropic
+    secret_ref: anthropic
+  - id: openai
+    provider: openai
+    name: OpenAI
+    secret_ref: openai

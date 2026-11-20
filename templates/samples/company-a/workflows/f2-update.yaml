@@ -1,0 +1,21 @@
+schema_version: 1
+name: Weekly update of Table T1
+team: d2
+description: Flow F2, first part. Every Monday at 09:00 company time, with one catch-up run after a missed start, D2-E1 to D2-E4 update table-t1 from the week's new rows that t1-drop loaded, giving a reason for each status change.
+triggers:
+  - schedule:
+      cron: "0 9 * * 1"
+      catch_up: once
+caps:
+  per_run: 250
+  scheduled_per_run: 150
+  per_week: 600
+steps:
+  - id: update
+    seats:
+      - d2-e1
+      - d2-e2
+      - d2-e3
+      - d2-e4
+    instruction: Work only on the rows of your share of table-t1, as your seat's instructions define it. Read the rows of your share added since the last run and move each one from new to processed or dismissed with table_write, giving the reason for every change.
+    max_parallel: 4

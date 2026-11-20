@@ -17,11 +17,18 @@ __pycache__/
 
 # Committed test fixtures are the exception to the image rule above.
 !fixtures/**/*.png
+!templates/**/*.png
 !crates/am-desktop/icons/*.png
 
 # Fixture projects keep their synthetic runtime files (reference files in
 # .agentic/knowledge/<seat-id>/) so validate sees the same tree in CI.
 !fixtures/projects/*/.agentic/
+
+# The sample company ships D1's team Knowledge notes in .agentic/knowledge/;
+# every other runtime file under .agentic/ stays ignored.
+!templates/samples/*/.agentic/
+templates/samples/*/.agentic/*
+!templates/samples/*/.agentic/knowledge/
 
 # Spike run outputs (owner file names and answers); never committed
 crates/am-e2e/c4*.md

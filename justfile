@@ -1,8 +1,9 @@
 # Agentic Manager task runner. `just check` is the gate: fmt, clippy
 # -D warnings, nextest and the offline repo checks (AD-4 dependency direction,
 # every crate forbids unsafe, AD-23 vocabulary denylist) and `agentic validate`
-# over the valid fixture projects (story 1.4). `just supply-chain` runs the
-# licence, bans and sources policy (cargo-deny) and cargo-audit.
+# over the valid fixture projects (story 1.4) and templates/ (story 1.5).
+# `just supply-chain` runs the licence, bans and sources policy (cargo-deny)
+# and cargo-audit.
 
 # Build output stays outside the synced project folder; share it across worktrees.
 export CARGO_TARGET_DIR := env_var_or_default("CARGO_TARGET_DIR", env_var("HOME") + "/Library/Caches/agentic-manager/target")
@@ -37,14 +38,15 @@ check-forbid:
 denylist:
     cargo xtask denylist
 
-# AD-16, AD-33: `agentic validate` on every valid fixture project (each must
-# exit 0). The broken fixtures are asserted by the am-config and cli_validate
-# tests instead. templates/ joins this step when story 1.5 creates it.
+# AD-16, AD-33: `agentic validate` on every valid fixture project and every
+# shipped template (the Blank department, the role templates and the sample
+# company; each must exit 0). The broken fixtures are asserted by the
+# am-config and cli_validate tests instead.
 validate:
     #!/usr/bin/env bash
     set -euo pipefail
     cargo build -q -p am-app --bin agentic
-    for project in fixtures/projects/valid*/; do
+    for project in fixtures/projects/valid*/ templates/departments/*/ templates/roles/*/ templates/samples/*/; do
         "$CARGO_TARGET_DIR/debug/agentic" validate "$project"
     done
 

@@ -156,3 +156,77 @@ fn current_repo_passes() {
     let out = xtask(&["denylist"]);
     assert!(out.status.success(), "repo is clean: {}", stderr(&out));
 }
+
+/// Story 1.5: every id the sample company ships is department vocabulary: a
+/// seed term in `xtask/denylist.txt` or a derived kebab-case file stem.
+/// Written into a scanned file, each must be reported. The Owner's seat id
+/// `owner` is ordinary product vocabulary (`owner_seat`) and is the one
+/// recorded exception.
+#[test]
+fn every_sample_id_is_denied() {
+    let sample = repo_root().join("templates/samples/company-a");
+    assert!(sample.is_dir(), "the sample ships at {}", sample.display());
+    let stems = |dir: &str, ext: &str| -> Vec<String> {
+        std::fs::read_dir(sample.join(dir))
+            .unwrap_or_else(|e| panic!("{dir}: {e}"))
+            .filter_map(|e| {
+                let name = e.unwrap().file_name().to_string_lossy().into_owned();
+                name.strip_suffix(ext).map(str::to_string)
+            })
+            .collect()
+    };
+    let mut ids: Vec<String> = [
+        "company-a",
+        "d1-inputs",
+        "document-a",
+        "report-r1",
+        "d1-opinion",
+        "d1-summary",
+        "d1-folder-digest",
+        "f1",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    ids.extend(stems("seats", ".md").into_iter().filter(|s| s != "owner"));
+    ids.extend(stems("tables", ".yaml"));
+    ids.extend(stems("workflows", ".yaml"));
+    ids.extend(stems("sources", ".yaml"));
+    ids.extend(
+        std::fs::read_dir(sample.join("skills"))
+            .expect("skills/")
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| !n.starts_with('.')),
+    );
+    assert!(ids.len() >= 8 + 9 + 1 + 4 + 2 + 2, "{ids:?}");
+
+    // A scan root holding the real templates/ (so derived stems count) and
+    // one crates/ file naming every id, one per line.
+    let tmp = tempfile::tempdir().unwrap();
+    copy_tree(
+        &repo_root().join("templates"),
+        &tmp.path().join("templates"),
+    );
+    let body: String = ids.iter().map(|id| format!("\"{id}\"\n")).collect();
+    write(tmp.path(), "crates/x/src/lib.rs", &body);
+    let out = scan(tmp.path());
+    let err = stderr(&out);
+    assert!(!out.status.success(), "sample ids must fail: {err}");
+    for (n, id) in ids.iter().enumerate() {
+        let want = format!("crates/x/src/lib.rs:{}: `{id}`", n + 1);
+        assert!(err.contains(&want), "`{id}` is not denied:\n{err}");
+    }
+}
+
+fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let target = to.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_tree(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), &target).unwrap();
+        }
+    }
+}

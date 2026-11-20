@@ -1,0 +1,15 @@
+schema_version: 1
+name: D1 summary
+team: d1
+description: Flow F2, second part. When f2-update completes, D1-Head reads table-t1 through D2's read grant and writes d1-summary. Its completion starts f1.
+triggers:
+  - event:
+      on: workflow_completed:f2-update
+caps:
+  per_run: 250
+  scheduled_per_run: 150
+  per_week: 600
+steps:
+  - id: summarise
+    seat: d1-head
+    instruction: Read table-t1 through D2's read grant and write d1-summary with write_document, saying what changed this week and the reasons given.

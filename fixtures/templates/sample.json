@@ -1,0 +1,266 @@
+{
+  "about": "What the sample company template must hold, from reference-workload.md. Read by crates/am-config/tests/templates.rs and crates/am-e2e/tests/cli_validate.rs, which keep the sample's ids out of crates/ (AD-23).",
+  "sample": "company-a",
+  "currency": "INR",
+  "owner": "owner",
+  "owner_role": "Human seat",
+  "owner_team": "owner",
+  "hats": [
+    "CEO",
+    "Vision Creator",
+    "Reviewer",
+    "Developer"
+  ],
+  "teams": [
+    {
+      "id": "d1",
+      "accepts": [
+        "d2/f1"
+      ],
+      "seats": [
+        "d1-head",
+        "d1-e1",
+        "d1-e2",
+        "d1-e3"
+      ]
+    },
+    {
+      "id": "d2",
+      "accepts": [],
+      "seats": [
+        "d2-head",
+        "d2-e1",
+        "d2-e2",
+        "d2-e3",
+        "d2-e4"
+      ]
+    },
+    {
+      "id": "owner",
+      "accepts": [],
+      "seats": []
+    }
+  ],
+  "heads": [
+    "d1-head",
+    "d2-head"
+  ],
+  "local": [
+    "d1-e2",
+    "d2-e1",
+    "d2-e2",
+    "d2-e4"
+  ],
+  "cloud_fallback": [
+    "d1-head",
+    "d1-e1",
+    "d1-e3",
+    "d2-head",
+    "d2-e3"
+  ],
+  "table": {
+    "id": "table-t1",
+    "team": "d2",
+    "key": "item_id",
+    "columns": [
+      "item_id",
+      "received",
+      "text",
+      "status"
+    ],
+    "values": [
+      "new",
+      "processed",
+      "handed-off",
+      "dismissed"
+    ],
+    "transitions": [
+      [
+        "new",
+        "processed"
+      ],
+      [
+        "processed",
+        "handed-off"
+      ],
+      [
+        "new",
+        "dismissed"
+      ],
+      [
+        "processed",
+        "dismissed"
+      ]
+    ],
+    "view": "Open items",
+    "grants": [
+      "d1"
+    ]
+  },
+  "workflows": {
+    "f1": "d2",
+    "f2-update": "d2",
+    "f2-d1": "d1",
+    "f3-folder": "d1"
+  },
+  "caps": {
+    "scheduled_per_run": 150,
+    "per_run": 250,
+    "per_week": 600
+  },
+  "schedule": {
+    "workflow": "f2-update",
+    "cron": "0 9 * * 1",
+    "catch_up": "once"
+  },
+  "events": {
+    "f2-d1": "workflow_completed:f2-update",
+    "f1": "workflow_completed:f2-d1"
+  },
+  "manual": [
+    "f3-folder"
+  ],
+  "report_flow": {
+    "workflow": "f1",
+    "fan_out": [
+      "d1-e1",
+      "d1-e2",
+      "d1-e3"
+    ],
+    "fan_in": "d1-head",
+    "quorum": 3,
+    "timeout": "30m",
+    "on_branch_failure": "ask",
+    "reviewer": "d1-head",
+    "max_returns": 2,
+    "report_seat": "d2-head",
+    "documents": [
+      "document-a",
+      "d1-opinion",
+      "report-r1"
+    ],
+    "handoffs_to": [
+      "d2/f1/branches",
+      "d2/f1/report"
+    ],
+    "last_seat": "owner",
+    "producer": "produce"
+  },
+  "chained_flows": {
+    "update": "f2-update",
+    "update_seats": [
+      "d2-e1",
+      "d2-e2",
+      "d2-e3",
+      "d2-e4"
+    ],
+    "follow": "f2-d1",
+    "follow_names": [
+      "d1-summary",
+      "table-t1"
+    ]
+  },
+  "folder_flow": {
+    "workflow": "f3-folder",
+    "folder": "d1-inputs",
+    "path": "files/d1-inputs",
+    "routes": [
+      {
+        "seat": "d1-e1",
+        "match": [
+          "*.pdf"
+        ]
+      },
+      {
+        "seat": "d1-e2",
+        "match": [
+          "*.csv"
+        ]
+      },
+      {
+        "seat": "d1-e3",
+        "match": [
+          "*.png",
+          "*.jpg"
+        ]
+      }
+    ],
+    "gatherer": "d1-head",
+    "timeout": "30m",
+    "on_branch_failure": "ask",
+    "document": "d1-folder-digest",
+    "linked": [
+      "d1-head",
+      "d1-e1",
+      "d1-e2",
+      "d1-e3"
+    ],
+    "text_fallback": [
+      "d1-e2"
+    ]
+  },
+  "capabilities": {
+    "web_search_and_browse": [
+      "d1-e1",
+      "d1-e2",
+      "d1-e3"
+    ],
+    "tables": [
+      "d2-head",
+      "d2-e1",
+      "d2-e2",
+      "d2-e3",
+      "d2-e4"
+    ]
+  },
+  "grants": [
+    {
+      "seat": "d1-e1",
+      "has": [
+        "web_search",
+        "read_website"
+      ]
+    },
+    {
+      "seat": "d2-e1",
+      "has": [
+        "table_write"
+      ]
+    },
+    {
+      "seat": "d1-e2",
+      "has": [
+        "read_file"
+      ]
+    }
+  ],
+  "skills": {
+    "structured-review": [
+      "d1-e1",
+      "d1-e2",
+      "d1-e3"
+    ],
+    "plain-report": [
+      "d2-head"
+    ]
+  },
+  "drop_source": {
+    "id": "t1-drop",
+    "type": "local-repository",
+    "owner": "d2-e1",
+    "table": "table-t1",
+    "key": "item_id"
+  },
+  "knowledge_source": {
+    "id": "d1-notes",
+    "type": "knowledge",
+    "team": "d1",
+    "dir": ".agentic/knowledge/team-d1"
+  },
+  "files": {
+    "pdf": 2,
+    "csv": 3,
+    "png": 2,
+    "docx": 1
+  }
+}

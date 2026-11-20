@@ -1,0 +1,32 @@
+schema_version: 1
+name: Folder digest
+team: d1
+description: Flow F3, many models on one folder. Each seat reads the files of d1-inputs its route matches with its own model; D1-Head gathers their outputs and the list of unrouted files into d1-folder-digest. Starts by hand.
+caps:
+  per_run: 250
+  scheduled_per_run: 150
+  per_week: 600
+steps:
+  - id: read
+    over_folder: d1-inputs
+    routes:
+      - match:
+          - "*.pdf"
+        seat: d1-e1
+      - match:
+          - "*.csv"
+        seat: d1-e2
+      - match:
+          - "*.png"
+          - "*.jpg"
+        seat: d1-e3
+    files: new_or_changed
+    instruction: Read the files your route gives you with read_file and write what each one holds, naming the file.
+  - id: gather
+    seat: d1-head
+    instruction: Gather the three branch outputs and the list of unrouted files into d1-folder-digest with write_document, one labelled section per branch.
+    join:
+      from: read
+      wait: all
+      timeout: 30m
+      on_branch_failure: ask

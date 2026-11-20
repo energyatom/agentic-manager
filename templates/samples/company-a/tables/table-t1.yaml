@@ -1,0 +1,43 @@
+schema_version: 1
+name: Table T1
+team: d2
+description: Items D2 works on. The t1-drop Source loads them and D2-E1 to D2-E4 update them; every status change carries a reason. D1 may read it through D2's grant.
+key: item_id
+columns:
+  - id: item_id
+    type: text
+    required: true
+    description: The item's id in the dropped file.
+  - id: received
+    type: datetime
+    description: When the item arrived.
+  - id: text
+    type: text
+    description: The item's text, as dropped.
+  - id: status
+    type: status
+    required: true
+    values:
+      - new
+      - processed
+      - handed-off
+      - dismissed
+    transitions:
+      - from: new
+        to: processed
+      - from: processed
+        to: handed-off
+      - from: new
+        to: dismissed
+      - from: processed
+        to: dismissed
+views:
+  - id: open
+    name: Open items
+    columns:
+      - item_id
+      - received
+      - text
+      - status
+grants:
+  - d1

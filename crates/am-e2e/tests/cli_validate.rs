@@ -157,6 +157,90 @@ fn sources_broken_prints_each_error_and_exits_one() {
     assert!(out.contains("5 errors"), "{out}");
 }
 
+// Story 1.5: every shipped template validates as it is.
+
+fn templates() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../templates")
+}
+
+/// Every template folder: the departments, the roles and the samples.
+fn template_folders() -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    for group in ["departments", "roles", "samples"] {
+        let dir = templates().join(group);
+        let entries = std::fs::read_dir(&dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display()));
+        for entry in entries {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                found.push(path);
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
+fn assert_clean(path: &Path) {
+    let (code, out, err) = validate(&[path.to_str().unwrap()]);
+    assert_eq!(code, 0, "{}:\n{out}{err}", path.display());
+    assert!(
+        out.contains("0 errors, 0 warnings"),
+        "{}:\n{out}",
+        path.display()
+    );
+}
+
+#[test]
+fn blank_department_template_exits_zero() {
+    assert_clean(&templates().join("departments/blank"));
+}
+
+#[test]
+fn each_role_template_exits_zero() {
+    let roles = [
+        "head",
+        "coordinator",
+        "analyst",
+        "researcher",
+        "reviewer",
+        "writer",
+        "specialist",
+        "human",
+    ];
+    for role in roles {
+        assert_clean(&templates().join("roles").join(role));
+    }
+}
+
+#[test]
+fn sample_company_template_exits_zero() {
+    // The sample's id is department vocabulary (AD-23); it is read from the
+    // expectations file under fixtures/.
+    let expect = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/templates/sample.json"),
+    )
+    .expect("fixtures/templates/sample.json");
+    let name = expect
+        .split_once("\"sample\": \"")
+        .and_then(|(_, rest)| rest.split_once('"'))
+        .map(|(name, _)| name)
+        .expect("the sample's folder name");
+    assert_clean(&templates().join("samples").join(name));
+}
+
+#[test]
+fn every_template_folder_exits_zero() {
+    let folders = template_folders();
+    assert_eq!(
+        folders.len(),
+        10,
+        "1 department, 8 roles, 1 sample: {folders:?}"
+    );
+    for folder in folders {
+        assert_clean(&folder);
+    }
+}
+
 #[test]
 fn warnings_alone_exit_zero() {
     let dir = tempfile::tempdir().unwrap();
