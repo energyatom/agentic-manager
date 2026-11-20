@@ -1,27 +1,36 @@
-//! `am-store`: the SQLite system of record (spike scope: AD-6, AD-7, AD-8, AD-9, AD-25).
+//! `am-store`: the SQLite system of record (AD-6, AD-7, AD-8, AD-9, AD-25, AD-32).
 //!
 //! - One **writer thread** owns the only read-write connection. Every mutation
 //!   is a typed [`WriteCommand`] carrying an [`Actor`] and commits together with
 //!   its hash-chained audit entry in one transaction.
 //! - **Readers** open `SQLITE_OPEN_READ_ONLY` with `query_only=ON`.
 //! - The database runs WAL, `synchronous=FULL`, `foreign_keys=ON`; migrations
-//!   are forward-only and a database newer than the binary is refused.
+//!   are the numbered, embedded, forward-only SQL files in `migrations/`, run
+//!   after a `VACUUM INTO` backup and reported; a database newer than the
+//!   binary is refused.
+//! - [`open_project`] opens a project's `.agentic/` folder (owner-only,
+//!   git-ignored) under an exclusive lock that names its holder.
+//!   [`Store::open`] on a bare path remains for the spike's callers.
 //!
 //! The spike keeps the minimal journal: runs, step runs, model calls, the
 //! ledger (reserve, then settle), triggers and fires.
 #![forbid(unsafe_code)]
 
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
+use std::sync::{Arc, mpsc};
 use std::thread;
 
 use am_domain::{Actor, Usage};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use sha2::{Digest, Sha256};
 
+mod fsx;
 mod migrations;
+pub mod project;
 
-pub use migrations::SCHEMA_VERSION;
+pub use migrations::{AppliedMigration, OpenReport, SCHEMA_VERSION};
+use project::ProjectLock;
+pub use project::{LockHolder, open_project};
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -29,10 +38,52 @@ pub enum StoreError {
     Sqlite(#[from] rusqlite::Error),
     #[error("the database is version {found}, newer than this app knows ({known}); update the app")]
     TooNew { found: i64, known: i64 },
+    #[error(
+        "the database has version {found}, so it is not a database this app made; move the file aside and open the project again"
+    )]
+    NotOurs { found: i64 },
+    #[error(
+        "the migration from version {from} to {to} failed: {source}; the database stays at version {from}{}",
+        migrations::backup_words(.backup)
+    )]
+    MigrationFailed {
+        from: i64,
+        to: i64,
+        backup: Option<PathBuf>,
+        source: Box<StoreError>,
+    },
+    #[error(
+        "the folder {} can be read or entered by other users (mode {mode:o}); run `chmod 700 {}` and open the project again",
+        .path.display(),
+        .path.display()
+    )]
+    LoosePermissions { path: PathBuf, mode: u32 },
+    #[error(
+        "the project is already open in another process ({}); close it there first (lock file {})",
+        project::holder_words(.holder),
+        .lock.display()
+    )]
+    Locked {
+        lock: PathBuf,
+        holder: Option<LockHolder>,
+    },
+    #[error("{context}: {source}")]
+    Io {
+        context: String,
+        source: std::io::Error,
+    },
+    #[error("opening a project is not supported on this platform yet")]
+    Unsupported,
     #[error("the writer stopped")]
     WriterGone,
     #[error("{0}")]
     Invalid(String),
+}
+
+impl StoreError {
+    pub(crate) fn io(context: String, source: std::io::Error) -> StoreError {
+        StoreError::Io { context, source }
+    }
 }
 
 /// UTC RFC 3339 with milliseconds and `Z`.
@@ -157,17 +208,65 @@ pub struct TriggerRow {
 
 type Reply = mpsc::Sender<Result<(), StoreError>>;
 
+type Job = (Actor, WriteCommand, Reply);
+
 /// Handle to the single writer. Cloning shares the same writer thread.
 #[derive(Clone)]
 pub struct Writer {
-    tx: mpsc::Sender<(Actor, WriteCommand, Reply)>,
+    inner: Arc<WriterThread>,
+}
+
+/// The writer thread, shared by the [`Store`] and every [`Writer`] clone.
+/// When the last handle drops, the channel closes and the thread is joined,
+/// so the read-write connection (and a project's lock, which the thread owns
+/// with it) is released by the time that drop returns.
+struct WriterThread {
+    tx: Option<mpsc::Sender<Job>>,
+    handle: Option<thread::JoinHandle<()>>,
+}
+
+impl Drop for WriterThread {
+    fn drop(&mut self) {
+        drop(self.tx.take());
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
+    }
 }
 
 impl Writer {
     /// Execute one command; returns after it committed (durably: synchronous=FULL).
+    ///
+    /// Every command names its [`Actor`] (AD-24); there is no default:
+    ///
+    /// ```no_run
+    /// # fn f(w: am_store::Writer) -> Result<(), am_store::StoreError> {
+    /// let actor = am_domain::Actor::System { component: "docs".into() };
+    /// w.exec(actor, am_store::WriteCommand::FinishRun { run_id: "r".into(), status: "succeeded".into() })
+    /// # }
+    /// ```
+    ///
+    /// A command without an Actor does not compile:
+    ///
+    /// ```compile_fail
+    /// # fn f(w: am_store::Writer) -> Result<(), am_store::StoreError> {
+    /// w.exec(am_store::WriteCommand::FinishRun { run_id: "r".into(), status: "succeeded".into() })
+    /// # }
+    /// ```
+    ///
+    /// and neither does a defaulted one:
+    ///
+    /// ```compile_fail
+    /// # fn f(w: am_store::Writer) -> Result<(), am_store::StoreError> {
+    /// w.exec(Default::default(), am_store::WriteCommand::FinishRun { run_id: "r".into(), status: "succeeded".into() })
+    /// # }
+    /// ```
     pub fn exec(&self, actor: Actor, cmd: WriteCommand) -> Result<(), StoreError> {
         let (rtx, rrx) = mpsc::channel();
-        self.tx
+        self.inner
+            .tx
+            .as_ref()
+            .ok_or(StoreError::WriterGone)?
             .send((actor, cmd, rtx))
             .map_err(|_| StoreError::WriterGone)?;
         rrx.recv().map_err(|_| StoreError::WriterGone)?
@@ -189,12 +288,35 @@ fn configure(conn: &Connection) -> Result<(), StoreError> {
 
 impl Store {
     /// Open (creating and migrating if needed) and start the writer thread.
+    /// A project opens through [`open_project`]; this bare-path open is kept
+    /// for the spike's callers. The AD-7 rules apply here too: before an
+    /// existing database (version >= 1) is migrated, its `VACUUM INTO` backup
+    /// is written to a `backups/` folder (0700) created beside `path`.
     pub fn open(path: &Path) -> Result<Store, StoreError> {
+        Store::open_reporting(path, None).map(|(store, _)| store)
+    }
+
+    /// [`Store::open`], returning what the migrations did. A project's
+    /// `lock` moves into the writer thread and is released only when the
+    /// read-write connection closes.
+    pub(crate) fn open_reporting(
+        path: &Path,
+        lock: Option<ProjectLock>,
+    ) -> Result<(Store, OpenReport), StoreError> {
+        fsx::create_private_file_if_missing(path)
+            .map_err(|e| StoreError::io(format!("cannot create {}", path.display()), e))?;
         let mut conn = Connection::open(path)?;
+        // Refuse a newer (or foreign) database before anything, even the
+        // journal mode, is written.
+        migrations::refuse_newer(migrations::user_version(&conn)?)?;
         configure(&conn)?;
-        migrations::migrate(&mut conn)?;
-        let (tx, rx) = mpsc::channel::<(Actor, WriteCommand, Reply)>();
-        thread::Builder::new()
+        let backups = path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("backups");
+        let report = migrations::migrate(&mut conn, &backups)?;
+        let (tx, rx) = mpsc::channel::<Job>();
+        let handle = thread::Builder::new()
             .name("am-store-writer".into())
             .spawn(move || {
                 let mut conn = conn;
@@ -202,12 +324,23 @@ impl Store {
                     let r = apply(&mut conn, &actor, &cmd);
                     let _ = reply.send(r);
                 }
+                // The connection closes first, then the project lock goes.
+                drop(conn);
+                drop(lock);
             })
             .map_err(|e| StoreError::Invalid(e.to_string()))?;
-        Ok(Store {
-            path: path.to_path_buf(),
-            writer: Writer { tx },
-        })
+        Ok((
+            Store {
+                path: path.to_path_buf(),
+                writer: Writer {
+                    inner: Arc::new(WriterThread {
+                        tx: Some(tx),
+                        handle: Some(handle),
+                    }),
+                },
+            },
+            report,
+        ))
     }
 
     pub fn writer(&self) -> Writer {
@@ -418,6 +551,36 @@ fn append_audit(
         params![at, actor_json, action, target, outcome, prev, entry_hash],
     )?;
     Ok(())
+}
+
+/// Fixtures for tests (older- and newer-database rows of story 1.6). Only
+/// with the `test-support` feature, which only dev-dependencies enable; never
+/// in the app.
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub mod testing {
+    use std::path::Path;
+
+    use rusqlite::{Connection, params};
+
+    use crate::StoreError;
+
+    /// A database (0600) at `version`, built from the first `version`
+    /// migrations with no reports; past the latest, all of them and then
+    /// that `user_version`.
+    pub fn database_at_version(path: &Path, version: i64) -> Result<(), StoreError> {
+        crate::migrations::database_at_version(path, version)
+    }
+
+    /// One row in `triggers` (present since version 1), written directly.
+    pub fn insert_fixture_trigger(path: &Path, id: &str) -> Result<(), StoreError> {
+        let conn = Connection::open(path)?;
+        conn.execute(
+            "INSERT INTO triggers (id, cron, tz, catch_up, state) VALUES (?1, '0 9 * * *', 'UTC', 'once', 'active')",
+            params![id],
+        )?;
+        Ok(())
+    }
 }
 
 // ------------------------------------------------------------------ reads

@@ -18,11 +18,15 @@ path = "tests/spike/main.rs"
 name = "cli_validate"
 path = "tests/cli_validate.rs"
 
+[[test]]
+name = "project_open"
+path = "tests/project_open.rs"
+
 [dev-dependencies]
 am-app.workspace = true
 am-domain.workspace = true
 am-engine.workspace = true
-am-store.workspace = true
+am-store = { workspace = true, features = ["test-support"] }
 am-net.workspace = true
 am-providers.workspace = true
 am-tools.workspace = true
@@ -34,3 +38,4 @@ tokio.workspace = true
 tokio-util.workspace = true
 jiff.workspace = true
 tempfile.workspace = true
+serde_json.workspace = true

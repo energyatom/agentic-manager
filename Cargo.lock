@@ -118,6 +118,7 @@ dependencies = [
  "am-testkit",
  "am-tools",
  "jiff 1.0.0",
+ "serde_json",
  "tempfile",
  "tokio",
  "tokio-util",
@@ -220,6 +221,7 @@ name = "am-store"
 version = "0.0.1"
 dependencies = [
  "am-domain",
+ "am-store",
  "hex",
  "jiff 1.0.0",
  "rusqlite",

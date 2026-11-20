@@ -1,6 +1,7 @@
 # Agentic Manager task runner. `just check` is the gate: fmt, clippy
 # -D warnings, nextest and the offline repo checks (AD-4 dependency direction,
-# every crate forbids unsafe, AD-23 vocabulary denylist) and `agentic validate`
+# every crate forbids unsafe, AD-23 vocabulary denylist), am-store's doctests
+# (the `compile_fail` proof that a write needs an Actor, story 1.6) and `agentic validate`
 # over the valid fixture projects (story 1.4) and templates/ (story 1.5).
 # `just supply-chain` runs the licence, bans and sources policy (cargo-deny)
 # and cargo-audit.
@@ -11,7 +12,7 @@ export CARGO_TARGET_DIR := env_var_or_default("CARGO_TARGET_DIR", env_var("HOME"
 default: check
 
 # The story gate: format, lints, every offline test and the repo checks.
-check: fmt-check clippy test check-deps check-forbid denylist validate
+check: fmt-check clippy test doctest check-deps check-forbid denylist validate
 
 fmt-check:
     cargo fmt --all -- --check
@@ -25,6 +26,11 @@ clippy:
 
 test:
     cargo nextest run
+
+# nextest runs no doctests; am-store's include the `compile_fail` proof that
+# `Writer::exec` needs an Actor (AD-24, story 1.6).
+doctest:
+    cargo test --doc -p am-store
 
 # AD-4: crate edges follow the Design Paradigm matrix (cargo metadata, offline).
 check-deps:
