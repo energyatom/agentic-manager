@@ -1,9 +1,12 @@
 # globset 0.4.21
 
 Pinned `=0.4.21` with `default-features = false` (no `log`), by owner
-decision (d) of story 1.12 (2026-11-20). It is not in the architecture's
-Stack table; the pin is recorded for the architect in the story's
-Implementation Notes.
+decision (d) of story 1.12 (2026-11-20), and in the architecture's Stack
+since the 2026-11-20 REPLAN as **the one glob matcher** (Consistency
+Conventions, Globs). It moves behind the `am-glob` crate (epic 1 story 14):
+`literal_separator(true)`, pattern and subject NFC-normalised, linked-folder
+`include`/`exclude` case-insensitive against the root-relative path, Source
+URL-path scopes case-sensitive. Until then `am-config` compiles it directly.
 
 ## Licence
 

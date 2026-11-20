@@ -1,8 +1,8 @@
 # Third-party components
 
 Agentic Manager is MIT-licensed. Rust and npm dependencies are linked under
-their own permissive licences (MIT, Apache-2.0, BSD-2/3-Clause, ISC, Zlib,
-Unicode-3.0, MPL-2.0; architecture AD-3); story 1.2 enforces the allow-list
+their own permissive licences (MIT, MIT-0, Apache-2.0, BSD-2/3-Clause, ISC,
+Zlib, Unicode-3.0, MPL-2.0; architecture AD-3); story 1.2 enforces the allow-list
 with cargo-deny.
 
 ## Bundled native binaries

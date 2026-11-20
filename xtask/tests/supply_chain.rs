@@ -42,9 +42,10 @@ fn gpl_dependency_fails_the_licence_policy_naming_crate_and_licence() {
     );
 }
 
-/// The allow-list is exactly AD-3's eight licences, with no exceptions.
+/// The allow-list is exactly AD-3's nine licences (MIT-0 added by the
+/// architect REPLAN, 2026-11-20), with no exceptions.
 #[test]
-fn deny_toml_allows_exactly_the_eight_licences_and_no_exceptions() {
+fn deny_toml_allows_exactly_the_nine_licences_and_no_exceptions() {
     let text = std::fs::read_to_string(repo_root().join("deny.toml")).expect("deny.toml exists");
     let start = text.find("allow = [").expect("[licenses] allow list");
     let end = start + text[start..].find(']').expect("closed list");
@@ -56,6 +57,7 @@ fn deny_toml_allows_exactly_the_eight_licences_and_no_exceptions() {
     allowed.sort();
     let mut expected = vec![
         "MIT",
+        "MIT-0",
         "Apache-2.0",
         "BSD-2-Clause",
         "BSD-3-Clause",

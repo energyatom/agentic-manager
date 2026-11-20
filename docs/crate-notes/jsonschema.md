@@ -1,31 +1,24 @@
-# jsonschema 0.61.2 — not in the workspace (licence conflict)
+# jsonschema 0.61.2 — allowed since the 2026-11-20 REPLAN, linked by epic 3 story 5
 
-The Stack pins `jsonschema = "0.61.2"`, and story 1.4's plan adds it to check
-`schemas/<id>.json`. It is **not added**: with or without default features,
-`jsonschema` depends on `referencing 0.61.2` → `fluent-uri 0.4.1` →
-`borrow-or-share 0.2.4`, whose licence is **MIT-0**. MIT-0 is not on the AD-3
-allow-list (MIT, Apache-2.0, BSD-2/3-Clause, ISC, Zlib, Unicode-3.0,
-MPL-2.0), `cargo deny check licenses` rejects it, and `deny.toml` forbids
-adding a licence or an exception. Found 2026-11-20 (story 1.4).
+Pinned `=0.61.2` in the architecture's Stack (checked on crates.io 2026-11-20: the
+latest release, MIT). Its graph `referencing 0.61.2` → `fluent-uri 0.4.1` →
+`borrow-or-share 0.2.4` holds the only MIT-0 crate. The architect REPLAN of
+2026-11-20 (owner decision) added **MIT-0** to the AD-3 allow-list and to
+`deny.toml`, so `cargo deny check licenses` accepts it with no exception.
+It is not in the workspace yet: epic 3 story 5 adds it when it validates step
+outputs (AD-36), as AGENTS.md requires (no crate outside its story).
 
-## What story 1.4 does instead
+## History (story 1.4, 2026-11-20)
 
-`am-config` (`kinds::schema` and `schema_check`) checks each schema file
+Before the REPLAN, MIT-0 was outside the allow-list, so story 1.4 did not link
+jsonschema. `am-config` (`kinds::schema` and `schema_check`) checks each schema file
 without a dependency: valid JSON (serde_json), a top-level object with
 `schema_version: 1`, no secret-looking values, and a structural check of the
 common keywords (`type` names, `required` as a list of names, `properties`,
 `$defs`, `items`, `enum`, `additionalProperties` and the combinators holding
 schemas, `$ref` local to the file). It is not a full meta-schema validation.
 
-## Open for the owner and the architect (REPLAN)
-
-The engine needs a JSON Schema validator for step outputs (AD-36). Choices:
-allow MIT-0 in AD-3 (it is a public-domain-equivalent MIT without the
-attribution clause), pick another validator whose graph passes the policy,
-or keep a project-owned validator for the subset step schemas use. Until
-that is decided, do not add `jsonschema` and do not add MIT-0 to `deny.toml`.
-
-## If it is added later
+## When epic 3 story 5 adds it
 
 - Use `default-features = false`: the defaults `resolve-http` (reqwest and
   rustls, a second HTTP client against AD-12) and `resolve-file` (file reads

@@ -103,6 +103,17 @@ hitl = false
 risk = "high"
 
 [[entry]]
+id = 13
+type = "story"
+title = "Runtime folder outside the project"
+description = "Arch AD-32 and AD-7 (amended 2026-11-20, architect REPLAN; owner: runtime state never lives inside a cloud-synced folder; owner decision: one Mac at a time through a marker file). `am_domain::RuntimeLayout` names every runtime path and CI fails on the literal `.agentic` in crates/ outside it; am-app's platform adapter resolves the runtime base (`~/Library/Application Support/agentic-manager-projects/` on macOS, `$XDG_DATA_HOME/agentic-manager-projects/` elsewhere so the Linux job runs) and am-store opens the runtime folder it is given. Under the base's lock, a project without `project_id` gets a UUIDv7 minted, its runtime folder created (0700, files 0600), its root recorded in the base's root index by volume UUID and folder file id, its store opened, and then `project_id` written by a ConfigEdit from Actor::System through story 8 (History and audit in the new store); `agentic validate` never writes one and refuses one under templates/ or fixtures/. A copy (the id's runtime folder records another mounted root still holding that id) is refused naming both folders and the fix (remove `project_id` from the copy); a root gone from a mounted volume is a move, recorded and audited; an unmounted recorded volume or a changed `project_id` is refused until `agentic serve --project <path> --confirm-move` on an interactive TTY. A legacy `<project>/.agentic/` is moved on first open: its lock taken (refused while held), state.db copied with VACUUM INTO, other files copied and checked by sha256, the old folder removed and the move reported like a migration; an unverified copy leaves it untouched and refuses the open, and a legacy folder beside an existing runtime state.db is refused naming both. Pre-migration backups move to `backups/pre-migration/` with only the three newest kept. The `.agentic-open` marker (Mac name, host id, pid, opened-at) is written at open and removed at clean close; another Mac's marker refuses the open naming it until `--take-over` on an interactive TTY, and a stale marker from this Mac is replaced; the Blank template's `.gitignore` lists it."
+verify = "Written first, failing (am-store, am-app serve tests with HOME set to a temp folder): a new project opened by `agentic serve --project` gets `project_id` in company.yaml (one History entry, one audit entry by System) and a runtime folder under the temp HOME's runtime base holding lock and state.db, with nothing else written in the project but `.agentic-open`, which is gone after a clean stop; a copy opened while the original exists is refused naming both folders, and after removing its `project_id` opens with a new id and an empty runtime folder; a moved project opens, records its new root and audits the move; a changed `project_id` is refused until --confirm-move; a fixture with a legacy .agentic/ whose state.db holds rows opens with the rows, the legacy folder gone and the move reported, while one whose legacy lock is held is refused and one beside an existing runtime state.db is refused naming both; five successive migrations leave exactly three files in backups/pre-migration/; a marker naming another Mac refuses the open naming it and --take-over opens; story 6's and 7's tests pass against the new layout; the CI check fails on a `\".agentic\"` literal added outside RuntimeLayout; `just check` is green on macOS and the Linux job."
+covers = ["R4", "R9"]
+after = [8]
+hitl = false
+risk = "high"
+
+[[entry]]
 id = 9
 type = "story"
 title = "Outside edits wait for Reload"
@@ -125,12 +136,23 @@ hitl = false
 risk = "medium"
 
 [[entry]]
+id = 14
+type = "story"
+title = "Seat host allow-lists, cloud folder roots and the one glob matcher"
+description = "Arch AD-48, AD-30, AD-4 and the Globs convention (amended 2026-11-20, architect REPLAN). `am_domain::HostPattern` parses a lowercase ASCII host (internationalised names in their xn-- form) matched exactly, or `*.` plus a domain of at least two labels matching any subdomain depth but not the bare domain, admits https:443 and http:80 only, refuses a scheme, port, path, IP literal, localhost, non-ASCII text and other wildcards, and answers `covers`. A seat file's `allowed_hosts` is validated with file, line and fix and becomes the seat's allow-list in the snapshot, replacing story 12's interim rule; link-host warnings and Source scope hosts (each covered by the owner seat's patterns) use it; Account endpoints are not added to it. One ConfigMigration through story 10 moves `tools.yaml` `egress_hosts` into the `allowed_hosts` of each seat that can fetch (Web search, Browse & read pages or Crawl on, or owning a Source) and no other, lists and drops entries HostPattern refuses, and removes the key, as a diff written only on accept with the old snapshot in force until then; the Company A sample and fixtures carry `allowed_hosts` and no `egress_hosts`, and role templates carry none. The folder-root policy allows folders at or below `~/Library/CloudStorage/<provider>/` and below `~/Library/Mobile Documents/com~apple~CloudDocs/`, keeps refusing ~/Library, ~/Library/CloudStorage itself, other Mobile Documents containers, the app data dir, the runtime base and any folder that is, contains or lies inside a project root. A new leaf crate `am-glob` (globset and unicode-normalization only, added to the AD-4 matrix and `cargo xtask check-deps`) is the one glob matcher: literal_separator(true), pattern and subject NFC-normalised, linked-folder include/exclude case-insensitive against the root-relative path, Source URL-path scopes case-sensitive, and a regex form for crawl services; am-config's validator moves onto it."
+verify = "Written first, failing: HostPattern table tests (docs.example.org exact; *.example.org matches a.b.example.org and not example.org; *.com, 10.1.2.3, localhost, example.org:8080, https://x.org/, Example.ORG and a non-ASCII name each refused or normalised as AD-48 says; *.example.org covers docs.example.org and not the reverse); a seat with `allowed_hosts: [docs.example.org]` validates and one with `https://x.org/` fails at its line with the fix; a link to a host outside the seat's patterns warns and a Source scope host not covered by its owner seat warns; an Anthropic-model seat's allow-list does not contain api.anthropic.com; a fixture project with `egress_hosts: [docs.example.org, 10.1.2.3]` offers the migration as a diff listing 10.1.2.3 as dropped, changes no file until accept, and after accept only its fetching seats list docs.example.org and the key is gone; a folder under ~/Library/CloudStorage/OneDrive-Fixture/ and one under com~apple~CloudDocs validate while ~/Library, ~/Library/CloudStorage, ~/Library/Mobile Documents/com~apple~Pages and the project root each fail with file:line and fix; `*.PDF` matches Report.pdf as a folder include and not as a URL scope, and an NFD file name matches its NFC pattern; `cargo xtask check-deps` accepts am-glob's edges and refuses an am-glob dependency on am-domain; agentic validate passes over templates/ and fixtures/."
+covers = ["R11", "R14"]
+after = [10, 12]
+hitl = false
+risk = "high"
+
+[[entry]]
 id = 11
 type = "story"
 title = "Refactor sweep"
 description = "Cleanup only, scoped at its start from the plans and review findings this epic deferred: no new behaviour; scope pushed out of another story becomes a new story."
 verify = "`just check` and CI on main are green, and every deferred finding from this epic's plans and reviews is closed or named in a new story."
 covers = []
-after = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12]
+after = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 13, 14]
 hitl = false
 risk = "low"
