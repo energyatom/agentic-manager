@@ -5,3 +5,6 @@
 - source_plan: `_bmad-output/initiative-agentic-manager/tickets/epic-foundations-rust-spike/tickets/story-test-kit-fakes-plan.md`
   summary: Tokio's `test-util` feature, enabled as an am-testkit dev-dependency, is unified into every crate during workspace test runs, so a crate that uses paused time without declaring `test-util` itself passes `just check` but fails `cargo nextest run -p <crate>`.
   evidence: Story 1.3 review finding 5. Cargo resolver 3 unifies features across a workspace build. A project-context note ("declare tokio test-util in any crate whose tests pause time") would catch it; it was not fixable in the story's diff.
+- source_plan: `_bmad-output/initiative-agentic-manager/tickets/epic-foundations-rust-spike/tickets/story-blank-department-role-templates-and-the-company-a-sample-plan.md`
+  summary: The Company A sample ships no synthetic drop files or rows for table-t1, so a freshly installed sample has an empty T1 until a load runs.
+  evidence: The reference says T1 is loaded from a drop folder of synthetic CSV and xlsx files, but `.agentic/drop/` is runtime and the story 1.5 ticket does not list drop files. The golden-run fixtures (epic 3) or the Local Repository story (4.7) should supply them.

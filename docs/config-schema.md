@@ -244,3 +244,23 @@ Besides `id`, `seat`, `instruction`, `description`, `output_schema` and
 `over_folder`, `routes`, `files`, `handoff`, `review` and `max_parallel`.
 They are accepted and not yet checked; a step with `seats` or `over_folder`
 may leave out `seat`.
+
+## Templates
+
+Every template under `templates/` is a minimal project, so `agentic validate`
+checks it as it is (`just check` runs it over each one). Installing a template
+copies only part of it into the owner's project.
+
+| Template | Where | What installing it copies |
+|---|---|---|
+| Blank department | `templates/departments/blank/` | its one team from `company.yaml` (no seats, tables or workflows) |
+| Role templates: Head, Coordinator, Analyst, Researcher, Reviewer, Writer, Specialist, Human seat | `templates/roles/<role>/` (the Human seat is `human/`) | `seats/<role>.md` into the chosen team; for the Coordinator also `workflows/learning.yaml`, its learning loop, which has no trigger and runs only when started by hand |
+| Sample company (two departments) | `templates/samples/<sample>/` | the whole project: `company.yaml`, `models/accounts.yaml`, `tools.yaml`, seats, tables, workflows, skills, Sources, the synthetic files under `files/` and the team Knowledge notes under `.agentic/knowledge/` |
+
+Each role template's seat carries its instructions, a `goal` and `backstory`,
+an avatar tint, default `tools` and `budget`, its `capabilities` (Folder
+access on, plus what the role needs), a local `model` with an ordered
+`fallback`, and empty `skills`, `knowledge` and `links`. A seat with no
+`model` is a human seat. The wrapper `company.yaml` of a role template only
+lets it validate: its team id, time zone and currency are not copied, and the
+seat's budget is read in the installing company's currency.

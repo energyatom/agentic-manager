@@ -1,0 +1,33 @@
+schema_version: 1
+name: Company A
+description: "Sample company: Company A (two departments). Its names are abstract and every row and file is synthetic. The caps are placeholders until the owner sets them; the company-wide weekly cap of 600 waits for a company caps setting."
+timezone: Asia/Kolkata
+currency: INR
+week_start: monday
+max_chain_depth: 3
+teams:
+  - id: d1
+    name: Department 1
+    description: Works on what D2 hands over, reads the sample folder and keeps its own reference notes.
+    accepts:
+      - d2/f1
+  - id: d2
+    name: Department 2
+    description: Owns Table T1, Document A and Report R1, and reports to the Owner.
+    accepts: []
+  - id: owner
+    name: Owner
+    description: The Owner's own unit. It holds only the Owner's seat.
+hats:
+  - id: ceo
+    name: CEO
+    description: Sets the company's goals.
+  - id: vision-creator
+    name: Vision Creator
+    description: Leaves guidance notes for a department.
+  - id: reviewer
+    name: Reviewer
+    description: Approves, returns or rejects work in the Inbox.
+  - id: developer
+    name: Developer
+    description: Changes the company's configuration through proposals.

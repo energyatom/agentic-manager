@@ -1,0 +1,4 @@
+schema_version: 1
+egress_hosts: []
+search:
+  provider: builtin

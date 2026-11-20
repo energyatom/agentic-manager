@@ -1,0 +1,15 @@
+schema_version: 1
+name: D1 notes
+description: D1's team Knowledge, synthetic reference notes that D1's seats search with search_knowledge. It re-indexes the notes once a day.
+type: knowledge
+owner_seat: d1-head
+trigger:
+  schedule:
+    cron: "0 7 * * *"
+    catch_up: once
+limits:
+  max_items_per_load: 100
+  max_bytes_per_load: 10000000
+  max_loads_per_day: 1
+output:
+  knowledge: team

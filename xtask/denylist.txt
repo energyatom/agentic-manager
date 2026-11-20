@@ -12,6 +12,10 @@
 # Sample company
 company-a
 
+# Teams
+d1
+d2
+
 # Seats
 d1-head
 d2-head
@@ -41,6 +45,7 @@ structured-review
 plain-report
 
 # Workflows
+f1
 f2-update
 f2-d1
 f3-folder

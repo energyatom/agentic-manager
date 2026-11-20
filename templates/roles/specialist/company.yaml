@@ -1,0 +1,8 @@
+schema_version: 1
+name: Specialist role template
+description: The wrapper that lets agentic validate check the Specialist role template. Installing the template copies only seats/specialist.md into the chosen team. Its budget is in the installing company's currency.
+timezone: UTC
+currency: USD
+teams:
+  - id: team
+    name: Team

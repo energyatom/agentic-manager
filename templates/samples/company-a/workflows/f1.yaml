@@ -1,0 +1,49 @@
+schema_version: 1
+name: Report R1
+team: d2
+description: Flow F1. D2-Head writes document-a from table-t1 and hands it to D1, where D1-E1 to D1-E3 work on it in parallel. D1-Head consolidates their outputs into d1-opinion and hands it back. D2-Head writes report-r1, which D1-Head reviews before the Owner approves it. Starts by hand, or when f2-d1 completes.
+triggers:
+  - event:
+      on: workflow_completed:f2-d1
+caps:
+  per_run: 250
+  scheduled_per_run: 150
+  per_week: 600
+steps:
+  - id: produce
+    seat: d2-head
+    instruction: Read the rows of table-t1 that D2-E1 to D2-E4 processed and write document-a with write_document, naming the item_id of every row you use. Then move each row you used from processed to handed-off with table_write, giving the reason.
+    handoff:
+      to: d2/f1/branches
+      payload: document:document-a
+  - id: branches
+    seats:
+      - d1-e1
+      - d1-e2
+      - d1-e3
+    instruction: Work on document-a and write your review in the structured-review sections.
+    max_parallel: 3
+  - id: consolidate
+    seat: d1-head
+    instruction: Consolidate the three branch outputs into d1-opinion with write_document, one labelled section per branch, and say where they disagree.
+    join:
+      from: branches
+      wait: quorum
+      quorum: 3
+      timeout: 30m
+      on_branch_failure: ask
+    handoff:
+      to: d2/f1/report
+      payload: document:d1-opinion
+  - id: report
+    seat: d2-head
+    instruction: Write the draft of report-r1 with write_document from document-a and d1-opinion, in the plain-report shape.
+    handoff:
+      to: d2/f1/approve
+      payload: document:report-r1
+      review:
+        seat: d1-head
+        max_returns: 2
+  - id: approve
+    seat: owner
+    instruction: Approve, edit, return with a note or reject report-r1.
