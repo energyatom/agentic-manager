@@ -1,0 +1,9 @@
+# Licence-policy probe (story 1.2): a stand-in for a copyleft crate. It is
+# excluded from the workspace and never built; xtask/tests/supply_chain.rs runs
+# cargo-deny on gpl-consumer, which depends on it, and expects a rejection.
+[package]
+name = "gpl-probe"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-only"
+description = "Licence-policy probe fixture; never built or published."

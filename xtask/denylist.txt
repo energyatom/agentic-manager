@@ -1,0 +1,42 @@
+# AD-23 department-vocabulary denylist (story 1.2). `cargo xtask denylist`
+# fails when any term appears in crates/ or web/src (case-insensitive, whole
+# token). Department vocabulary belongs only under templates/ and fixtures/.
+#
+# Seed: the Company A reference company's ids from
+# _bmad-output/initiative-agentic-manager/reference-workload.md (sample company,
+# seats, documents, table, Sources, Knowledge, folder and workflows).
+# At scan time the check also adds every kebab-case file stem found under
+# templates/ and fixtures/ (seat, document, table, workflow and Source files).
+# This file sits outside the scanned trees on purpose.
+
+# Sample company
+company-a
+
+# Seats
+d1-head
+d2-head
+d1-e1
+d1-e2
+d1-e3
+d2-e1
+d2-e2
+d2-e3
+d2-e4
+
+# Table, documents and report
+table-t1
+document-a
+report-r1
+d1-summary
+d1-opinion
+d1-folder-digest
+
+# Sources, Knowledge and linked folder
+t1-drop
+d1-notes
+d1-inputs
+
+# Workflows
+f2-update
+f2-d1
+f3-folder

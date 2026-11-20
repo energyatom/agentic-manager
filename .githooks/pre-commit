@@ -1,0 +1,12 @@
+#!/bin/sh
+# Refuses a commit while `just check` is red (story 1.2 build hook, R7).
+# Enable once per clone with `just install-hooks` (sets core.hooksPath).
+# It checks the working tree as it stands, not only the staged files.
+if ! command -v just >/dev/null 2>&1; then
+    echo "pre-commit: 'just' is not installed, so 'just check' cannot run; commit refused." >&2
+    exit 1
+fi
+if ! just check; then
+    echo "pre-commit: 'just check' is red; commit refused. Fix it and commit again." >&2
+    exit 1
+fi
