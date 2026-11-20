@@ -9,3 +9,6 @@ pub mod scheduler;
 pub mod toolgate;
 
 pub use cancel::{CancelTree, TokenSignal};
+
+/// THROWAWAY (story 1.2 verify)
+pub fn throwaway_unsafe() -> u8 { unsafe { core::ptr::read(&1u8) } }
