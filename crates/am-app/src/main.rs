@@ -1,6 +1,6 @@
 //! The `agentic` binary. Commands:
 //!
-//! - `agentic serve [--port N] [--no-browser]`
+//! - `agentic serve [--project <path>] [--port N] [--no-browser]`
 //! - `agentic validate [<project>]` (exit 0 no errors, 1 errors, 2 usage or no folder)
 //! - `agentic spike c1 [--provider anthropic|lmstudio|ollama] [--model M]`
 //! - `agentic spike c3 --db PATH [--cron EXPR] [--tz ZONE]` (sleep/wake demo)
@@ -60,7 +60,7 @@ async fn main() {
         Some("--version") => println!("agentic {}", env!("CARGO_PKG_VERSION")),
         _ => {
             eprintln!(
-                "usage: agentic serve | agentic validate [<project>] | agentic spike c1|c3|c4|c7|local-context"
+                "usage: agentic serve [--project <path>] | agentic validate [<project>] | agentic spike c1|c3|c4|c7|local-context"
             );
             std::process::exit(2);
         }
@@ -68,6 +68,32 @@ async fn main() {
 }
 
 async fn serve(args: &Args) {
+    // With a project: open it (owner-only `.agentic/`, the exclusive lock,
+    // backup and migrations), print the report and hold the store (whose
+    // writer owns the lock) for the server's life (AD-32, AD-7). Without
+    // one, nothing is opened.
+    let project = args.value("--project");
+    if args.flag("--project") && project.as_deref().is_none_or(|p| p.starts_with("--")) {
+        eprintln!("usage: agentic serve [--project <path>] [--port N] [--no-browser]");
+        eprintln!("agentic: --project needs the project folder");
+        std::process::exit(2);
+    }
+    let _store = project.map(|p| {
+        let root = PathBuf::from(&p);
+        let (store, report) = am_store::open_project(&root)
+            .unwrap_or_else(|e| fail(&format!("cannot open the project {p}: {e}")));
+        let lines = report.lines();
+        if lines.is_empty() {
+            println!(
+                "agentic: project {p}: database at version {}",
+                report.version
+            );
+        }
+        for line in lines {
+            println!("agentic: project {p}: {line}");
+        }
+        store
+    });
     let port: u16 = args
         .value("--port")
         .and_then(|p| p.parse().ok())

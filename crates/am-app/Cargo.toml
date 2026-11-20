@@ -34,3 +34,7 @@ tokio.workspace = true
 tokio-util.workspace = true
 jiff.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+am-store = { workspace = true, features = ["test-support"] }
+tempfile.workspace = true

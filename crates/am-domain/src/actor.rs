@@ -4,6 +4,10 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+/// `Actor` deliberately has no `Default` (and must never get one): every
+/// write names who made it, so `am_store::Writer::exec(actor, cmd)` cannot be
+/// called without one. am-store's `compile_fail` doctests on `Writer::exec`
+/// prove both (story 1.6, run by `just check`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Actor {

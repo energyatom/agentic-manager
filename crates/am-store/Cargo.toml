@@ -10,6 +10,12 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[features]
+# Test fixtures (`am_store::testing`): a direct write path with no Actor or
+# audit, so it is enabled only through dev-dependencies (this crate's own
+# tests and am-e2e), never in the app.
+test-support = []
+
 [dependencies]
 am-domain.workspace = true
 rusqlite.workspace = true
@@ -22,3 +28,4 @@ thiserror.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+am-store = { path = ".", features = ["test-support"] }
