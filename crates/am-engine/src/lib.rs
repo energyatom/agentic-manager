@@ -9,3 +9,10 @@ pub mod scheduler;
 pub mod toolgate;
 
 pub use cancel::{CancelTree, TokenSignal};
+
+/// THROWAWAY (story 1.2 verify): a macOS-only std API with no
+/// `#[cfg(target_os = "macos")]` gate. Builds on macOS, must fail on Linux.
+pub fn throwaway_birth_time(meta: &std::fs::Metadata) -> i64 {
+    use std::os::macos::fs::MetadataExt;
+    meta.st_birthtime()
+}
