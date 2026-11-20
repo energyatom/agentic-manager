@@ -3,7 +3,7 @@ title: 'Test kit fakes'
 type: feature
 ticket: '3'
 created: '2026-11-20'
-status: built
+status: done
 baseline_revision: '34d1c658731e8da2c70d0ea2c081782ddf487c54'
 route: full
 route_source: auto
