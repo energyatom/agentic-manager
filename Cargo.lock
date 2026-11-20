@@ -55,6 +55,7 @@ dependencies = [
  "am-services",
  "am-store",
  "am-tools",
+ "gpl-probe",
  "jiff 1.0.0",
  "tokio",
  "tokio-util",
@@ -1645,6 +1646,10 @@ dependencies = [
  "libc",
  "system-deps",
 ]
+
+[[package]]
+name = "gpl-probe"
+version = "0.1.0"
 
 [[package]]
 name = "gtk"

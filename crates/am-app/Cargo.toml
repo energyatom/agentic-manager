@@ -16,6 +16,7 @@ path = "src/main.rs"
 
 [dependencies]
 am-domain.workspace = true
+gpl-probe = { path = "../../fixtures/supply-chain/gpl-probe" }
 am-config.workspace = true
 am-store.workspace = true
 am-engine.workspace = true
