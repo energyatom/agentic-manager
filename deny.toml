@@ -4,6 +4,9 @@
 # job in the same recipe. Never add a licence or an `exceptions` entry here.
 
 [graph]
+# A bare `cargo deny check` uses the macOS graph; the Linux graph runs from
+# `just supply-chain` with an explicit --target and --exclude am-desktop.
+targets = ["aarch64-apple-darwin"]
 all-features = false
 
 [licenses]

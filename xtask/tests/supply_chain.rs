@@ -1,6 +1,7 @@
 //! The licence policy refuses a GPL crate (AD-3; story 1.2, written first).
 //! Runs cargo-deny offline on `fixtures/supply-chain/gpl-consumer`, which
-//! depends on the GPL-3.0-only `gpl-probe` fixture crate.
+//! depends on the GPL-3.0-only `gpl-probe` fixture crate. Ignored in the
+//! default run so `just check` needs no cargo-deny; `just supply-chain` runs it.
 #![forbid(unsafe_code)]
 
 mod common;
@@ -9,6 +10,7 @@ use common::{repo_root, stderr, stdout};
 use std::process::Command;
 
 #[test]
+#[ignore = "needs cargo-deny; run by just supply-chain"]
 fn gpl_dependency_fails_the_licence_policy_naming_crate_and_licence() {
     let root = repo_root();
     let out = Command::new("cargo")

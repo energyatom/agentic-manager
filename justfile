@@ -39,13 +39,18 @@ denylist:
 
 # AD-3 licence allow-list plus bans and sources on both graphs (macOS: whole
 # workspace; Linux: without am-desktop), then cargo-audit (fetches the advisory
-# database; vulnerabilities fail, unmaintained warnings do not).
+# database; vulnerabilities fail, unmaintained warnings do not). Last, xtask's
+# cargo-deny tests (the GPL probe), ignored in `just check`.
 supply-chain:
-    cargo deny --target aarch64-apple-darwin --workspace check --hide-inclusion-graph licenses bans sources
-    cargo deny --target x86_64-unknown-linux-gnu --workspace --exclude am-desktop check --hide-inclusion-graph licenses bans sources
+    cargo deny --locked --target aarch64-apple-darwin --workspace check --hide-inclusion-graph licenses bans sources
+    cargo deny --locked --target x86_64-unknown-linux-gnu --workspace --exclude am-desktop check --hide-inclusion-graph licenses bans sources
     cargo audit
+    cargo nextest run -p xtask --run-ignored only
 
-# Enable the tracked git hooks (.githooks/pre-commit runs `just check`) in this clone.
+# Enable the tracked git hooks (.githooks/pre-commit runs `just check`) in this
+# clone. The Claude Code hook runs before a command, so a command that edits
+# and commits is judged on the pre-edit tree; this pre-commit hook closes that
+# gap at commit time.
 install-hooks:
     git config core.hooksPath .githooks
 

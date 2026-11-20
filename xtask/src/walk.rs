@@ -1,6 +1,7 @@
 //! Small filesystem helpers shared by the scans.
 
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 /// Folders no scan descends into: build output, packages and hidden folders.
 fn skipped(name: &str) -> bool {
@@ -8,12 +9,54 @@ fn skipped(name: &str) -> bool {
 }
 
 /// Every file under `dir` (recursively, sorted), skipping build output and
-/// hidden folders. A missing `dir` yields nothing.
+/// hidden folders. Inside a git work tree it lists tracked and untracked files
+/// but not git-ignored ones (private local outputs never reach a scan); outside
+/// one it walks the folder. A missing `dir` yields nothing.
 pub fn files(dir: &Path) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    collect(dir, &mut out);
+    if !dir.is_dir() {
+        return Vec::new();
+    }
+    let mut out = git_files(dir).unwrap_or_else(|| {
+        let mut walked = Vec::new();
+        collect(dir, &mut walked);
+        walked
+    });
     out.sort();
     out
+}
+
+/// `git ls-files --cached --others --exclude-standard` under `dir`, or `None`
+/// when `dir` is not in a git work tree (or git is unavailable).
+fn git_files(dir: &Path) -> Option<Vec<PathBuf>> {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args([
+            "ls-files",
+            "-z",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+        ])
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let listed = String::from_utf8_lossy(&out.stdout).into_owned();
+    Some(
+        listed
+            .split('\0')
+            .filter(|p| !p.is_empty())
+            .filter(|p| {
+                let parts: Vec<&str> = p.split('/').collect();
+                !parts[..parts.len() - 1].iter().any(|d| skipped(d))
+            })
+            .map(|p| dir.join(p))
+            .filter(|p| p.is_file())
+            .collect(),
+    )
 }
 
 fn collect(dir: &Path, out: &mut Vec<PathBuf>) {

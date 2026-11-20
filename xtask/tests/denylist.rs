@@ -119,6 +119,39 @@ fn a_term_inside_a_longer_id_is_not_a_match() {
 }
 
 #[test]
+fn git_ignored_files_are_not_scanned_but_untracked_ones_are() {
+    let tmp = tempfile::tempdir().unwrap();
+    let init = std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(tmp.path())
+        .status()
+        .expect("git runs");
+    assert!(init.success());
+    write(tmp.path(), ".gitignore", "crates/x/private-out.md\n");
+    write(tmp.path(), "crates/x/src/lib.rs", "pub fn generic() {}\n");
+    write(tmp.path(), "crates/x/private-out.md", "seat d1-head said\n");
+    let out = scan(tmp.path());
+    assert!(
+        out.status.success(),
+        "an ignored local file is not scanned: {}",
+        stderr(&out)
+    );
+
+    write(tmp.path(), "crates/x/notes.md", "seat d1-head said\n");
+    let out = scan(tmp.path());
+    let err = stderr(&out);
+    assert!(!out.status.success(), "untracked files are scanned: {err}");
+    assert!(
+        err.contains("crates/x/notes.md:1"),
+        "names file:line: {err}"
+    );
+    assert!(
+        !err.contains("private-out.md"),
+        "ignored file stays out: {err}"
+    );
+}
+
+#[test]
 fn current_repo_passes() {
     let out = xtask(&["denylist"]);
     assert!(out.status.success(), "repo is clean: {}", stderr(&out));
