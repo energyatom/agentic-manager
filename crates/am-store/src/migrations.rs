@@ -9,20 +9,23 @@
 //! - Before migrating an existing database (version >= 1), a `VACUUM INTO`
 //!   copy is written to `backups/state-v<from>-<UTC timestamp>.db` (mode 0600)
 //!   beside the database. A new database needs no backup.
-//! - Every applied migration is returned in the [`OpenReport`] and, once the
-//!   `migration_reports` table exists, kept there with an audit entry in the
-//!   step's own transaction. A failed step's error names the backup.
+//! - Every applied migration is returned in the [`OpenReport`], kept in
+//!   `migration_reports` once that table exists, and audited
+//!   (`store.migrated`, `args` NULL) once `audit_log` exists, so a new
+//!   database's first step is audited too; both in the step's own
+//!   transaction. A failed step's error names the backup.
 
 use std::path::{Path, PathBuf};
 
 use am_domain::Actor;
 use rusqlite::{Connection, params};
 
-use crate::{StoreError, append_audit, fsx, now_ts};
+use crate::{StoreError, audit, fsx, now_ts};
 
 const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0001_initial.sql"),
     include_str!("../migrations/0002_migration_reports.sql"),
+    include_str!("../migrations/0003_audit_args.sql"),
 ];
 
 /// The schema version this binary knows.
@@ -98,8 +101,9 @@ pub(crate) fn backup_words(backup: &Option<PathBuf>) -> String {
 }
 
 /// One migration in its own transaction, with `user_version`. When `report`
-/// is set and `migration_reports` exists once the step's SQL ran, the step's
-/// report row and audit entry commit in the same transaction.
+/// is set, the step's report row (once `migration_reports` exists) and its
+/// audit entry (once `audit_log` exists, `args` NULL so it can be written
+/// at any version) commit in the same transaction.
 fn apply_step(
     conn: &mut Connection,
     sql: &str,
@@ -111,36 +115,44 @@ fn apply_step(
     let tx = conn.transaction()?;
     tx.execute_batch(sql)?;
     tx.pragma_update(None, "user_version", to)?;
-    let has_reports: bool = tx.query_row(
-        "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'migration_reports')",
-        [],
-        |r| r.get(0),
-    )?;
-    if report && has_reports {
+    if report {
         let at = now_ts();
         let backup = backup.map(|b| b.display().to_string());
-        tx.execute(
-            "INSERT INTO migration_reports (from_version, to_version, backup, applied_at) VALUES (?1, ?2, ?3, ?4)",
-            params![from, to, backup, at],
-        )?;
-        let outcome = match &backup {
-            Some(b) => format!("from version {from} to {to}, backup: {b}"),
-            None => format!("from version {from} to {to}"),
-        };
-        let actor = Actor::System {
-            component: "migrations".into(),
-        };
-        append_audit(
-            &tx,
-            &actor,
-            "store.migrated",
-            &format!("schema version {to}"),
-            &outcome,
-            &at,
-        )?;
+        if table_exists(&tx, "migration_reports")? {
+            tx.execute(
+                "INSERT INTO migration_reports (from_version, to_version, backup, applied_at) VALUES (?1, ?2, ?3, ?4)",
+                params![from, to, backup, at],
+            )?;
+        }
+        if table_exists(&tx, "audit_log")? {
+            let outcome = match &backup {
+                Some(b) => format!("from version {from} to {to}, backup: {b}"),
+                None => format!("from version {from} to {to}"),
+            };
+            let actor = Actor::System {
+                component: "migrations".into(),
+            };
+            audit::append(
+                &tx,
+                &actor,
+                "store.migrated",
+                &format!("schema version {to}"),
+                &outcome,
+                None,
+                &at,
+            )?;
+        }
     }
     tx.commit()?;
     Ok(())
+}
+
+fn table_exists(conn: &Connection, name: &str) -> Result<bool, StoreError> {
+    Ok(conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+        params![name],
+        |r| r.get(0),
+    )?)
 }
 
 /// Applies every migration the database lacks; `backups` is the folder for

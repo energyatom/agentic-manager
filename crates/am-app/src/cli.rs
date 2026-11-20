@@ -1,6 +1,8 @@
 //! CLI commands that need no runtime. `agentic validate [<project>]` (AD-16,
 //! epic R1) prints every finding as `file:line: message` with a `fix:` line,
-//! sorted by file and line, then a summary.
+//! sorted by file and line, then a summary. `agentic audit export|verify`
+//! (AD-25, story 1.7) exports a project's audit log as JSON Lines and checks
+//! an export's hash chain.
 
 use std::io::Write;
 use std::path::Path;
@@ -62,4 +64,223 @@ pub fn validate(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> i3
         }
     }
     if errors == 0 { EXIT_OK } else { EXIT_ERRORS }
+}
+
+const AUDIT_USAGE: &str =
+    "usage: agentic audit export <project folder> [--out <file>] | agentic audit verify <file>";
+
+fn audit_usage(err: &mut dyn Write, why: &str) -> i32 {
+    let _ = writeln!(err, "{AUDIT_USAGE}");
+    let _ = writeln!(err, "agentic: {why}");
+    EXIT_USAGE
+}
+
+fn entries(n: u64) -> String {
+    if n == 1 {
+        "1 entry".to_string()
+    } else {
+        format!("{n} entries")
+    }
+}
+
+/// `agentic audit export|verify …`: `args` are the words after `audit`.
+/// Returns the exit code: 0 done (export written, or the chain is OK), 1 a
+/// failure or a broken chain (named by line and entry), 2 bad usage.
+pub fn audit(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> i32 {
+    match args.first().map(String::as_str) {
+        Some("export") => audit_export(&args[1..], out, err),
+        Some("verify") => audit_verify(&args[1..], out, err),
+        Some(other) => audit_usage(err, &format!("unknown audit command `{other}`")),
+        None => audit_usage(err, "audit needs `export` or `verify`"),
+    }
+}
+
+/// `agentic audit export <project> [--out <file>]`: reads the project's
+/// `.agentic/state.db` through a read-only connection (no project lock, so
+/// it works while `serve` holds the project; a database newer than this app
+/// is refused). Without `--out` the JSON Lines go to stdout and the summary
+/// to stderr; with it, the export goes to an owner-only temporary file
+/// beside the target, renamed over it only when the export succeeded, and
+/// the summary goes to stdout. A target inside the project's `.agentic/`
+/// folder is refused as bad usage.
+fn audit_export(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> i32 {
+    let mut project: Option<&str> = None;
+    let mut file: Option<&str> = None;
+    let mut words = args.iter();
+    while let Some(word) = words.next() {
+        match word.as_str() {
+            "--out" => match words.next() {
+                Some(f) if !f.starts_with('-') => file = Some(f),
+                _ => return audit_usage(err, "--out needs the file to write"),
+            },
+            w if w.starts_with('-') => {
+                return audit_usage(err, &format!("unknown option `{w}`"));
+            }
+            w if project.is_none() => project = Some(w),
+            _ => return audit_usage(err, "audit export takes one project folder"),
+        }
+    }
+    let Some(project) = project else {
+        return audit_usage(err, "audit export needs the project folder");
+    };
+    if let Some(file) = file
+        && inside_agentic(Path::new(project), Path::new(file))
+    {
+        return audit_usage(
+            err,
+            &format!(
+                "--out {file} is inside the project's .agentic folder; write the export elsewhere"
+            ),
+        );
+    }
+    let db = Path::new(project).join(".agentic").join("state.db");
+    if !db.is_file() {
+        let _ = writeln!(
+            err,
+            "agentic: no project database at {}; is {project} a project folder?",
+            db.display()
+        );
+        return EXIT_ERRORS;
+    }
+    let reader = match am_store::Reader::open(&db) {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = writeln!(err, "agentic: cannot read {}: {e}", db.display());
+            return EXIT_ERRORS;
+        }
+    };
+    match file {
+        None => match reader.export_audit_jsonl(out) {
+            Ok((count, head)) => {
+                let _ = writeln!(
+                    err,
+                    "agentic: exported {} from {project}, head hash {head}",
+                    entries(count)
+                );
+                EXIT_OK
+            }
+            Err(e) => {
+                let _ = writeln!(
+                    err,
+                    "agentic: cannot export the audit log of {project}: {e}"
+                );
+                EXIT_ERRORS
+            }
+        },
+        Some(file) => match export_to_file(&reader, Path::new(file)) {
+            Ok((count, head)) => {
+                let _ = writeln!(
+                    out,
+                    "agentic: exported {} from {project} to {file}, head hash {head}",
+                    entries(count)
+                );
+                EXIT_OK
+            }
+            Err(e) => {
+                let _ = writeln!(
+                    err,
+                    "agentic: cannot export the audit log of {project}: {e}"
+                );
+                EXIT_ERRORS
+            }
+        },
+    }
+}
+
+/// The folder `path` sits in (`.` for a bare file name).
+fn folder_of(path: &Path) -> &Path {
+    match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    }
+}
+
+/// `file`, or the folder it would be written in, is inside
+/// `<project>/.agentic/` (compared as canonical paths, so relative paths
+/// and links count).
+fn inside_agentic(project: &Path, file: &Path) -> bool {
+    let Ok(agentic) = project.join(".agentic").canonicalize() else {
+        return false;
+    };
+    let inside = |p: &Path| p.canonicalize().is_ok_and(|c| c.starts_with(&agentic));
+    inside(file) || inside(folder_of(file))
+}
+
+/// Export into a new owner-only temporary file beside `target`, then
+/// rename it over `target`; on any failure the temporary file is removed
+/// and `target` is left as it was.
+fn export_to_file(reader: &am_store::Reader, target: &Path) -> Result<(u64, String), String> {
+    let name = target
+        .file_name()
+        .ok_or_else(|| format!("{} is not a file name", target.display()))?;
+    let tmp = folder_of(target).join(format!(
+        ".{}.tmp-{}",
+        name.to_string_lossy(),
+        std::process::id()
+    ));
+    let result = (|| {
+        let f = create_private(&tmp)?;
+        let mut w = std::io::BufWriter::new(f);
+        let summary = reader
+            .export_audit_jsonl(&mut w)
+            .map_err(|e| e.to_string())?;
+        let f = w
+            .into_inner()
+            .map_err(|e| format!("cannot write {}: {e}", tmp.display()))?;
+        f.sync_all()
+            .map_err(|e| format!("cannot write {}: {e}", tmp.display()))?;
+        std::fs::rename(&tmp, target)
+            .map_err(|e| format!("cannot write {}: {e}", target.display()))?;
+        Ok(summary)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
+}
+
+/// A new file (never an existing one), owner-only (0600) on Unix.
+fn create_private(path: &Path) -> Result<std::fs::File, String> {
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    opts.open(path)
+        .map_err(|e| format!("cannot write {}: {e}", path.display()))
+}
+
+/// `agentic audit verify <file>`: recomputes the chain of an export with no
+/// database. OK prints the count and head hash (exit 0); a break names its
+/// line and entry (exit 1).
+fn audit_verify(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> i32 {
+    let file = match args {
+        [f] if !f.starts_with('-') => f,
+        [] => return audit_usage(err, "audit verify needs the export file"),
+        _ => return audit_usage(err, "audit verify takes one export file"),
+    };
+    let input = match std::fs::File::open(file) {
+        Ok(f) => std::io::BufReader::new(f),
+        Err(e) => {
+            let _ = writeln!(err, "agentic: cannot read {file}: {e}");
+            return EXIT_ERRORS;
+        }
+    };
+    match am_store::verify_jsonl(input) {
+        Ok(ok) => {
+            let _ = writeln!(
+                out,
+                "agentic: {file}: audit chain OK, {}, head hash {}",
+                entries(ok.entries),
+                ok.head
+            );
+            EXIT_OK
+        }
+        Err(brk) => {
+            let _ = writeln!(out, "agentic: {file}: audit chain broken at {brk}");
+            EXIT_ERRORS
+        }
+    }
 }

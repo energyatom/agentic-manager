@@ -2,6 +2,8 @@
 //!
 //! - `agentic serve [--project <path>] [--port N] [--no-browser]`
 //! - `agentic validate [<project>]` (exit 0 no errors, 1 errors, 2 usage or no folder)
+//! - `agentic audit export <project> [--out <file>]`, `agentic audit verify <file>`
+//!   (exit 0 OK, 1 failure or a broken chain, 2 usage)
 //! - `agentic spike c1 [--provider anthropic|lmstudio|ollama] [--model M]`
 //! - `agentic spike c3 --db PATH [--cron EXPR] [--tz ZONE]` (sleep/wake demo)
 //! - `agentic spike c4 [--dir PATH] [--anthropic-model M] [--local-model M] [--no-anthropic] [--no-local] [--out FILE]`
@@ -48,6 +50,11 @@ async fn main() {
                 am_app::cli::validate(&argv[1..], &mut std::io::stdout(), &mut std::io::stderr());
             std::process::exit(code);
         }
+        Some("audit") => {
+            let code =
+                am_app::cli::audit(&argv[1..], &mut std::io::stdout(), &mut std::io::stderr());
+            std::process::exit(code);
+        }
         Some("__spike-run") => spike_run(&args).await,
         Some("spike") => match argv.get(1).map(String::as_str) {
             Some("c1") => c1(&args).await,
@@ -60,7 +67,7 @@ async fn main() {
         Some("--version") => println!("agentic {}", env!("CARGO_PKG_VERSION")),
         _ => {
             eprintln!(
-                "usage: agentic serve [--project <path>] | agentic validate [<project>] | agentic spike c1|c3|c4|c7|local-context"
+                "usage: agentic serve [--project <path>] | agentic validate [<project>] | agentic audit export|verify | agentic spike c1|c3|c4|c7|local-context"
             );
             std::process::exit(2);
         }

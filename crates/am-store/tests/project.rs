@@ -118,6 +118,7 @@ fn new_project_creates_an_owner_only_ignored_folder_at_the_latest_version() {
                 action: "x".into(),
                 target: "y".into(),
                 outcome: "ok".into(),
+                hash: None,
             },
         )
         .unwrap();
@@ -293,6 +294,7 @@ fn second_open_is_refused_naming_the_holder() {
                 action: "x".into(),
                 target: "y".into(),
                 outcome: "ok".into(),
+                hash: None,
             },
         )
         .unwrap();
@@ -314,6 +316,7 @@ fn dropping_the_store_lets_the_next_open_in() {
                 action: "x".into(),
                 target: "y".into(),
                 outcome: "ok".into(),
+                hash: None,
             },
         )
         .unwrap();
