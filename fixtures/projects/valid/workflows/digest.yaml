@@ -1,0 +1,23 @@
+schema_version: 1
+name: Daily digest
+team: core
+description: Summarises the items added each working day.
+triggers:
+  - schedule:
+      cron: "0 9 * * 1-5"
+      timezone: UTC
+      catch_up: once
+caps:
+  per_run: 2
+  scheduled_per_run: 1
+  per_week: 10
+  per_month: 40
+steps:
+  - id: gather
+    seat: alpha
+    instruction: List the items added since the last run.
+    max_tokens: 4096
+  - id: summarise
+    seat: beta
+    instruction: Write the summary.
+    output_schema: summary

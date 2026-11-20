@@ -1,8 +1,8 @@
 # Agentic Manager task runner. `just check` is the gate: fmt, clippy
 # -D warnings, nextest and the offline repo checks (AD-4 dependency direction,
-# every crate forbids unsafe, AD-23 vocabulary denylist). `agentic validate`
-# over templates/ and fixtures/ joins it in story 1.4. `just supply-chain` runs
-# the licence, bans and sources policy (cargo-deny) and cargo-audit.
+# every crate forbids unsafe, AD-23 vocabulary denylist) and `agentic validate`
+# over the valid fixture projects (story 1.4). `just supply-chain` runs the
+# licence, bans and sources policy (cargo-deny) and cargo-audit.
 
 # Build output stays outside the synced project folder; share it across worktrees.
 export CARGO_TARGET_DIR := env_var_or_default("CARGO_TARGET_DIR", env_var("HOME") + "/Library/Caches/agentic-manager/target")
@@ -10,7 +10,7 @@ export CARGO_TARGET_DIR := env_var_or_default("CARGO_TARGET_DIR", env_var("HOME"
 default: check
 
 # The story gate: format, lints, every offline test and the repo checks.
-check: fmt-check clippy test check-deps check-forbid denylist
+check: fmt-check clippy test check-deps check-forbid denylist validate
 
 fmt-check:
     cargo fmt --all -- --check
@@ -36,6 +36,17 @@ check-forbid:
 # AD-23: no department vocabulary in crates/ or web/src.
 denylist:
     cargo xtask denylist
+
+# AD-16, AD-33: `agentic validate` on every valid fixture project (each must
+# exit 0). The broken fixtures are asserted by the am-config and cli_validate
+# tests instead. templates/ joins this step when story 1.5 creates it.
+validate:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cargo build -q -p am-app --bin agentic
+    for project in fixtures/projects/valid*/; do
+        "$CARGO_TARGET_DIR/debug/agentic" validate "$project"
+    done
 
 # AD-3 licence allow-list plus bans and sources on both graphs (macOS: whole
 # workspace; Linux: without am-desktop), then cargo-audit (fetches the advisory

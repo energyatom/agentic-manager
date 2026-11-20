@@ -1,0 +1,12 @@
+schema_version: 1
+name: Overview
+team: core
+cards:
+  - id: open-count
+    title: Open items
+    query: SELECT count(*) AS open_items FROM v_items WHERE status = 'new'
+    layout:
+      x: 0
+      y: 0
+      w: 4
+      h: 2

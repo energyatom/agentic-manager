@@ -1,0 +1,5 @@
+name: Bare
+team: core
+columns:
+  - id: title
+    type: text

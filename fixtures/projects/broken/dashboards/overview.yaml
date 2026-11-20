@@ -1,0 +1,8 @@
+schema_version: 1
+name: Overview
+team: core
+# note: this card counts every item
+cards:
+  - id: all-items
+    title: All items
+    query: SELECT count(*) AS items FROM v_bare

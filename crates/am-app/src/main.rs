@@ -1,6 +1,7 @@
-//! The `agentic` binary. Spike commands:
+//! The `agentic` binary. Commands:
 //!
 //! - `agentic serve [--port N] [--no-browser]`
+//! - `agentic validate [<project>]` (exit 0 no errors, 1 errors, 2 usage or no folder)
 //! - `agentic spike c1 [--provider anthropic|lmstudio|ollama] [--model M]`
 //! - `agentic spike c3 --db PATH [--cron EXPR] [--tz ZONE]` (sleep/wake demo)
 //! - `agentic spike c4 [--dir PATH] [--anthropic-model M] [--local-model M] [--no-anthropic] [--no-local] [--out FILE]`
@@ -42,6 +43,11 @@ async fn main() {
     let args = Args(argv.clone());
     match argv.first().map(String::as_str) {
         Some("serve") => serve(&args).await,
+        Some("validate") => {
+            let code =
+                am_app::cli::validate(&argv[1..], &mut std::io::stdout(), &mut std::io::stderr());
+            std::process::exit(code);
+        }
         Some("__spike-run") => spike_run(&args).await,
         Some("spike") => match argv.get(1).map(String::as_str) {
             Some("c1") => c1(&args).await,
@@ -54,7 +60,7 @@ async fn main() {
         Some("--version") => println!("agentic {}", env!("CARGO_PKG_VERSION")),
         _ => {
             eprintln!(
-                "usage: agentic serve | agentic spike c1|c3|c4|c7|local-context  (E1 spike build)"
+                "usage: agentic serve | agentic validate [<project>] | agentic spike c1|c3|c4|c7|local-context"
             );
             std::process::exit(2);
         }

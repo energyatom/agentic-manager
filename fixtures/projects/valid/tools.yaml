@@ -1,0 +1,21 @@
+schema_version: 1
+egress_hosts:
+  - example.org
+search:
+  provider: builtin
+builtin:
+  - id: web_search
+    max_uses_per_step: 5
+mcp_servers:
+  - id: notes
+    transport: stdio
+    command: example-notes-server
+    args:
+      - --read-only
+    env:
+      - NOTES_ROOT
+    version: 1.0.0
+    network: none
+    tools:
+      - name: list_notes
+        class: read

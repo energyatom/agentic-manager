@@ -1,0 +1,10 @@
+schema_version: 1
+type: feed
+owner_seat: alpha
+scope:
+  seeds:
+    - https://example.org/feed.xml
+limits:
+  max_items_per_load: 50
+output:
+  records: true

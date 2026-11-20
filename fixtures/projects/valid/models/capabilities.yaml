@@ -1,0 +1,11 @@
+schema_version: 1
+models:
+  - provider: anthropic
+    model: example-large
+    context_window: 200000
+    max_output_tokens: 8192
+    tools: true
+    reads_pdf: true
+    reads_images: true
+    reads_office: false
+    reads_audio: false

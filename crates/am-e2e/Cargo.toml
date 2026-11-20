@@ -14,6 +14,10 @@ workspace = true
 name = "spike"
 path = "tests/spike/main.rs"
 
+[[test]]
+name = "cli_validate"
+path = "tests/cli_validate.rs"
+
 [dev-dependencies]
 am-app.workspace = true
 am-domain.workspace = true
