@@ -35,7 +35,7 @@ context:
   `reconcile()` completes an intent whose file already has the new hash, audited as `config.reconciled`. It drops one whose file does not.
 - Every History entry and command carries an explicit `Actor` (no default). History renders it with `Actor::describe()` ("You (Reviewer)").
 - The audit `args` hold only the entry id, file path, sha256 values and kind, never file content (AD-25).
-- An edit whose resulting project fails `am_config` validation is refused with file, line and fix, and nothing is written.
+- An edit, Undo or Restore that adds an `am_config` error the project did not already have is refused, naming each new error with file, line and fix, and nothing is written. Errors after must be a subset of errors before, compared on (file, message, fix) without the line, so a project broken in several files can be fixed one file at a time (owner renegotiation, 2026-11-21).
 - Undo of an entry writes that entry's before-bytes. It is refused in words when the file's current sha256 is not the entry's after-hash (it changed since).
 - Restore writes an older entry's after-bytes. Undo and Restore each create a new History entry (kind `undo` or `restore`, naming the entry they act on).
 - Self-write fingerprints: the writer remembers (file, after-sha256) of its own writes, exposed for 1.9's watcher.
@@ -65,6 +65,7 @@ context:
 | Undo stale | File edited again (or outside) after entry | Nothing written | Refused: "changed since this entry" |
 | Restore | Restore entry 1 after entries 2 and 3 | File equals entry 1's after-bytes; new entry `restore`; audit `config.restored` | No-op (already equal) refused in words |
 | Invalid result | Set `team` to an unknown id | Nothing written, no History | Refused with file, line, fix |
+| Already broken elsewhere | Two files broken by outside edits; fix one through the writer | Allowed while it adds no error; the second fix makes the project valid | An edit adding a new error is refused, naming only the new one |
 | Bad path | `../x.yaml`, `/etc/x`, missing file | Nothing written | Refused in words |
 | Crash after rename | Intent committed, file renamed, History not committed | `reconcile()` completes it, audited `config.reconciled` | Intent whose file lacks the new hash is dropped |
 
@@ -111,7 +112,7 @@ context:
 - **Audit per step.** Every writer command commits its own audit entry (AD-25), so each edit, Undo and Restore leaves two config entries: `config.intent_opened` (step 1 of the apply order) and exactly one completion entry (`config.edited` / `config.undone` / `config.restored`, target = the History entry id). The tests read "one audit entry per step" as one completion entry per step, plus one intent entry each.
 - **Intent row holds the bytes and diff.** Besides file and the two hashes, the intent row stores actor, kind, ref_entry, both byte strings and the diff, so `reconcile()` can complete a crashed write into a full History entry; the entry keeps the intent's Actor (who asked), while `config.reconciled` is audited by `System(config-writer)`. The History entry id is the intent id (UUIDv7).
 - **Store checks.** `BeginConfigIntent` refuses hashes that are not 64-hex or not the sha256 of their bytes, an unchanged file, an Edit naming a ref_entry, an Undo/Restore without one or naming an unknown entry, and a non-relative path; `config_history` is append-only by triggers (as `audit_log`). `StoreError::NoConfigIntent` maps to `HistoryError::NoIntent`.
-- **Validation scope.** An edit, Undo or Restore is refused when the resulting project has any error finding (not only new ones), so a project already invalid elsewhere cannot be edited through the writer until fixed.
+- **Validation scope (changed 2026-11-21, owner).** At first an edit, Undo or Restore was refused when the resulting project had any error at all. It is now refused only when it adds an error the project did not already have (multiset of (file, message, fix), so moved lines do not count). Test written first: `writer_allows_fixing_two_broken_files_one_at_a_time` failed with `Invalid` naming both existing team errors on the first harmless edit, then passed after the change.
 - **Canonical YAML.** serde-saphyr with `compact_list_indent = false` (list items indented under their key, the house style) and `yaml_12 = true` + `no_lang_directive = true` (the loader reads YAML 1.2, so `on:` is written plain, not `"on":`). Schemas stay JSON (serde_json pretty, `schema_version` first, nested keys sorted). Long text is folded (`>-`), multi-line text is a literal block.
 - **Story 1.7 test touched.** `am-store/tests/audit.rs::a_chain_written_by_1_6_binaries_verifies_after_migrating_and_writing` counted exactly one migration step from version 2; it now counts `SCHEMA_VERSION - 2` steps (migration 0004 is the new step).
 - **Review pass 1 patches, tests first (2026-11-21).** New tests, run against the unpatched writer (with a stub `exact_name` returning `Ok`): `cargo nextest run --no-fail-fast -p am-config -p am-e2e -E 'test(writer) | test(config_history) | test(exact_name)'` gave 7 failed, 16 passed:

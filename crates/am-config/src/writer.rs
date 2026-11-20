@@ -5,7 +5,8 @@
 //! path and a list of [`EditOp`]s on its parsed tree (and, for a seat or a
 //! skill, an optional new Markdown body; without one the body is kept byte
 //! for byte). The writer emits the result canonically (see `canon`), checks
-//! that the whole project still loads with no error, and then follows
+//! that the change adds no error the project did not already have, and then
+//! follows
 //! AD-16's apply order through the [`ConfigHistory`] port:
 //!
 //! 1. commit an intent row (file, old and new sha256, both byte strings, the
@@ -487,25 +488,18 @@ impl ConfigWriter {
                 lines,
             });
         }
-        let loaded = load_with(
-            &self.root,
-            BTreeMap::from([(file.to_string(), after.clone())]),
-        )
-        .map_err(|e| match e {
-            LoadError::NotFound(p) | LoadError::NotADirectory(p) => WriteError::BadPath {
-                file: p.display().to_string(),
-                reason: "the project folder is gone".into(),
-            },
-        })?;
-        let errors: Vec<Finding> = loaded
-            .findings
-            .into_iter()
-            .filter(|f| f.severity == Severity::Error)
-            .collect();
-        if !errors.is_empty() {
+        // Owner decision (2026-11-21): refused only when the change adds an
+        // error the project does not already have (errors after ⊆ errors
+        // before), so a project broken in several files is fixed one file
+        // at a time. Errors are compared without their line, which an edit
+        // may shift.
+        let errors_now = self.errors(BTreeMap::new())?;
+        let errors_after = self.errors(BTreeMap::from([(file.to_string(), after.clone())]))?;
+        let new_errors = added_errors(errors_now, errors_after);
+        if !new_errors.is_empty() {
             return Err(WriteError::Invalid {
                 file: file.to_string(),
-                findings: errors,
+                findings: new_errors,
             });
         }
         let after_sha256 = sha256_hex(&after);
@@ -541,6 +535,21 @@ impl ConfigWriter {
             Err(Written::Maybe(e)) => return Err(e),
         }
         Ok(self.history.commit_entry(actor, id)?)
+    }
+
+    /// The project's error findings, with `overrides` read instead of disk.
+    fn errors(&self, overrides: BTreeMap<String, Vec<u8>>) -> Result<Vec<Finding>, WriteError> {
+        let loaded = load_with(&self.root, overrides).map_err(|e| match e {
+            LoadError::NotFound(p) | LoadError::NotADirectory(p) => WriteError::BadPath {
+                file: p.display().to_string(),
+                reason: "the project folder is gone".into(),
+            },
+        })?;
+        Ok(loaded
+            .findings
+            .into_iter()
+            .filter(|f| f.severity == Severity::Error)
+            .collect())
     }
 
     #[cfg(feature = "test-support")]
@@ -702,6 +711,28 @@ fn exact_name(listed: &[String], wanted: &str) -> Result<(), String> {
         )),
         None => Err("the file does not exist; the writer edits existing files only".into()),
     }
+}
+
+/// The errors in `after` that `before` does not account for, matched as a
+/// multiset on (file, message, fix): the line is left out because an edit
+/// may move an error it did not cause.
+fn added_errors(before: Vec<Finding>, after: Vec<Finding>) -> Vec<Finding> {
+    let mut known: BTreeMap<(String, String, String), usize> = BTreeMap::new();
+    for f in before {
+        *known.entry((f.file, f.message, f.fix)).or_default() += 1;
+    }
+    after
+        .into_iter()
+        .filter(
+            |f| match known.get_mut(&(f.file.clone(), f.message.clone(), f.fix.clone())) {
+                Some(n) if *n > 0 => {
+                    *n -= 1;
+                    false
+                }
+                _ => true,
+            },
+        )
+        .collect()
 }
 
 #[cfg(test)]

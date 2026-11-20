@@ -326,6 +326,75 @@ fn writer_refuses_an_invalid_result_with_file_line_and_fix() {
     assert!(history.pending_intents().unwrap().is_empty());
 }
 
+/// Owner decision (2026-11-21): an edit is refused only when it adds an
+/// error the project did not already have (errors after ⊆ errors before,
+/// compared without line numbers), so a project broken in two files can be
+/// fixed one file at a time through the writer.
+#[test]
+fn writer_allows_fixing_two_broken_files_one_at_a_time() {
+    const BETA: &str = "seats/beta.md";
+    let dir = copy_of("valid");
+    let root = dir.path();
+    // Two outside edits break two files.
+    common::edit(root, SEAT, "team: core", "team: no-such-team");
+    common::edit(root, BETA, "team: support", "team: no-such-team-b");
+    let (w, history) = writer(root);
+
+    // An edit that leaves alpha broken but adds no error is allowed.
+    w.apply(
+        reviewer(),
+        edit(SEAT, vec![set(&["name"], json!("Alpha Two"))]),
+    )
+    .unwrap();
+
+    // An edit that adds a new error is refused, naming only the new one.
+    let before = read(root, BETA);
+    let err = w
+        .apply(
+            reviewer(),
+            edit(
+                BETA,
+                vec![set(&["model", "account"], json!("no-such-account"))],
+            ),
+        )
+        .unwrap_err();
+    let WriteError::Invalid { findings, .. } = &err else {
+        panic!("{err:?}")
+    };
+    assert!(
+        findings.iter().all(|f| !f.message.contains("no-such-team")),
+        "only new errors are named: {findings:#?}"
+    );
+    assert!(
+        findings
+            .iter()
+            .any(|f| f.message.contains("no-such-account")),
+        "{findings:#?}"
+    );
+    assert_eq!(read(root, BETA), before, "nothing written");
+
+    // Fix alpha while beta is still broken, then beta.
+    let fix_alpha = w
+        .apply(reviewer(), edit(SEAT, vec![set(&["team"], json!("core"))]))
+        .unwrap();
+    w.apply(
+        reviewer(),
+        edit(BETA, vec![set(&["team"], json!("support"))]),
+    )
+    .unwrap();
+    assert!(
+        common::findings(root)
+            .iter()
+            .all(|f| f.severity != am_config::Severity::Error),
+        "the project is valid again"
+    );
+
+    // Undoing alpha's fix would bring its error back into a valid project.
+    let err = w.undo(reviewer(), &fix_alpha.id).unwrap_err();
+    assert!(matches!(err, WriteError::Invalid { .. }), "{err:?}");
+    assert_eq!(history.entries(None).unwrap().len(), 3);
+}
+
 #[test]
 fn writer_refuses_bad_paths_in_words() {
     let dir = copy_of("valid");
