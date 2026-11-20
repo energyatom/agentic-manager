@@ -9,3 +9,6 @@ pub mod scheduler;
 pub mod toolgate;
 
 pub use cancel::{CancelTree, TokenSignal};
+
+/// THROWAWAY (story 1.2 verify)
+pub const THROWAWAY_SEAT: &str = "d1-head";
