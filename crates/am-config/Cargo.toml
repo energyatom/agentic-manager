@@ -1,6 +1,6 @@
 [package]
 name = "am-config"
-description = "Project config loader, validator and writer (AD-16). Empty in the spike."
+description = "Project config loader, validator and writer: canonical emit, atomic writes, History, Undo and Restore (AD-16, R1, R3)."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,6 +9,11 @@ publish.workspace = true
 
 [lints]
 workspace = true
+
+[features]
+# Crash simulation for the writer's tests (`ConfigWriter::fail_at`): enabled
+# only through dev-dependencies (this crate's tests and am-e2e), never in the app.
+test-support = []
 
 [dependencies]
 am-domain.workspace = true
@@ -25,3 +30,5 @@ globset.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+am-testkit.workspace = true
+am-config = { path = ".", features = ["test-support"] }

@@ -85,7 +85,7 @@ async fn serve(args: &Args) {
         eprintln!("agentic: --project needs the project folder");
         std::process::exit(2);
     }
-    let _store = project.map(|p| {
+    let _project = project.map(|p| {
         let root = PathBuf::from(&p);
         let (store, report) = am_store::open_project(&root)
             .unwrap_or_else(|e| fail(&format!("cannot open the project {p}: {e}")));
@@ -99,7 +99,11 @@ async fn serve(args: &Args) {
         for line in lines {
             println!("agentic: project {p}: {line}");
         }
-        store
+        // The config writer (AD-16): removes temp files a crashed write left,
+        // then completes or drops the intents it left (story 1.8).
+        let writer = config_writer(&root, &store)
+            .unwrap_or_else(|e| fail(&format!("cannot open the project {p}: {e}")));
+        (store, writer)
     });
     let port: u16 = args
         .value("--port")
@@ -127,6 +131,33 @@ async fn serve(args: &Args) {
     if let Err(e) = am_server::serve(listener, state, shutdown).await {
         fail(&e.to_string());
     }
+}
+
+/// The project's config writer over its store's History, after AD-16's
+/// startup reconcile (by the system, audited).
+fn config_writer(
+    root: &std::path::Path,
+    store: &am_store::Store,
+) -> Result<am_config::ConfigWriter, String> {
+    let history = am_store::StoreConfigHistory::new(store).map_err(|e| e.to_string())?;
+    let writer =
+        am_config::ConfigWriter::open(root, Arc::new(history)).map_err(|e| e.to_string())?;
+    let report = writer
+        .reconcile(am_domain::Actor::System {
+            component: "config-writer".into(),
+        })
+        .map_err(|e| e.to_string())?;
+    let p = root.display();
+    for entry in &report.completed {
+        println!(
+            "agentic: project {p}: completed the interrupted write of {} (History entry {})",
+            entry.file, entry.id
+        );
+    }
+    for id in &report.dropped {
+        println!("agentic: project {p}: dropped the unwritten config change {id}");
+    }
+    Ok(writer)
 }
 
 async fn spike_run(args: &Args) {

@@ -10,6 +10,7 @@ pub mod actor;
 pub mod audit;
 pub mod capability;
 pub mod clock;
+pub mod config_history;
 pub mod content;
 pub mod llm;
 pub mod mcp;
@@ -36,6 +37,9 @@ pub trait CancelSignal: Send + Sync {
 pub use actor::Actor;
 pub use audit::{AuditEvent, AuditSink};
 pub use clock::Clock;
+pub use config_history::{
+    ConfigHistory, HistoryEntry, HistoryError, HistoryKind, NewIntent, PendingIntent,
+};
 pub use content::{FileKind, FilePart, Instruction, UntrustedContent, UntrustedData};
 pub use llm::{
     ChatOutcome, ChatRequest, EventSink, LlmProvider, Message, ModelCapabilities, Part,

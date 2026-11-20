@@ -55,7 +55,9 @@ dependencies = [
  "am-services",
  "am-store",
  "am-tools",
+ "hex",
  "jiff 1.0.0",
+ "sha2 0.11.1",
  "tempfile",
  "tokio",
  "tokio-util",
@@ -66,7 +68,9 @@ dependencies = [
 name = "am-config"
 version = "0.0.1"
 dependencies = [
+ "am-config",
  "am-domain",
+ "am-testkit",
  "croner",
  "globset",
  "hex",
@@ -108,6 +112,7 @@ name = "am-e2e"
 version = "0.0.1"
 dependencies = [
  "am-app",
+ "am-config",
  "am-domain",
  "am-engine",
  "am-mcp",
