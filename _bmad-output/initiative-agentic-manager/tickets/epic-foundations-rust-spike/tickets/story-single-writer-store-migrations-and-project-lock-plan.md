@@ -3,7 +3,7 @@ title: 'Single-writer store, migrations and project lock'
 type: feature
 ticket: '6'
 created: '2026-11-20'
-status: built
+status: done
 baseline_revision: '63d62cdafd8052e42c48d4a0c57162390bf40f93'
 route: full
 route_source: auto
