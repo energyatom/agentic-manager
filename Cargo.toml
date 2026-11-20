@@ -109,4 +109,9 @@ tempfile = "=3.27.0"
 # docs/crate-notes/croner.md); the scheduler converts at that boundary only.
 jiff-croner = { package = "jiff", version = "=0.2.46" }
 keyring-core = "=1.0.1"
+# Config files (story 1.4, AD-16). jsonschema =0.61.2 (Stack) is not added:
+# it depends on borrow-or-share (MIT-0), outside the AD-3 allow-list; see
+# docs/crate-notes/jsonschema.md.
+serde-saphyr = "=2.1.1"
+url = "=2.5.8"
 apple-native-keyring-store = { version = "=1.0.2", features = ["keychain"] }

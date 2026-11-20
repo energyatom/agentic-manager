@@ -1,18 +1,19 @@
 //! `am-app`: the composition root (AD-32). It wires adapters to ports and
-//! hosts the `agentic` CLI. Spike scope: `serve`, the journaled spike run used
-//! by criterion 2, and the `spike` subcommands for the owner's live runs.
+//! hosts the `agentic` CLI: `serve`, `validate` (story 1.4), the journaled
+//! spike run used by criterion 2, and the `spike` subcommands for the owner's
+//! live runs.
 #![forbid(unsafe_code)]
 
 // The composition root depends on every adapter (Design Paradigm table); the
 // crates the spike leaves empty are linked here so the graph stays as designed.
 use am_api as _;
-use am_config as _;
 use am_connectors as _;
 use am_extract as _;
 use am_mcp as _;
 use am_render as _;
 use am_services as _;
 
+pub mod cli;
 pub mod spike;
 
 use std::sync::Arc;

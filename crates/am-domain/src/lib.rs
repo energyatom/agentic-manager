@@ -14,6 +14,7 @@ pub mod llm;
 pub mod mcp;
 pub mod net;
 pub mod secrets;
+pub mod tool_manifest;
 pub mod workspace;
 
 use std::future::Future;

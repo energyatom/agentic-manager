@@ -1,0 +1,20 @@
+schema_version: 1
+name: Example Project
+description: A synthetic project that holds every config file kind once.
+timezone: UTC
+currency: EUR
+week_start: monday
+max_chain_depth: 3
+teams:
+  - id: core
+    name: Core team
+  - id: support
+    name: Support team
+    parent: core
+    accepts:
+      - core/digest
+hats:
+  - id: owner
+    name: Owner
+  - id: reviewer
+    name: Reviewer

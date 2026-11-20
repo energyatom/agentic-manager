@@ -1,0 +1,6 @@
+schema_version: 1
+accounts:
+  - id: cloud
+    provider: anthropic
+    secret_ref: cloud
+    api_key: abcdef0123456789

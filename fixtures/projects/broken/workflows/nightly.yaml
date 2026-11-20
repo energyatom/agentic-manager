@@ -1,0 +1,10 @@
+schema_version: 1
+name: Nightly
+team: core
+triggers:
+  - schedule:
+      cron: "61 * * * *"
+steps:
+  - id: gather
+    seat: alpha
+    instruction: Gather the new items.

@@ -1,7 +1,14 @@
 # croner 4.0.3
 
-Pinned `=4.0.3`, `default-features = false`, feature `jiff`. Used only in
-`am-engine/src/scheduler.rs`.
+Pinned `=4.0.3`, `default-features = false`, feature `jiff`. Used in two
+places only:
+
+- `am-engine/src/scheduler.rs`: next fire times (AD-18).
+- `am-config/src/cron.rs` (story 1.4): the syntax check of a schedule
+  trigger's `cron:` in `agentic validate`. It requires exactly five fields
+  (minute hour day-of-month month day-of-week) before calling
+  `Cron::from_str`, so croner's optional seconds field is refused. It needs
+  no time types, so it does not use `jiff-croner`.
 
 ## Finding (spike, 2026-11-19): croner's jiff backend is jiff 0.2
 
@@ -22,5 +29,6 @@ else may use `jiff-croner`. Revisit when croner publishes a jiff 1.x backend.
 
 ## Do not
 
-- Do not let `croner::Cron` or `jiff-croner` types into `am-domain` or a port.
+- Do not let `croner::Cron` or `jiff-croner` types into `am-domain`, a port
+  or any public API (am-config keeps them inside its `cron` module).
 - Do not enable the default `chrono` feature.

@@ -1,0 +1,7 @@
+schema_version: 1
+name: Ghost
+team: core
+steps:
+  - id: haunt
+    seat: ghost-seat
+    instruction: Do the work.
