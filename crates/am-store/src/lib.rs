@@ -2,7 +2,10 @@
 //!
 //! - One **writer thread** owns the only read-write connection. Every mutation
 //!   is a typed [`WriteCommand`] carrying an [`Actor`] and commits together with
-//!   its hash-chained audit entry in one transaction.
+//!   its hash-chained audit entry in one transaction. The entry holds ids,
+//!   content hashes and redacted arguments the store derives from the
+//!   command, never content; the log exports as JSON Lines and an export is
+//!   checked with [`verify_jsonl`] (AD-25, see [`audit`]).
 //! - **Readers** open `SQLITE_OPEN_READ_ONLY` with `query_only=ON`.
 //! - The database runs WAL, `synchronous=FULL`, `foreign_keys=ON`; migrations
 //!   are the numbered, embedded, forward-only SQL files in `migrations/`, run
@@ -22,12 +25,14 @@ use std::thread;
 
 use am_domain::{Actor, Usage};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
-use sha2::{Digest, Sha256};
+use serde_json::{Value, json};
 
+pub mod audit;
 mod fsx;
 mod migrations;
 pub mod project;
 
+pub use audit::{ChainBreak, ChainOk, verify_jsonl};
 pub use migrations::{AppliedMigration, OpenReport, SCHEMA_VERSION};
 use project::ProjectLock;
 pub use project::{LockHolder, open_project};
@@ -157,38 +162,150 @@ pub enum WriteCommand {
         kind: String,
         next_fire: String,
     },
-    /// An audit-only entry (refusals, blocked egress).
+    /// An audit-only entry (refusals, blocked egress). `target` names what
+    /// was acted on (ids, root and relative path), never content; `hash` is
+    /// the content's sha256 hex when relevant (as `AuditEvent::hash`).
     Audit {
         action: String,
         target: String,
         outcome: String,
+        hash: Option<String>,
     },
 }
 
 impl WriteCommand {
-    fn audit_fields(&self) -> (String, String) {
+    /// The audit entry's action, target and redacted `args` (AD-25): ids,
+    /// content hashes, counts and statuses only. Content fields (a step's
+    /// `output`) appear only as their sha256 hex; nothing is copied.
+    fn audit_entry(&self) -> (String, String, Option<Value>) {
+        let output_sha256 = |o: &Option<String>| o.as_deref().map(audit::sha256_hex);
+        let tokens = |u: &Option<Usage>| {
+            (
+                u.map(|u| u.input_tokens as i64),
+                u.map(|u| u.output_tokens as i64),
+            )
+        };
         match self {
-            WriteCommand::CreateRun { run_id, .. } => ("run.created".into(), run_id.clone()),
-            WriteCommand::StartStep { step_run_id } => ("step.started".into(), step_run_id.clone()),
-            WriteCommand::ReserveCall { call_id, .. } => {
-                ("model_call.reserved".into(), call_id.clone())
+            WriteCommand::CreateRun {
+                run_id,
+                workflow,
+                origin,
+                steps,
+            } => (
+                "run.created".into(),
+                run_id.clone(),
+                Some(json!({"origin": origin, "steps": steps.len(), "workflow": workflow})),
+            ),
+            WriteCommand::StartStep { step_run_id } => {
+                ("step.started".into(), step_run_id.clone(), Some(json!({})))
             }
-            WriteCommand::SettleCall { call_id, .. } => {
-                ("model_call.settled".into(), call_id.clone())
+            WriteCommand::ReserveCall {
+                step_run_id,
+                call_id,
+                call_seq,
+                reserved_micro_usd,
+                rate_snapshot,
+            } => (
+                "model_call.reserved".into(),
+                call_id.clone(),
+                Some(json!({
+                    "call_seq": call_seq,
+                    "rate_snapshot": rate_snapshot,
+                    "reserved_micro_usd": reserved_micro_usd,
+                    "step_run_id": step_run_id,
+                })),
+            ),
+            WriteCommand::SettleCall {
+                call_id,
+                usage,
+                cost_micro_usd,
+            } => {
+                let (input, output) = tokens(usage);
+                (
+                    "model_call.settled".into(),
+                    call_id.clone(),
+                    Some(json!({
+                        "cost_micro_usd": cost_micro_usd,
+                        "input_tokens": input,
+                        "output_tokens": output,
+                    })),
+                )
             }
-            WriteCommand::MarkLost { call_id } => ("model_call.lost".into(), call_id.clone()),
-            WriteCommand::FinishStep { step_run_id, .. } => {
-                ("step.finished".into(), step_run_id.clone())
+            WriteCommand::MarkLost { call_id } => {
+                ("model_call.lost".into(), call_id.clone(), Some(json!({})))
             }
-            WriteCommand::SettleAndFinishStep { call_id, .. } => {
-                ("model_call.settled+step.finished".into(), call_id.clone())
+            WriteCommand::FinishStep {
+                step_run_id,
+                status,
+                output,
+            } => (
+                "step.finished".into(),
+                step_run_id.clone(),
+                Some(json!({"output_sha256": output_sha256(output), "status": status})),
+            ),
+            WriteCommand::SettleAndFinishStep {
+                call_id,
+                usage,
+                cost_micro_usd,
+                step_run_id,
+                status,
+                output,
+            } => {
+                let (input, output_tokens) = tokens(usage);
+                (
+                    "model_call.settled+step.finished".into(),
+                    call_id.clone(),
+                    Some(json!({
+                        "cost_micro_usd": cost_micro_usd,
+                        "input_tokens": input,
+                        "output_sha256": output_sha256(output),
+                        "output_tokens": output_tokens,
+                        "status": status,
+                        "step_run_id": step_run_id,
+                    })),
+                )
             }
-            WriteCommand::FinishRun { run_id, .. } => ("run.finished".into(), run_id.clone()),
-            WriteCommand::UpsertTrigger { trigger } => ("trigger.saved".into(), trigger.id.clone()),
-            WriteCommand::RecordFire { trigger_id, .. } => {
-                ("trigger.fired".into(), trigger_id.clone())
-            }
-            WriteCommand::Audit { action, target, .. } => (action.clone(), target.clone()),
+            WriteCommand::FinishRun { run_id, status } => (
+                "run.finished".into(),
+                run_id.clone(),
+                Some(json!({"status": status})),
+            ),
+            WriteCommand::UpsertTrigger { trigger: t } => (
+                "trigger.saved".into(),
+                t.id.clone(),
+                Some(json!({
+                    "catch_up": t.catch_up,
+                    "cron": t.cron,
+                    "last_fired": t.last_fired,
+                    "next_fire": t.next_fire,
+                    "state": t.state,
+                    "tz": t.tz,
+                })),
+            ),
+            WriteCommand::RecordFire {
+                trigger_id,
+                scheduled_for,
+                kind,
+                next_fire,
+            } => (
+                "trigger.fired".into(),
+                trigger_id.clone(),
+                Some(json!({
+                    "kind": kind,
+                    "next_fire": next_fire,
+                    "scheduled_for": scheduled_for,
+                })),
+            ),
+            WriteCommand::Audit {
+                action,
+                target,
+                hash,
+                ..
+            } => (
+                action.clone(),
+                target.clone(),
+                hash.as_ref().map(|h| json!({"sha256": h})),
+            ),
         }
     }
 }
@@ -353,7 +470,20 @@ impl Store {
     }
 }
 
+/// A content hash is exactly 64 lowercase hex characters (sha256), so
+/// nothing else can reach `args` through it.
+fn is_sha256_hex(h: &str) -> bool {
+    h.len() == 64 && h.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
 fn apply(conn: &mut Connection, actor: &Actor, cmd: &WriteCommand) -> Result<(), StoreError> {
+    if let WriteCommand::Audit { hash: Some(h), .. } = cmd
+        && !is_sha256_hex(h)
+    {
+        return Err(StoreError::Invalid(
+            "refused audit entry: `hash` must be 64 lowercase hex characters (sha256)".into(),
+        ));
+    }
     let tx = conn.transaction()?;
     let now = now_ts();
     match cmd {
@@ -465,12 +595,12 @@ fn apply(conn: &mut Connection, actor: &Actor, cmd: &WriteCommand) -> Result<(),
         }
         WriteCommand::Audit { .. } => {}
     }
-    let (action, target) = cmd.audit_fields();
+    let (action, target, args) = cmd.audit_entry();
     let outcome = match cmd {
         WriteCommand::Audit { outcome, .. } => outcome.clone(),
         _ => "ok".to_string(),
     };
-    append_audit(&tx, actor, &action, &target, &outcome, &now)?;
+    audit::append(&tx, actor, &action, &target, &outcome, args.as_ref(), &now)?;
     tx.commit()?;
     Ok(())
 }
@@ -519,37 +649,6 @@ fn finish_step(
     if n != 1 {
         return Err(StoreError::Invalid(format!("step {step_run_id} not found")));
     }
-    Ok(())
-}
-
-fn append_audit(
-    tx: &rusqlite::Transaction,
-    actor: &Actor,
-    action: &str,
-    target: &str,
-    outcome: &str,
-    at: &str,
-) -> Result<(), StoreError> {
-    let prev: String = tx
-        .query_row(
-            "SELECT entry_hash FROM audit_log ORDER BY seq DESC LIMIT 1",
-            [],
-            |r| r.get(0),
-        )
-        .optional()?
-        .unwrap_or_else(|| "genesis".to_string());
-    let actor_json =
-        serde_json::to_string(actor).map_err(|e| StoreError::Invalid(e.to_string()))?;
-    let mut h = Sha256::new();
-    for part in [prev.as_str(), at, &actor_json, action, target, outcome] {
-        h.update(part.as_bytes());
-        h.update([0u8]);
-    }
-    let entry_hash = hex::encode(h.finalize());
-    tx.execute(
-        "INSERT INTO audit_log (at, actor, action, target, outcome, prev_hash, entry_hash) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        params![at, actor_json, action, target, outcome, prev, entry_hash],
-    )?;
     Ok(())
 }
 
@@ -758,33 +857,6 @@ impl Reader {
             })
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
-    }
-
-    /// Recompute the audit chain; returns the first broken sequence number.
-    pub fn verify_audit_chain(&self) -> Result<Option<i64>, StoreError> {
-        let mut st = self.conn.prepare(
-            "SELECT seq, at, actor, action, target, outcome, prev_hash, entry_hash FROM audit_log ORDER BY seq",
-        )?;
-        let mut rows = st.query([])?;
-        let mut prev = "genesis".to_string();
-        while let Some(r) = rows.next()? {
-            let seq: i64 = r.get(0)?;
-            let fields: Vec<String> = (1..6).map(|i| r.get(i)).collect::<Result<_, _>>()?;
-            let p: String = r.get(6)?;
-            let e: String = r.get(7)?;
-            let mut h = Sha256::new();
-            h.update(prev.as_bytes());
-            h.update([0u8]);
-            for f in &fields {
-                h.update(f.as_bytes());
-                h.update([0u8]);
-            }
-            if p != prev || hex::encode(h.finalize()) != e {
-                return Ok(Some(seq));
-            }
-            prev = e;
-        }
-        Ok(None)
     }
 }
 
@@ -995,6 +1067,7 @@ mod tests {
                     action: "x".into(),
                     target: "y".into(),
                     outcome: "ok".into(),
+                    hash: None,
                 },
             )
             .unwrap();

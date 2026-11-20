@@ -1,7 +1,7 @@
 //! `am-app`: the composition root (AD-32). It wires adapters to ports and
-//! hosts the `agentic` CLI: `serve`, `validate` (story 1.4), the journaled
-//! spike run used by criterion 2, and the `spike` subcommands for the owner's
-//! live runs.
+//! hosts the `agentic` CLI: `serve`, `validate` (story 1.4), `audit export`
+//! and `audit verify` (story 1.7), the journaled spike run used by criterion
+//! 2, and the `spike` subcommands for the owner's live runs.
 #![forbid(unsafe_code)]
 
 // The composition root depends on every adapter (Design Paradigm table); the

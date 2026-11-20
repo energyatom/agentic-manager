@@ -11,3 +11,6 @@
 - source_plan: `_bmad-output/initiative-agentic-manager/tickets/epic-foundations-rust-spike/tickets/story-blank-department-role-templates-and-the-company-a-sample-plan.md`
   summary: company.yaml has no company-wide caps key, so the Company A sample's ₹600-a-week company cap is not written; epic 4's budget stories should add the key and the sample's value.
   evidence: Owner decision (c) of story 1.5 (2026-11-20). reference-workload.md sets ₹600 a week for the company; the sample's description names the gap.
+- source_plan: `_bmad-output/initiative-agentic-manager/tickets/epic-foundations-rust-spike/tickets/story-hash-chained-audit-log-plan.md`
+  summary: Writer commands that change no row (MarkLost on an already settled call, StartStep on an unknown step id) still commit and audit outcome `ok`; they should refuse or audit a "no change" outcome.
+  evidence: Spike behaviour predating story 1.7 (`apply` in crates/am-store/src/lib.rs: MarkLost's `WHERE ... AND settled = 0` and StartStep's UPDATE return Ok when 0 rows change); found by the story 1.7 quick review. The workflow-engine stories that own these commands should decide refuse vs. "no change".

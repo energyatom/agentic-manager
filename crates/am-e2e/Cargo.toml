@@ -18,6 +18,16 @@ path = "tests/spike/main.rs"
 name = "cli_validate"
 path = "tests/cli_validate.rs"
 
+# Every file in tests/trust/ has a target named after it; `trust_targets_listed`
+# fails when one is missing, so the release gate runs them all (AD-33).
+[[test]]
+name = "trust_targets"
+path = "tests/trust_targets.rs"
+
+[[test]]
+name = "rule_16_audit_log"
+path = "tests/trust/rule_16_audit_log.rs"
+
 [dev-dependencies]
 am-app.workspace = true
 am-domain.workspace = true
@@ -34,3 +44,8 @@ tokio.workspace = true
 tokio-util.workspace = true
 jiff.workspace = true
 tempfile.workspace = true
+# Raw SQL against a project's state.db and the export's JSON (story 1.7).
+rusqlite.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+hex.workspace = true
