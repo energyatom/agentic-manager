@@ -3,7 +3,7 @@ title: 'CI baseline and the just check gate'
 type: chore
 ticket: '2'
 created: '2026-11-20'
-status: built
+status: done
 baseline_revision: 'e112a3c02015cc96942d16bea8f5251c334e1089'
 route: full
 route_source: auto
