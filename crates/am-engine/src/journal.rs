@@ -262,14 +262,11 @@ mod tests {
         let db = dir.path().join("state.db");
         let store = am_store::Store::open(&db).unwrap();
         let w = store.writer();
-        let llm = Arc::new(FakeLlm::new(vec![ScriptedTurn {
-            text: "ok".into(),
-            usage: Some(Usage {
-                input_tokens: 1000,
-                output_tokens: 100,
-            }),
-            delay: Duration::from_millis(1),
-        }]));
+        let llm = Arc::new(FakeLlm::new(vec![
+            ScriptedTurn::text("ok")
+                .usage(1000, 100)
+                .delay(Duration::from_millis(1)),
+        ]));
         let run = create_run(&w, system("test"), &wf(), "manual").unwrap();
         let status = drive_run(&db, &w, llm.clone(), &wf(), &run, CancellationToken::new())
             .await
@@ -286,11 +283,9 @@ mod tests {
         let db = dir.path().join("state.db");
         let store = am_store::Store::open(&db).unwrap();
         let w = store.writer();
-        let llm = Arc::new(FakeLlm::new(vec![ScriptedTurn {
-            text: "slow".into(),
-            usage: None,
-            delay: Duration::from_secs(30),
-        }]));
+        let llm = Arc::new(FakeLlm::new(vec![
+            ScriptedTurn::text("slow").delay(Duration::from_secs(30)),
+        ]));
         let run = create_run(&w, system("test"), &wf(), "manual").unwrap();
         let token = CancellationToken::new();
         let t2 = token.clone();

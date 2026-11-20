@@ -1,9 +1,16 @@
-//! Test fakes (AD-33): no test needs the network, a real model or the keychain.
+//! Test fakes (R8, AD-33): no test needs the network, a real model or the keychain.
 //!
-//! - [`FakeEgress`]: an `EgressClient` that serves scripted or recorded HTTP
-//!   responses (`fixtures/http/`) and records every request it was asked to send.
-//! - [`FakeLlm`]: an `LlmProvider` with scripted turns, delays and usage.
-//! - [`FakeClock`], [`FakeSecretStore`], [`CollectAudit`].
+//! - [`FakeLlm`]: an `LlmProvider` that plays [`ScriptedTurn`]s in order (the last
+//!   repeats): streamed text, tool calls, usage, a delay, a fault
+//!   ([`ScriptedTurn::fail`]) or a hang that only cancel ends ([`ScriptedTurn::hang`]),
+//!   so a timeout is the caller's deadline elapsing. It records every request.
+//! - [`FakeEgress`]: an `EgressClient` that serves scripted ([`FakeResponse`]) or
+//!   recorded ([`FakeEgress::replay`], `fixtures/http/`) responses, records every
+//!   request it was asked to send and refuses an unrouted URL by name.
+//! - [`FakeClock`]: a `Clock` that moves only when told (`set`, `advance`).
+//! - [`FakeSecretStore`]: an in-memory `SecretStore` for canary values.
+//! - [`CollectEvents`] (an `EventSink`) and [`CollectAudit`] (an `AuditSink`).
+//! - [`recorded`] and [`fixture`]: paths and bytes under `fixtures/`.
 #![forbid(unsafe_code)]
 
 use std::collections::HashMap;
@@ -15,7 +22,8 @@ use std::time::Duration;
 use am_domain::{
     AuditEvent, AuditSink, BoxFuture, CancelSignal, ChatOutcome, ChatRequest, Clock, EgressClient,
     EgressError, EventSink, HttpRequest, HttpResponse, LlmProvider, ModelCapabilities,
-    ProviderError, SecretError, SecretStore, SecretString, StopReason, StreamEvent, Usage,
+    ProviderError, SecretError, SecretStore, SecretString, StopReason, StreamEvent, ToolCall,
+    Usage,
 };
 use tokio::sync::mpsc;
 
@@ -54,6 +62,10 @@ pub struct FakeResponse {
 }
 
 impl FakeResponse {
+    /// Serve `body` as `text/event-stream`, normalised: CRLF becomes LF, the
+    /// text is split after each `\n\n`, and whitespace-only chunks are dropped,
+    /// so the chunks need not concatenate to `body`. Use
+    /// [`FakeEgress::replay`] for a byte-exact recorded file.
     pub fn sse(body: Vec<u8>) -> Self {
         FakeResponse {
             status: 200,
@@ -82,13 +94,46 @@ impl FakeResponse {
     }
 }
 
-/// Split an SSE body into one chunk per event, so delays apply per event.
+/// Split an SSE body for [`FakeResponse::sse`], normalised: CRLF becomes LF,
+/// the text is split after each `\n\n`, and whitespace-only chunks are
+/// dropped (so delays apply per event, not per byte of padding).
 fn split_events(body: &[u8]) -> Vec<Vec<u8>> {
     let text = String::from_utf8_lossy(body).replace("\r\n", "\n");
     text.split_inclusive("\n\n")
         .filter(|s| !s.trim().is_empty())
         .map(|s| s.as_bytes().to_vec())
         .collect()
+}
+
+/// Split an SSE body for [`FakeEgress::replay`], byte-exact: a chunk ends
+/// after each `\n\n` or `\r\n\r\n` and nowhere else, nothing is normalised
+/// or dropped, and the chunks concatenate to `body` exactly. Events delimited
+/// any other way (e.g. `\r\r`) stay in one chunk with what follows them.
+fn split_events_exact(body: &[u8]) -> Vec<Vec<u8>> {
+    let mut chunks = Vec::new();
+    let mut start = 0;
+    let mut i = 0;
+    while i < body.len() {
+        let end = if body[i..].starts_with(b"\n\n") {
+            Some(i + 2)
+        } else if body[i..].starts_with(b"\r\n\r\n") {
+            Some(i + 4)
+        } else {
+            None
+        };
+        match end {
+            Some(e) => {
+                chunks.push(body[start..e].to_vec());
+                start = e;
+                i = e;
+            }
+            None => i += 1,
+        }
+    }
+    if start < body.len() {
+        chunks.push(body[start..].to_vec());
+    }
+    chunks
 }
 
 type Matcher = Box<dyn Fn(&HttpRequest) -> bool + Send + Sync>;
@@ -125,6 +170,32 @@ impl FakeEgress {
             }),
             resp,
         ));
+    }
+    /// Answer requests whose URL contains `url_part` with the recorded file
+    /// `fixtures/http/<fixture_rel>`, status 200, byte-exact (unlike
+    /// [`FakeResponse::sse`], nothing is normalised). An `.sse` file is served as
+    /// `text/event-stream`, split after each `\n\n` or `\r\n\r\n` and nowhere
+    /// else; a `.json` file as one `application/json` chunk; any other file as
+    /// one `application/octet-stream` chunk.
+    pub fn replay(&self, url_part: &str, fixture_rel: &str) {
+        let body = recorded(fixture_rel);
+        let (content_type, chunks) = if fixture_rel.ends_with(".sse") {
+            ("text/event-stream", split_events_exact(&body))
+        } else if fixture_rel.ends_with(".json") {
+            ("application/json", vec![body])
+        } else {
+            ("application/octet-stream", vec![body])
+        };
+        self.respond(
+            url_part,
+            FakeResponse {
+                status: 200,
+                headers: vec![("content-type".into(), content_type.into())],
+                chunks,
+                chunk_delay: Duration::from_millis(0),
+                hang_after: false,
+            },
+        );
     }
     /// Every request the code under test asked to send.
     pub fn requests(&self) -> Vec<HttpRequest> {
@@ -193,19 +264,145 @@ impl EgressClient for FakeEgress {
 
 // ---------------------------------------------------------------- llm
 
-/// One scripted model turn.
-#[derive(Debug, Clone)]
-pub struct ScriptedTurn {
-    pub text: String,
-    pub usage: Option<Usage>,
-    pub delay: Duration,
+/// What a scripted turn does once its delay is over.
+#[derive(Debug)]
+enum Ending {
+    /// Stream the text, then the tool calls, then the usage.
+    Reply,
+    /// Return this error, with no events.
+    Fail(ProviderError),
+    /// Never answer; only cancel ends it.
+    Hang,
 }
 
-/// A deterministic `LlmProvider`: returns its scripted turns in order (the
-/// last one repeats), streaming the text word by word.
+/// One scripted model turn, built with [`ScriptedTurn::text`],
+/// [`ScriptedTurn::fail`] or [`ScriptedTurn::hang`].
+#[derive(Debug)]
+pub struct ScriptedTurn {
+    text: String,
+    tool_calls: Vec<ToolCall>,
+    usage: Option<Usage>,
+    delay: Duration,
+    ending: Ending,
+}
+
+impl ScriptedTurn {
+    /// A turn that streams `text` word by word and ends with `EndTurn`
+    /// (`ToolUse` when it also has tool calls). Empty text streams no text.
+    pub fn text(text: impl Into<String>) -> Self {
+        ScriptedTurn {
+            text: text.into(),
+            tool_calls: Vec::new(),
+            usage: None,
+            delay: Duration::ZERO,
+            ending: Ending::Reply,
+        }
+    }
+    /// A turn that fails with `error` (no events), e.g. `ProviderError::Http`.
+    pub fn fail(error: ProviderError) -> Self {
+        ScriptedTurn {
+            ending: Ending::Fail(error),
+            ..ScriptedTurn::text("")
+        }
+    }
+    /// A turn that never answers: the caller's deadline elapses, or cancel
+    /// ends it with `StopReason::Cancelled`.
+    pub fn hang() -> Self {
+        ScriptedTurn {
+            ending: Ending::Hang,
+            ..ScriptedTurn::text("")
+        }
+    }
+    /// The usage the turn reports after its text and tool calls.
+    ///
+    /// Panics on a [`ScriptedTurn::fail`] or [`ScriptedTurn::hang`] turn, which
+    /// reports no usage.
+    pub fn usage(mut self, input_tokens: u64, output_tokens: u64) -> Self {
+        self.refuse_on_no_reply("usage");
+        self.usage = Some(Usage {
+            input_tokens,
+            output_tokens,
+        });
+        self
+    }
+    /// Add a tool call (repeatable); ids are `call-1`, `call-2`, … in order.
+    ///
+    /// Panics on a [`ScriptedTurn::fail`] or [`ScriptedTurn::hang`] turn, which
+    /// makes no tool calls.
+    pub fn tool_call(mut self, name: &str, arguments_json: &str) -> Self {
+        self.refuse_on_no_reply("tool_call");
+        let id = format!("call-{}", self.tool_calls.len() + 1);
+        self.tool_calls.push(ToolCall {
+            id,
+            name: name.to_string(),
+            arguments_json: arguments_json.to_string(),
+        });
+        self
+    }
+    /// A fault or hang turn never streams, so a setting for the reply would be
+    /// dropped silently; refuse it instead.
+    fn refuse_on_no_reply(&self, setting: &str) {
+        let ending = match self.ending {
+            Ending::Reply => return,
+            Ending::Fail(_) => "fail",
+            Ending::Hang => "hang",
+        };
+        panic!(
+            "ScriptedTurn::{ending}() streams nothing, so .{setting}() would be ignored; \
+             script it on a ScriptedTurn::text(..) turn instead"
+        );
+    }
+    /// Wait this long before answering (cancel still ends the wait).
+    pub fn delay(mut self, delay: Duration) -> Self {
+        self.delay = delay;
+        self
+    }
+}
+
+impl Clone for ScriptedTurn {
+    fn clone(&self) -> Self {
+        ScriptedTurn {
+            text: self.text.clone(),
+            tool_calls: self.tool_calls.clone(),
+            usage: self.usage,
+            delay: self.delay,
+            ending: match &self.ending {
+                Ending::Reply => Ending::Reply,
+                Ending::Fail(e) => Ending::Fail(copy_error(e)),
+                Ending::Hang => Ending::Hang,
+            },
+        }
+    }
+}
+
+/// `ProviderError` is not `Clone` (am-domain); a fault turn repeats, so copy it
+/// here. The match is exhaustive: a new variant must be handled.
+fn copy_error(e: &ProviderError) -> ProviderError {
+    match e {
+        ProviderError::Unsupported {
+            media_type,
+            model,
+            message,
+        } => ProviderError::Unsupported {
+            media_type: media_type.clone(),
+            model: model.clone(),
+            message: message.clone(),
+        },
+        ProviderError::Egress(m) => ProviderError::Egress(m.clone()),
+        ProviderError::Http { status, body } => ProviderError::Http {
+            status: *status,
+            body: body.clone(),
+        },
+        ProviderError::Protocol(m) => ProviderError::Protocol(m.clone()),
+    }
+}
+
+/// A deterministic `LlmProvider`: plays its scripted turns in order (the last
+/// one repeats) and records every request.
 pub struct FakeLlm {
     turns: Vec<ScriptedTurn>,
     next: AtomicUsize,
+    requests: Mutex<Vec<ChatRequest>>,
     caps: ModelCapabilities,
 }
 
@@ -214,11 +411,26 @@ impl FakeLlm {
         FakeLlm {
             turns,
             next: AtomicUsize::new(0),
+            requests: Mutex::new(Vec::new()),
             caps: ModelCapabilities::default(),
         }
     }
+    /// How many times `stream` was called.
     pub fn calls(&self) -> usize {
         self.next.load(Ordering::SeqCst)
+    }
+    /// Every request `stream` was called with, in order.
+    pub fn requests(&self) -> Vec<ChatRequest> {
+        self.requests.lock().unwrap().clone()
+    }
+}
+
+fn cancelled_outcome() -> ChatOutcome {
+    ChatOutcome {
+        text: String::new(),
+        tool_calls: vec![],
+        usage: None,
+        stop: StopReason::Cancelled,
     }
 }
 
@@ -243,32 +455,54 @@ impl LlmProvider for FakeLlm {
         cancel: Arc<dyn CancelSignal>,
         sink: Arc<dyn EventSink>,
     ) -> BoxFuture<Result<ChatOutcome, ProviderError>> {
-        let i = self.next.fetch_add(1, Ordering::SeqCst);
+        let checked = self.check_file_parts(&request);
+        // Take the turn index and record the request under one lock, so
+        // `requests()[i]` is the request that played turn `i` even when calls race.
+        let i = {
+            let mut requests = self.requests.lock().unwrap();
+            let i = requests.len();
+            requests.push(request);
+            self.next.fetch_add(1, Ordering::SeqCst);
+            i
+        };
         let turn = self
             .turns
             .get(i.min(self.turns.len().saturating_sub(1)))
             .cloned();
-        let checked = self.check_file_parts(&request);
         Box::pin(async move {
             checked?;
             let turn = turn.ok_or_else(|| ProviderError::Protocol("no scripted turn".into()))?;
             tokio::select! {
-                _ = cancel.cancelled() => {
-                    return Ok(ChatOutcome { text: String::new(), tool_calls: vec![], usage: None, stop: StopReason::Cancelled });
-                }
+                _ = cancel.cancelled() => return Ok(cancelled_outcome()),
                 _ = tokio::time::sleep(turn.delay) => {}
+            }
+            match turn.ending {
+                Ending::Fail(e) => return Err(e),
+                Ending::Hang => {
+                    cancel.cancelled().await;
+                    return Ok(cancelled_outcome());
+                }
+                Ending::Reply => {}
             }
             for w in turn.text.split_inclusive(' ') {
                 sink.on_event(StreamEvent::TextDelta(w.to_string()));
             }
+            for c in &turn.tool_calls {
+                sink.on_event(StreamEvent::ToolCall(c.clone()));
+            }
             if let Some(u) = turn.usage {
                 sink.on_event(StreamEvent::Usage(u));
             }
+            let stop = if turn.tool_calls.is_empty() {
+                StopReason::EndTurn
+            } else {
+                StopReason::ToolUse
+            };
             Ok(ChatOutcome {
                 text: turn.text,
-                tool_calls: vec![],
+                tool_calls: turn.tool_calls,
                 usage: turn.usage,
-                stop: StopReason::EndTurn,
+                stop,
             })
         })
     }
