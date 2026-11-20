@@ -22,6 +22,8 @@ members = [
     "crates/am-e2e",
     "xtask",
 ]
+# Licence-policy probe fixtures (story 1.2) are separate manifests, never built here.
+exclude = ["fixtures/supply-chain"]
 # am-desktop (Tauri) is built only in E11 and CI (AD-32, AD-47).
 default-members = [
     "crates/am-domain",
