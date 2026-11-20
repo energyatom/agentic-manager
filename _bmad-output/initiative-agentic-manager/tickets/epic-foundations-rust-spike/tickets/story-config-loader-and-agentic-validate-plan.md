@@ -3,7 +3,7 @@ title: 'Config loader and agentic validate'
 type: feature
 ticket: '4'
 created: '2026-11-20'
-status: built
+status: done
 baseline_revision: 'fecd94a8d5ed514421d8411e259f324b5ac933b9'
 route: full
 route_source: auto
