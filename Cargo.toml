@@ -114,4 +114,7 @@ keyring-core = "=1.0.1"
 # docs/crate-notes/jsonschema.md.
 serde-saphyr = "=2.1.1"
 url = "=2.5.8"
+# Source scope include/exclude globs (story 1.12, owner decision d):
+# Unlicense OR MIT, used under MIT; see docs/crate-notes/globset.md.
+globset = { version = "=0.4.21", default-features = false }
 apple-native-keyring-store = { version = "=1.0.2", features = ["keychain"] }

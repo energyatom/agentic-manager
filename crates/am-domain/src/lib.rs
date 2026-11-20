@@ -8,6 +8,7 @@
 
 pub mod actor;
 pub mod audit;
+pub mod capability;
 pub mod clock;
 pub mod content;
 pub mod llm;

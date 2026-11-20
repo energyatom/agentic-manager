@@ -3,6 +3,11 @@
 //! and caps in the company currency. Ids are the kebab-case file stem or the
 //! `id:` of a list item.
 
+use std::collections::{BTreeMap, BTreeSet};
+
+use am_domain::capability::{AccountKind, Capability};
+use am_domain::workspace::Access;
+
 /// `company.yaml`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Company {
@@ -44,8 +49,11 @@ pub struct Hat {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Account {
     pub id: String,
-    /// `anthropic`, `openai` or `openai-compatible`.
+    /// `anthropic`, `openai`, `openai-compatible` (model); `brave`, `tavily`,
+    /// `exa`, `serper`, `searxng-remote` (search); `firecrawl` (crawl service).
     pub provider: String,
+    /// Follows from the provider.
+    pub kind: AccountKind,
     pub name: Option<String>,
     pub base_url: Option<String>,
     /// The Keychain entry that holds the key.
@@ -152,11 +160,95 @@ pub struct Seat {
     pub reports_to: Option<String>,
     pub model: Option<ModelRef>,
     pub fallback: Vec<ModelRef>,
-    /// Built-in tool ids and `<server-id>/<tool-name>` MCP tools.
+    /// Built-in tool ids and `<server-id>/<tool-name>` MCP tools, as listed.
     pub tools: Vec<String>,
     pub budget: Option<Budget>,
+    /// At most 500 characters (AD-38).
+    pub goal: Option<String>,
+    /// At most 2,000 characters (AD-38).
+    pub backstory: Option<String>,
+    pub avatar: Option<Avatar>,
+    /// Every capability, with the defaults filled in for those the file does
+    /// not mention (AD-46).
+    pub capabilities: BTreeMap<Capability, CapabilitySetting>,
+    /// Linked folders (AD-30).
+    pub folders: Vec<Folder>,
+    /// Serve text-readable files as text to a model that cannot read them
+    /// natively (AD-30; off by default).
+    pub text_fallback: bool,
+    /// Attached skill ids (`skills/<id>/`, AD-38).
+    pub skills: Vec<String>,
+    /// Reference files in `.agentic/knowledge/<seat-id>/`.
+    pub knowledge: Vec<KnowledgeEntry>,
+    /// Saved links.
+    pub links: Vec<Link>,
+    /// The seat's tool grants: the capability expansion (plus
+    /// `read_skill_file` with a skill attached), the listed built-in tools of
+    /// no capability and the listed MCP tools. Never read from a skill.
+    pub grants: BTreeSet<String>,
     /// The Markdown body after the frontmatter.
     pub instructions: String,
+}
+
+/// A seat avatar: white initials on one DESIGN avatar tint.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Avatar {
+    /// `slate`, `steel`, `sage`, `stone`, `plum` or `clay`.
+    pub tint: String,
+}
+
+/// One capability of a seat.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CapabilitySetting {
+    pub on: bool,
+    /// `builtin` or an Account id of the kind the capability takes.
+    pub provider: String,
+}
+
+/// A linked folder (AD-30): a grant root.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Folder {
+    pub id: String,
+    /// As written: project-relative or `~/`-relative.
+    pub path: String,
+    /// `read` (default) or `read_write`.
+    pub access: Access,
+    pub include: Vec<String>,
+    pub exclude: Vec<String>,
+}
+
+/// A reference file of a seat, relative to `.agentic/knowledge/<seat-id>/`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct KnowledgeEntry {
+    pub file: String,
+    pub note: Option<String>,
+}
+
+/// A saved link of a seat.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Link {
+    pub title: String,
+    /// http or https.
+    pub url: String,
+    pub group: Option<String>,
+}
+
+/// `skills/<id>/`: an Agent Skills folder (AD-38). Instructions only: no
+/// field of a skill ever reaches a seat's grants.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Skill {
+    pub id: String,
+    /// Equal to `id`.
+    pub name: String,
+    pub description: String,
+    pub license: Option<String>,
+    pub metadata: BTreeMap<String, String>,
+    /// The SKILL.md `allowed-tools`, kept as "asks for" information only.
+    pub asks_for: Vec<String>,
+    /// The SKILL.md body (at most 64 KB).
+    pub body: String,
+    /// `references/<file>` → its text.
+    pub references: BTreeMap<String, String>,
 }
 
 /// Account › model.
@@ -217,7 +309,9 @@ pub struct Caps {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Step {
     pub id: String,
-    pub seat: String,
+    /// The step's seat; absent on a fan-out step written with `seats:` or
+    /// `over_folder:` (AD-40, checked from E3).
+    pub seat: Option<String>,
     pub instruction: String,
     pub description: Option<String>,
     /// A `schemas/<id>.json` the step's output must match.
@@ -297,10 +391,69 @@ pub struct Layout {
     pub h: u32,
 }
 
-/// `sources/<id>.yaml`: loaded and hashed only in this release; its schema
-/// is validated from E1 story 12.
+/// `sources/<id>.yaml`: a configured Connector instance (AD-39).
 #[derive(Debug, Clone, PartialEq)]
-pub struct SourceFile {
+pub struct Source {
     pub id: String,
+    pub name: Option<String>,
+    pub description: Option<String>,
+    /// The connector type: `web-search`, `http-reader`, `crawler`, `api`,
+    /// `feed`, `local-repository`, `knowledge`, `database`, `mcp`, `action`.
+    pub source_type: String,
+    /// Whose allow-list, budget scope and Agent card the Source uses.
+    pub owner_seat: String,
+    pub account: Option<String>,
+    pub scope: SourceScope,
+    pub trigger: Option<Trigger>,
+    pub limits: SourceLimits,
+    pub output: SourceOutput,
+    /// Render pages built by scripts (http-reader and crawler only).
+    pub render: bool,
+    /// The date the owner checked the site's terms (`YYYY-MM-DD`).
+    pub terms_checked: Option<String>,
+    /// The file's text, byte for byte.
     pub text: String,
+}
+
+/// What a Source reads.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct SourceScope {
+    pub seeds: Vec<String>,
+    pub url: Option<String>,
+    /// Anchored path globs.
+    pub include: Vec<String>,
+    pub exclude: Vec<String>,
+    pub allowed_hosts: Vec<String>,
+    /// 0 to 10.
+    pub max_depth: Option<u32>,
+}
+
+/// A Source's limits (AD-39), each within its cap.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct SourceLimits {
+    /// 1 to 10,000.
+    pub max_items_per_load: Option<u32>,
+    /// 1 byte to 1 GB (10^9 bytes).
+    pub max_bytes_per_load: Option<u64>,
+    /// 1 to 96.
+    pub max_loads_per_day: Option<u32>,
+    /// Company-currency micro-units, from 0.
+    pub max_spend_per_load: Option<i64>,
+    /// Milliseconds between requests to one host; at least 1,000.
+    pub rate_per_host_ms: Option<u64>,
+}
+
+/// Where a Source's items go: exactly one form.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SourceOutput {
+    /// Rows of a table, keyed by `key`; `mapping` is column → source path.
+    Table {
+        table: String,
+        key: String,
+        mapping: BTreeMap<String, String>,
+    },
+    /// Untrusted source records.
+    Records,
+    /// The owner seat's Knowledge (`seat`) or its team's (`team`).
+    Knowledge { scope: String },
 }

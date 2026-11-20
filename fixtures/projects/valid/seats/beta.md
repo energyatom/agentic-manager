@@ -10,6 +10,9 @@ model:
 fallback:
   - account: cloud
     model: example-large
+capabilities:
+  tables:
+    on: true
 tools:
   - table_write
   - write_document

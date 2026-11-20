@@ -1,0 +1,12 @@
+schema_version: 1
+accounts:
+  - id: crawly
+    provider: firecrawl
+    base_url: https://crawl.example.org
+    secret_ref: crawly
+  - id: finder
+    provider: brave
+    secret_ref: finder
+  - id: local
+    provider: searxng-remote
+    base_url: http://127.0.0.1:8888

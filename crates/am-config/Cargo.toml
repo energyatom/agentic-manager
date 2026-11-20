@@ -21,6 +21,7 @@ croner.workspace = true
 jiff.workspace = true
 thiserror.workspace = true
 url.workspace = true
+globset.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

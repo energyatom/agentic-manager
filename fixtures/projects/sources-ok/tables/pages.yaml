@@ -1,0 +1,12 @@
+schema_version: 1
+name: Pages
+team: core
+key: ref
+columns:
+  - id: ref
+    type: text
+    required: true
+  - id: title
+    type: text
+  - id: link
+    type: url

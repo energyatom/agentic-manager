@@ -19,5 +19,9 @@ __pycache__/
 !fixtures/**/*.png
 !crates/am-desktop/icons/*.png
 
+# Fixture projects keep their synthetic runtime files (reference files in
+# .agentic/knowledge/<seat-id>/) so validate sees the same tree in CI.
+!fixtures/projects/*/.agentic/
+
 # Spike run outputs (owner file names and answers); never committed
 crates/am-e2e/c4*.md

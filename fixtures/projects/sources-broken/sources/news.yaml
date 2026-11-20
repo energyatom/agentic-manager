@@ -1,0 +1,10 @@
+schema_version: 1
+type: feed
+owner_seat: owner
+scope:
+  seeds:
+    - https://example.org/feed.xml
+output:
+  records: true
+render: true
+terms_checked: 2026-11-01

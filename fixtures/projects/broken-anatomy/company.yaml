@@ -1,0 +1,7 @@
+schema_version: 1
+name: Broken Anatomy Project
+timezone: UTC
+currency: EUR
+teams:
+  - id: core
+    name: Core team

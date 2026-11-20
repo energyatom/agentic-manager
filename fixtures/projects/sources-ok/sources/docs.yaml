@@ -1,0 +1,33 @@
+schema_version: 1
+name: Documentation pages
+type: crawler
+owner_seat: owner
+account: crawly
+scope:
+  seeds:
+    - https://example.org/docs/
+  include:
+    - "/docs/**"
+  exclude:
+    - "/docs/old/**"
+  allowed_hosts:
+    - example.org
+  max_depth: 2
+trigger:
+  schedule:
+    cron: "0 6 * * 1"
+limits:
+  max_items_per_load: 100
+  max_bytes_per_load: 10000000
+  max_loads_per_day: 4
+  max_spend_per_load: 0.5
+  rate_per_host: 2
+output:
+  table: pages
+  key: ref
+  mapping:
+    ref: url
+    title: title
+    link: url
+render: true
+terms_checked: 2026-11-01
