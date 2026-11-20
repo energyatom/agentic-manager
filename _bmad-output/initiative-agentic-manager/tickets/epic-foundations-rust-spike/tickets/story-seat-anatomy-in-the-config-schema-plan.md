@@ -3,7 +3,7 @@ title: 'Seat anatomy in the config schema'
 type: feature
 ticket: '12'
 created: '2026-11-20'
-status: built
+status: done
 baseline_revision: '6783fb57ead26ecec81e8802cbe3f74816f60d55'
 route: full
 route_source: auto
