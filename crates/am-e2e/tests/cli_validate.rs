@@ -76,6 +76,87 @@ fn broken_fixture_prints_every_problem_with_a_fix_and_exits_one() {
     assert!(out.contains("1 warning"), "{out}");
 }
 
+/// The line after `want` (which must start a line of `out`) is its fix.
+fn has_finding_with_fix(out: &str, want: &str) {
+    let lines: Vec<&str> = out.lines().collect();
+    let i = lines
+        .iter()
+        .position(|l| l.starts_with(want))
+        .unwrap_or_else(|| panic!("missing `{want}` in:\n{out}"));
+    let fix = lines.get(i + 1).copied().unwrap_or_default();
+    assert!(
+        fix.trim_start().starts_with("fix: "),
+        "no fix after `{want}`:\n{out}"
+    );
+}
+
+// Story 1.12: seat anatomy, skills and Sources.
+
+#[test]
+fn broken_anatomy_prints_every_error_with_a_fix_and_exits_one() {
+    let path = fixture("broken-anatomy");
+    let (code, out, _) = validate(&[path.to_str().unwrap()]);
+    assert_eq!(code, 1, "{out}");
+    for want in [
+        "seats/refused.md:8: folder path '~/Library/x' is not allowed",
+        "seats/refused.md:10: folder path '.agentic/x' is not allowed",
+        "seats/reader.md:7: tool 'read_url' needs the browse capability",
+        "seats/searcher.md:9: account 'crawly' is a crawl-service Account",
+        "seats/messy.md:6: backstory",
+        "seats/messy.md:8: unknown skill 'ghost'",
+        "seats/messy.md:11: link 'ftp://example.org/files'",
+        "skills/bulky/SKILL.md:5: ",
+        "skills/nodesc/SKILL.md:2: SKILL.md is missing 'description'",
+        "skills/scripted/scripts:1: ",
+        "skills/scripted/tool.py:1: ",
+    ] {
+        has_finding_with_fix(&out, want);
+    }
+    assert!(out.contains("11 errors"), "{out}");
+}
+
+#[test]
+fn anatomy_fixture_exits_zero_with_its_warnings() {
+    let path = fixture("anatomy");
+    let (code, out, _) = validate(&[path.to_str().unwrap()]);
+    assert_eq!(code, 0, "{out}");
+    for want in [
+        "seats/scout.md:8: warning: ",
+        "seats/soft.md:7: warning: ",
+        "seats/soft.md:10: warning: ",
+    ] {
+        has_finding_with_fix(&out, want);
+    }
+    assert!(out.contains("0 errors, 3 warnings"), "{out}");
+}
+
+#[test]
+fn sources_ok_exits_zero_with_two_warnings() {
+    let path = fixture("sources-ok");
+    let (code, out, _) = validate(&[path.to_str().unwrap()]);
+    assert_eq!(code, 0, "{out}");
+    has_finding_with_fix(&out, "sources/site.yaml:5: warning: ");
+    has_finding_with_fix(&out, "sources/site.yaml:8: warning: ");
+    assert!(out.contains("0 errors, 2 warnings"), "{out}");
+}
+
+#[test]
+fn sources_broken_prints_each_error_and_exits_one() {
+    let path = fixture("sources-broken");
+    let (code, out, _) = validate(&[path.to_str().unwrap()]);
+    assert_eq!(code, 1, "{out}");
+    for want in [
+        "models/accounts.yaml:5: 'base_url' must be an https URL",
+        "sources/crawl.yaml:6: ",
+        "sources/crawl.yaml:8: ",
+        "sources/crawl.yaml:10: unknown table 'ghost'",
+        "sources/news.yaml:9: ",
+    ] {
+        has_finding_with_fix(&out, want);
+    }
+    assert!(out.contains("5 errors"), "{out}");
+}
+
 #[test]
 fn warnings_alone_exit_zero() {
     let dir = tempfile::tempdir().unwrap();

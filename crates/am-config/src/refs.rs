@@ -3,6 +3,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use am_domain::capability::AccountKind;
+
 use crate::finding::Report;
 
 pub(crate) const RESERVED_ACCOUNTS: &[&str] = &["local-lmstudio", "local-ollama"];
@@ -20,6 +22,35 @@ pub(crate) enum RefKind {
     Tool,
     /// An `accepts` entry: `<team-id>/<workflow-id>` of that team.
     Accepts,
+    /// An Account that must be of the `want` kind (a capability provider, a
+    /// seat model, a Source account); `user` names what takes it, for the
+    /// message, and `alternative` is the other choice offered in the fix.
+    AccountOfKind {
+        want: AccountKind,
+        user: String,
+        alternative: Option<String>,
+    },
+    /// A skill folder `skills/<id>/`.
+    Skill,
+    /// A table `tables/<id>.yaml`.
+    Table,
+    /// A column of the named table.
+    TableColumn(String),
+    /// The owner seat of a crawler Source, which must have `crawl` on.
+    CrawlOwner,
+}
+
+/// A host that should be on a seat's allow-list; a warning when it is not.
+#[derive(Debug, Clone)]
+pub(crate) struct HostCheck {
+    pub file: String,
+    pub line: u32,
+    pub host: String,
+    /// The seat whose allow-list applies.
+    pub seat: String,
+    /// What names the host, for the message: "link", "scope".
+    pub what: &'static str,
+    pub fix: String,
 }
 
 #[derive(Debug, Clone)]
@@ -53,6 +84,7 @@ pub(crate) struct Edge {
 pub(crate) struct Refs {
     pub pending: Vec<PendingRef>,
     pub edges: Vec<Edge>,
+    pub hosts: Vec<HostCheck>,
 }
 
 impl Refs {
@@ -62,6 +94,26 @@ impl Refs {
             line,
             kind,
             id: id.to_string(),
+        });
+    }
+
+    /// Records a host to check against `seat`'s allow-list.
+    pub fn host(
+        &mut self,
+        rep: &Report,
+        line: u32,
+        host: &str,
+        seat: &str,
+        what: &'static str,
+        fix: String,
+    ) {
+        self.hosts.push(HostCheck {
+            file: rep.file.clone(),
+            line,
+            host: host.to_string(),
+            seat: seat.to_string(),
+            what,
+            fix,
         });
     }
 
@@ -89,6 +141,15 @@ pub(crate) struct Known {
     pub workflows: BTreeMap<String, (Option<String>, Option<BTreeSet<String>>)>,
     pub builtin_tools: Vec<String>,
     pub mcp_tools: BTreeSet<String>,
+    /// Account id → provider as written.
+    pub account_providers: BTreeMap<String, String>,
+    pub skills: BTreeSet<String>,
+    /// Table id → its column ids, when its file declared them readably.
+    pub tables: BTreeMap<String, Option<BTreeSet<String>>>,
+    /// Seats whose file switches `crawl` on.
+    pub crawl_seats: BTreeSet<String>,
+    /// tools.yaml `egress_hosts`.
+    pub egress_hosts: Vec<String>,
 }
 
 fn list<'a>(ids: impl Iterator<Item = &'a String>) -> String {
@@ -108,6 +169,22 @@ pub(crate) fn resolve(refs: &Refs, known: &Known, reports: &mut BTreeMap<String,
             .entry(r.file.clone())
             .or_insert_with(|| Report::new(&r.file));
         check(r, known, rep);
+    }
+    for h in &refs.hosts {
+        let allowed = crate::snapshot::seat_allowed_hosts(&known.egress_hosts, &h.seat);
+        if !allowed.iter().any(|a| a.eq_ignore_ascii_case(&h.host)) {
+            let rep = reports
+                .entry(h.file.clone())
+                .or_insert_with(|| Report::new(&h.file));
+            rep.warning(
+                h.line,
+                format!(
+                    "{} host '{}' is not on the allow-list of seat '{}'",
+                    h.what, h.host, h.seat
+                ),
+                h.fix.clone(),
+            );
+        }
     }
     for tree in [Tree::ReportsTo, Tree::TeamParent] {
         let edges: Vec<&Edge> = refs.edges.iter().filter(|e| e.tree == tree).collect();
@@ -288,6 +365,107 @@ fn check(r: &PendingRef, known: &Known, rep: &mut Report) {
                     format!("write the entry as '{owner}/{workflow}'"),
                 ),
                 Some(_) => {}
+            }
+        }
+        RefKind::AccountOfKind {
+            want,
+            user,
+            alternative,
+        } => {
+            let declared = known.accounts.contains(id);
+            let reserved = RESERVED_ACCOUNTS.contains(&id);
+            if !declared && !reserved {
+                let mut all: BTreeSet<String> = known.accounts.clone();
+                if *want == AccountKind::Model {
+                    all.extend(RESERVED_ACCOUNTS.iter().map(|s| s.to_string()));
+                }
+                rep.error(
+                    r.line,
+                    format!("unknown account '{id}'"),
+                    format!(
+                        "use an Account from models/accounts.yaml: {}",
+                        list(all.iter())
+                    ),
+                );
+                return;
+            }
+            let kind = if reserved {
+                Some(AccountKind::Model)
+            } else {
+                known
+                    .account_providers
+                    .get(id)
+                    .and_then(|p| AccountKind::of_provider(p))
+            };
+            if let Some(kind) = kind
+                && kind != *want
+            {
+                let providers = want.providers().join(", ");
+                let choice = match alternative {
+                    Some(alt) => format!("{alt}, or name"),
+                    None => "name".to_string(),
+                };
+                rep.error(
+                    r.line,
+                    format!(
+                        "account '{id}' is a {} Account; {user} takes a {} Account",
+                        kind.as_str(),
+                        want.as_str()
+                    ),
+                    format!(
+                        "{choice} a {} Account (provider {providers}) from models/accounts.yaml",
+                        want.as_str()
+                    ),
+                );
+            }
+        }
+        RefKind::Skill => {
+            if !known.skills.contains(id) {
+                rep.error(
+                    r.line,
+                    format!("unknown skill '{id}'"),
+                    format!(
+                        "add the folder skills/{id}/ with a SKILL.md, or use one of: {}",
+                        list(known.skills.iter())
+                    ),
+                );
+            }
+        }
+        RefKind::Table => {
+            if !known.tables.contains_key(id) {
+                rep.error(
+                    r.line,
+                    format!("unknown table '{id}'"),
+                    format!(
+                        "add tables/{id}.yaml or use one of: {}",
+                        list(known.tables.keys())
+                    ),
+                );
+            }
+        }
+        RefKind::TableColumn(table) => {
+            // An unknown table is reported once, at the table reference.
+            if let Some(Some(columns)) = known.tables.get(table)
+                && !columns.contains(id)
+            {
+                rep.error(
+                    r.line,
+                    format!("unknown column '{id}' in table '{table}'"),
+                    format!("use one of its columns: {}", list(columns.iter())),
+                );
+            }
+        }
+        RefKind::CrawlOwner => {
+            if known.seats.contains(id) && !known.crawl_seats.contains(id) {
+                rep.error(
+                    r.line,
+                    format!(
+                        "seat '{id}' has the crawl capability off; a crawler Source needs its owner seat to have it on"
+                    ),
+                    format!(
+                        "switch on crawl in seats/{id}.md (`capabilities: {{ crawl: {{ on: true }} }}`), or choose another owner_seat"
+                    ),
+                );
             }
         }
     }

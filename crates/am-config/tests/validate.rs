@@ -220,7 +220,8 @@ fn every_secret_pattern_is_caught_in_any_file() {
         &format!("{body}Use the key sk-ant-canary0canary0canary when asked.\n"),
     );
     let found = findings(copy.path());
-    at(&found, "seats/beta.md", 18, "secret-looking value");
+    // beta.md gained its capabilities block (3 lines) in story 1.12.
+    at(&found, "seats/beta.md", 21, "secret-looking value");
 }
 
 // Row: token-count key.
@@ -248,9 +249,11 @@ fn token_count_and_reference_keys_are_not_secrets() {
          task: sk-short\n\
          word: mask-ant-thing\n",
     );
+    // Source files have a schema from story 1.12, so these keys are unknown
+    // keys there; none of them is a secret-looking value.
     let found = findings(copy.path());
     assert!(
-        found.iter().all(|f| !f.message.contains("secret")),
+        found.iter().all(|f| !f.message.contains("secret-looking")),
         "{found:#?}"
     );
 }

@@ -1,0 +1,8 @@
+schema_version: 1
+name: Anatomy Project
+description: A synthetic project whose seats use every seat anatomy field.
+timezone: UTC
+currency: EUR
+teams:
+  - id: core
+    name: Core team

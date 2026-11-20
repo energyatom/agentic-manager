@@ -22,7 +22,8 @@ pub struct ConfigSnapshot {
     pub(crate) tables: BTreeMap<String, Table>,
     pub(crate) schemas: BTreeMap<String, serde_json::Value>,
     pub(crate) dashboards: BTreeMap<String, Dashboard>,
-    pub(crate) sources: BTreeMap<String, SourceFile>,
+    pub(crate) sources: BTreeMap<String, Source>,
+    pub(crate) skills: BTreeMap<String, Skill>,
 }
 
 impl ConfigSnapshot {
@@ -62,9 +63,26 @@ impl ConfigSnapshot {
     pub fn dashboards(&self) -> &BTreeMap<String, Dashboard> {
         &self.dashboards
     }
-    pub fn sources(&self) -> &BTreeMap<String, SourceFile> {
+    pub fn sources(&self) -> &BTreeMap<String, Source> {
         &self.sources
     }
+    /// Skill folders (`skills/<id>/`) by id. Instructions only (AD-38).
+    pub fn skills(&self) -> &BTreeMap<String, Skill> {
+        &self.skills
+    }
+    /// The hosts `seat` may reach (AD-12): today the project's
+    /// `tools.yaml` `egress_hosts`, the same for every seat (owner decision
+    /// 2026-11-20). A per-seat list later changes only
+    /// [`seat_allowed_hosts`].
+    pub fn allowed_hosts(&self, seat: &str) -> Vec<String> {
+        seat_allowed_hosts(&self.tools.egress_hosts, seat)
+    }
+}
+
+/// The one rule for a seat's host allow-list, used by the validator's host
+/// warnings and by [`ConfigSnapshot::allowed_hosts`].
+pub(crate) fn seat_allowed_hosts(egress_hosts: &[String], _seat: &str) -> Vec<String> {
+    egress_hosts.to_vec()
 }
 
 /// sha256 over (path, bytes) pairs sorted by path. Each pair is framed by

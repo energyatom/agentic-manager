@@ -1,0 +1,14 @@
+schema_version: 1
+type: crawler
+owner_seat: owner
+scope:
+  seeds:
+    - ftp://example.org/files/
+  include:
+    - "/docs/[a"
+output:
+  table: ghost
+  key: ref
+  mapping:
+    ref: url
+terms_checked: 2026-11-01

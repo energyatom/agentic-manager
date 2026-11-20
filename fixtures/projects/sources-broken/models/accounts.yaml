@@ -1,0 +1,6 @@
+schema_version: 1
+accounts:
+  - id: crawly
+    provider: firecrawl
+    base_url: http://10.0.0.5
+    secret_ref: crawly

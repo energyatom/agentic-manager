@@ -6,10 +6,13 @@
 //! Files: `company.yaml`, `models/{accounts,prices,capabilities}.yaml`,
 //! `tools.yaml`, `seats/<id>.md` (YAML frontmatter plus a Markdown body),
 //! `workflows/`, `tables/`, `dashboards/` and `sources/` as `<id>.yaml`, and
-//! `schemas/<id>.json`. YAML is read with serde-saphyr. Every file carries
+//! `schemas/<id>.json`, and `skills/<id>/` folders (SKILL.md plus
+//! `references/`). YAML is read with serde-saphyr. Every file carries
 //! `schema_version: 1`; ids are kebab-case file stems; references are checked
 //! across files; secret-looking values are errors; YAML comments are warnings
-//! because the app's writer does not keep them. The writer, History, the
+//! because the app's writer does not keep them. A seat's capabilities are
+//! expanded into its grants by the fixed table in `am_domain::capability`
+//! (AD-46); a skill never adds a grant (AD-38). The writer, History, the
 //! watcher and config migrations come in later stories.
 #![forbid(unsafe_code)]
 
@@ -22,6 +25,7 @@ mod kinds;
 mod node;
 mod refs;
 mod schema_check;
+mod skills;
 mod snapshot;
 
 use std::collections::BTreeMap;
@@ -84,13 +88,20 @@ pub fn load(root: &Path) -> Result<Loaded, LoadError> {
     if !root.is_dir() {
         return Err(LoadError::NotADirectory(root.to_path_buf()));
     }
-    let mut loader = Loader::default();
+    let mut loader = Loader {
+        places: kinds::Places {
+            project: root.to_path_buf(),
+            home: std::env::var_os("HOME").map(PathBuf::from),
+        },
+        ..Loader::default()
+    };
     loader.read_all(root);
     Ok(loader.finish())
 }
 
 #[derive(Default)]
 struct Loader {
+    places: kinds::Places,
     reports: BTreeMap<String, Report>,
     files: BTreeMap<String, Vec<u8>>,
     refs: Refs,
@@ -106,7 +117,8 @@ struct Loader {
     tables: BTreeMap<String, Table>,
     schemas: BTreeMap<String, serde_json::Value>,
     dashboards: BTreeMap<String, Dashboard>,
-    sources: BTreeMap<String, SourceFile>,
+    sources: BTreeMap<String, Source>,
+    skills: BTreeMap<String, Skill>,
 }
 
 impl Loader {
@@ -188,6 +200,9 @@ impl Loader {
                         self.declared
                             .accounts
                             .extend(kinds::declared_ids(&node, "accounts"));
+                        self.declared
+                            .account_providers
+                            .extend(kinds::declared_account_providers(&node));
                         self.accounts = kinds::accounts(&mut rep, &node);
                     }
                     "prices" => self.prices = kinds::prices(&mut rep, &node),
@@ -206,6 +221,7 @@ impl Loader {
                 );
             }
         }
+        skills::load_all(self, root);
         for (folder, ext) in FOLDERS {
             for name in entries(&root.join(folder)) {
                 let rel = format!("{folder}/{name}");
@@ -238,6 +254,9 @@ impl Loader {
                     "workflows" => {
                         self.declared.workflows.insert(stem.clone(), (None, None));
                     }
+                    "tables" => {
+                        self.declared.tables.insert(stem.clone(), None);
+                    }
                     _ => {}
                 }
                 let Some(text) = self.read(root, &rel) else {
@@ -253,11 +272,15 @@ impl Loader {
         let refs = &mut self.refs;
         match folder {
             "seats" => {
-                if let Some((front, offset, body)) = frontmatter(&mut rep, text)
+                if let Some((front, offset, body)) = frontmatter(&mut rep, text, SEAT_FIX)
                     && let Some(node) = kinds::yaml(&mut rep, front, offset)
                 {
                     checks::text_secrets(&mut rep, body, body_first_line(text, body));
-                    if let Some(seat) = kinds::seat(&mut rep, refs, stem, &node, body) {
+                    if kinds::declared_crawl_on(&node) {
+                        self.declared.crawl_seats.insert(stem.to_string());
+                    }
+                    if let Some(seat) = kinds::seat(&mut rep, refs, &self.places, stem, &node, body)
+                    {
                         self.seats.insert(stem.to_string(), seat);
                     }
                 }
@@ -269,6 +292,12 @@ impl Loader {
             }
             _ => {
                 if let Some(node) = kinds::yaml(&mut rep, text, 0) {
+                    if folder == "tables" {
+                        self.declared.tables.insert(
+                            stem.to_string(),
+                            Some(kinds::declared_columns(&node).into_iter().collect()),
+                        );
+                    }
                     if folder == "workflows" {
                         let (team, steps) = kinds::declared_workflow(&node);
                         self.declared
@@ -292,14 +321,9 @@ impl Loader {
                             }
                         }
                         _ => {
-                            kinds::source(&mut rep, stem, &node);
-                            self.sources.insert(
-                                stem.to_string(),
-                                SourceFile {
-                                    id: stem.to_string(),
-                                    text: text.to_string(),
-                                },
-                            );
+                            if let Some(s) = kinds::source(&mut rep, refs, stem, &node, text) {
+                                self.sources.insert(stem.to_string(), s);
+                            }
                         }
                     }
                 }
@@ -316,6 +340,7 @@ impl Loader {
     fn finish(mut self) -> Loaded {
         let mut known = std::mem::take(&mut self.declared);
         known.builtin_tools = am_domain::tool_manifest::builtin_tool_ids();
+        known.egress_hosts = self.tools.egress_hosts.clone();
         refs::resolve(&self.refs, &known, &mut self.reports);
         let mut findings: Vec<Finding> = self
             .reports
@@ -342,6 +367,7 @@ impl Loader {
                 schemas: self.schemas,
                 dashboards: self.dashboards,
                 sources: self.sources,
+                skills: self.skills,
             }),
             _ => None,
         };
@@ -364,13 +390,15 @@ fn entries(dir: &Path) -> Vec<String> {
     names
 }
 
-/// Splits a seat file into (frontmatter, its line offset, body). The file
-/// must start with a `---` line and the frontmatter ends at the next `---`.
-fn frontmatter<'t>(rep: &mut Report, text: &'t str) -> Option<(&'t str, u32, &'t str)> {
-    let fix = "start the file with a line `---`, the YAML fields (schema_version: 1, name, role, team), another `---`, then the instructions";
+const SEAT_FIX: &str = "start the file with a line `---`, the YAML fields (schema_version: 1, name, role, team), another `---`, then the instructions";
+
+/// Splits a seat file or a SKILL.md into (frontmatter, its line offset,
+/// body). The file must start with a `---` line and the frontmatter ends at
+/// the next `---`; `fix` says how to write it.
+fn frontmatter<'t>(rep: &mut Report, text: &'t str, fix: &str) -> Option<(&'t str, u32, &'t str)> {
     let first_end = text.find('\n').map_or(text.len(), |i| i + 1);
     if text[..first_end].trim_end() != "---" {
-        rep.error(1, "a seat file must start with YAML frontmatter", fix);
+        rep.error(1, "the file must start with YAML frontmatter", fix);
         return None;
     }
     let mut pos = first_end;

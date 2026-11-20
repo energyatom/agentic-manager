@@ -1,0 +1,6 @@
+schema_version: 1
+type: web-search
+owner_seat: owner
+account: finder
+output:
+  records: true

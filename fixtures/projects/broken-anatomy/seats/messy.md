@@ -1,0 +1,13 @@
+---
+schema_version: 1
+name: Messy
+role: Writer
+team: core
+backstory: A synthetic backstory sentence that repeats. A synthetic backstory sentence that repeats. A synthetic backstory sentence that repeats. A synthetic backstory sentence that repeats. A synthetic backstory sentence that repeats. A synthetic backstory sentence that repeats. A synthetic backstory sentence that repeats. A synthetic backstory sentence that repeats. A synthetic backstory sentence that repeats. A synthetic backstory sentence that repeats. A synthetic backstory sentence that repeats. A synthetic backstory sentence that repeats. A synthetic backstory sentence that repeats. A synthetic backstory sentence that repeats. A synthetic backstory sentence that repeats. A synthetic backstory sentence that repeats. A synthetic backstory sentence that repeats. A synthetic backstory sentence that repeats. A synthetic backstory sentence that repeats. A synthetic backstory sentence that repeats. A synthetic backstory sentence that repeats. A synthetic backstory sentence that repeats. A synthetic backstory sentence that repeats. A synthetic backstory sentence that repeats. A synthetic backstory sentence that repeats. A synthetic backstory sentence that repeats. A synthetic backstory sentence that repeats. A synthetic backstory sentence that repeats. A synthetic backstory sentence that repeats. A synthetic backstory sentence that repeats. A synthetic backstory sentence that repeats. A synthetic backstory sentence that repeats. A synthetic backstory sentence that repeats. A synthetic backstory sentence that repeats. A synthetic backstory sentence that repeats. A synthetic backstory sentence that repeats. A synthetic backstory sentence that repeats. A synthetic backstory sentence that repeats. A synthetic backstory sentence that repeats. A synthetic backstory sentence that repeats. A synthetic backstory sentence that repeats. A synthetic backstory sentence that repeats. A synthetic backstory sentence that repeats. A synthetic backstory sentence that repeats. A synthetic backstory sentence that repeats. A synthetic backstory sentence that repeats. A synthetic backstory sentence that repeats. A synthetic backstory sentence that repeats. A synthetic backstory sentence that repeats. A synthetic backstory sentence that repeats. A synthetic backstory sentence that repeats. A synthetic backstory sentence that repeats. A synthetic backstory sentence that repeats. A synthetic backstory sentence that repeats. A synthetic backstory sentence that repeats. A synthetic backstory sen
+skills:
+  - ghost
+links:
+  - title: Files
+    url: ftp://example.org/files
+---
+Write what you are asked to write.

@@ -2,7 +2,15 @@
 //! reads a parsed node tree into its entity, reports problems at their line
 //! and records the references it makes for the cross-file check.
 
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
+
+use am_domain::capability::{
+    self, AccountKind, BUILTIN_PROVIDER, Capability, FOLDER_WRITE_TOOL, LEGACY_FOLDER_ACCESS_KEY,
+    SKILL_TOOL, capability_of_tool,
+};
 use am_domain::tool_manifest::{ActionClass, builtin_tool, builtin_tool_ids};
+use am_domain::workspace::Access;
 
 use crate::checks;
 use crate::cron;
@@ -21,7 +29,6 @@ const WEEKDAYS: &[&str] = &[
     "saturday",
     "sunday",
 ];
-const ACCOUNT_PROVIDERS: &[&str] = &["anthropic", "openai", "openai-compatible"];
 const MODEL_PROVIDERS: &[&str] = &[
     "anthropic",
     "openai",
@@ -54,6 +61,33 @@ pub(crate) fn yaml(rep: &mut Report, text: &str, offset: u32) -> Option<Node> {
     };
     checks::comments(rep, &node::comment_lines(text, offset));
     top(rep, root)
+}
+
+/// Parses YAML that carries no `schema_version` (a SKILL.md frontmatter in
+/// the open Agent Skills format) and runs the comment and secret checks.
+pub(crate) fn yaml_plain(rep: &mut Report, text: &str, offset: u32) -> Option<Node> {
+    let root = match node::parse(text, offset) {
+        Ok(root) => root,
+        Err(e) => {
+            rep.error(
+                e.line,
+                format!("not valid YAML: {}", e.message),
+                "fix the YAML syntax at this line (indentation, a missing ':' or an unclosed quote or bracket)",
+            );
+            return None;
+        }
+    };
+    checks::comments(rep, &node::comment_lines(text, offset));
+    if root.as_map().is_none() {
+        rep.error(
+            root.line.max(1 + offset),
+            "the frontmatter must hold key: value pairs",
+            "write `name: <id>` and `description: …` between the two `---` lines",
+        );
+        return None;
+    }
+    checks::secrets(rep, &root);
+    Some(root)
 }
 
 /// The checks on a parsed document's top level.
@@ -285,39 +319,45 @@ pub(crate) fn accounts(rep: &mut Report, root: &Node) -> Vec<Account> {
                 "remove this entry; seats can name it without declaring it",
             );
         }
-        let provider = a.choice(rep, "provider", ACCOUNT_PROVIDERS);
+        let providers = capability::account_providers();
+        let providers: Vec<&str> = providers.iter().map(String::as_str).collect();
+        let provider = a.choice(rep, "provider", &providers);
         if a.absent("provider") {
             rep.error(
                 a.line,
                 "account is missing 'provider'",
-                format!(
-                    "add `provider:` with one of: {}",
-                    ACCOUNT_PROVIDERS.join(", ")
-                ),
+                format!("add `provider:` with one of: {}", providers.join(", ")),
             );
         }
         let base_url = a
             .text(rep, "base_url")
             .filter(|t| web_url(rep, t, "base_url"));
-        if provider
-            .as_ref()
-            .is_some_and(|p| p.value == "openai-compatible")
+        if let Some(p) = &provider
+            && capability::provider_needs_base_url(&p.value)
             && base_url.is_none()
             && a.absent("base_url")
         {
+            let article = if p.value.starts_with(['a', 'e', 'i', 'o', 'u']) {
+                "an"
+            } else {
+                "a"
+            };
             rep.error(
                 a.line,
-                "an openai-compatible account needs 'base_url'",
+                format!("{article} {} account needs 'base_url'", p.value),
                 "add `base_url: https://…` (or http://127.0.0.1:<port> or http://localhost:<port> for a server on this Mac)",
             );
         }
         if let Some(id) = &id {
             ids.push(id.clone());
         }
-        if let (Some(id), Some(provider)) = (id, provider) {
+        if let (Some(id), Some(provider)) = (id, provider)
+            && let Some(kind) = AccountKind::of_provider(&provider.value)
+        {
             out.push(Account {
                 id: id.value,
                 provider: provider.value,
+                kind,
                 name: value(a.text(rep, "name")),
                 base_url: value(base_url),
                 secret_ref: value(a.text(rep, "secret_ref")),
@@ -520,8 +560,17 @@ pub(crate) fn tools(rep: &mut Report, refs: &mut Refs, root: &Node) -> ToolsConf
     {
         s.allow(rep, &["provider"]);
         if let Some(p) = s.text(rep, "provider") {
-            if p.value != "builtin" {
-                refs.push(rep, p.line, RefKind::Account, &p.value);
+            if p.value != BUILTIN_PROVIDER {
+                refs.push(
+                    rep,
+                    p.line,
+                    RefKind::AccountOfKind {
+                        want: AccountKind::Search,
+                        user: "search".into(),
+                        alternative: Some("set `provider: builtin` (Local search)".into()),
+                    },
+                    &p.value,
+                );
             }
             search_provider = Some(p.value);
         }
@@ -689,7 +738,16 @@ fn model_ref(
     m.allow(rep, &["account", "model"]);
     let account = m.req_id(rep, "account");
     if let Some(a) = &account {
-        refs.push(rep, a.line, RefKind::Account, &a.value);
+        refs.push(
+            rep,
+            a.line,
+            RefKind::AccountOfKind {
+                want: AccountKind::Model,
+                user: format!("a seat's {what}"),
+                alternative: None,
+            },
+            &a.value,
+        );
     }
     let model = m.req_text(rep, "model", "model-name");
     Some(ModelRef {
@@ -698,10 +756,592 @@ fn model_ref(
     })
 }
 
+/// `skills/<id>/SKILL.md` (AD-38): its frontmatter (already parsed) and
+/// body. `allowed-tools` is kept as "asks for" only.
+pub(crate) fn skill(
+    rep: &mut Report,
+    id: &str,
+    root: &Node,
+    body: &str,
+    body_line: u32,
+) -> Option<Skill> {
+    let f = fields(rep, root, "SKILL.md")?;
+    f.allow(
+        rep,
+        &[
+            "name",
+            "description",
+            "license",
+            "metadata",
+            "allowed-tools",
+        ],
+    );
+    let name = f.req_text(rep, "name", id).filter(|n| {
+        let ok = n.value == id;
+        if !ok {
+            rep.error(
+                n.line,
+                format!("skill name '{}' does not match its folder '{id}'", n.value),
+                format!(
+                    "set `name: {id}` (the folder name is the skill id), or rename the folder to skills/{}/",
+                    n.value
+                ),
+            );
+        }
+        ok
+    });
+    let description = f.req_text(rep, "description", "What this skill helps with");
+    let mut metadata = BTreeMap::new();
+    if let Some(node) = f.get("metadata").filter(|n| n.kind != Kind::Null)
+        && let Some(m) = fields(rep, node, "metadata")
+    {
+        for (key, _) in m.entries {
+            if let Some(v) = m.text(rep, &key.name) {
+                metadata.insert(key.name.clone(), v.value);
+            }
+        }
+    }
+    let asks_for: Vec<String> = match f.get("allowed-tools").map(|n| &n.kind) {
+        None | Some(Kind::Null) => Vec::new(),
+        Some(Kind::Str(s)) => s
+            .split(|c: char| c.is_whitespace() || c == ',')
+            .filter(|w| !w.is_empty())
+            .map(str::to_string)
+            .collect(),
+        Some(_) => f
+            .texts(rep, "allowed-tools")
+            .into_iter()
+            .map(|t| t.value)
+            .collect(),
+    };
+    if body.len() > SKILL_BODY_MAX_BYTES {
+        rep.error(
+            body_line,
+            format!(
+                "the SKILL.md body is {} bytes; the limit is 64 KB ({SKILL_BODY_MAX_BYTES} bytes)",
+                body.len()
+            ),
+            "shorten the instructions, or move reference material into files under references/",
+        );
+        return None;
+    }
+    Some(Skill {
+        id: id.to_string(),
+        name: name?.value,
+        description: description?.value,
+        license: value(f.text(rep, "license")),
+        metadata,
+        asks_for,
+        body: body.to_string(),
+        references: BTreeMap::new(),
+    })
+}
+
+const SKILL_BODY_MAX_BYTES: usize = 64 * 1024;
+
+/// The six DESIGN avatar tints.
+const TINTS: &[&str] = &["slate", "steel", "sage", "stone", "plum", "clay"];
+const GOAL_MAX_CHARS: usize = 500;
+const BACKSTORY_MAX_CHARS: usize = 2_000;
+const FOLDER_FIX: &str = "link a folder inside the project (e.g. `path: notes`) or under your home folder (e.g. `path: ~/Documents/notes`); never /, ~, ~/Library or a .agentic folder";
+
+/// Where a seat's relative paths resolve: the project folder and the
+/// owner's home folder (when known). Resolution is lexical: nothing follows
+/// a symlink at validate time.
+#[derive(Default)]
+pub(crate) struct Places {
+    pub project: PathBuf,
+    pub home: Option<PathBuf>,
+}
+
+/// Plain text of at most `max` characters (counted as chars).
+fn max_chars(rep: &mut Report, t: &Text, name: &str, max: usize) -> bool {
+    let n = t.value.chars().count();
+    if n <= max {
+        return true;
+    }
+    rep.error(
+        t.line,
+        format!("{name} is {n} characters; the limit is {max}"),
+        format!("shorten {name} to at most {max} characters"),
+    );
+    false
+}
+
+/// Compiles a path glob (anchored, `*` stays within one path segment).
+fn glob(rep: &mut Report, t: &Text) -> bool {
+    match globset::GlobBuilder::new(&t.value)
+        .literal_separator(true)
+        .build()
+    {
+        Ok(_) => true,
+        Err(e) => {
+            rep.error(
+                t.line,
+                format!("glob '{}' does not compile: {}", t.value, e.kind()),
+                "fix the pattern: `*` matches within a folder, `**` across folders, `[abc]` needs its closing `]`",
+            );
+            false
+        }
+    }
+}
+
+/// The globs listed under `name`, each checked.
+fn globs(rep: &mut Report, f: &Fields, name: &str) -> Vec<String> {
+    f.texts(rep, name)
+        .into_iter()
+        .filter(|t| glob(rep, t))
+        .map(|t| t.value)
+        .collect()
+}
+
+/// Lexically normalised components of `path` (split on `/`), and how many
+/// `..` steps climbed above its start.
+fn normalise(path: &str) -> (Vec<String>, usize) {
+    let mut stack: Vec<String> = Vec::new();
+    let mut ups = 0;
+    for part in path.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                if stack.pop().is_none() {
+                    ups += 1;
+                }
+            }
+            p => stack.push(p.to_string()),
+        }
+    }
+    (stack, ups)
+}
+
+/// The components of an absolute path, without the root, normalised
+/// lexically (`std::path::absolute` keeps `..` on Unix): `..` pops.
+fn components(path: &Path) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for c in path.components() {
+        match c {
+            std::path::Component::Normal(s) => out.push(s.to_string_lossy().into_owned()),
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// True for a `.agentic` path component, ignoring case (APFS does).
+fn is_agentic(component: &str) -> bool {
+    component.eq_ignore_ascii_case(".agentic")
+}
+
+const PROJECT_REFUSED: &str = "it is the project folder itself, which holds .agentic/";
+const ANCESTOR_REFUSED: &str = "it holds the project folder, which holds .agentic/";
+
+/// `base` (absolute components) climbed by `ups` then extended by `rest`.
+fn climb(base: &[String], ups: usize, rest: &[String]) -> Vec<String> {
+    let keep = base.len().saturating_sub(ups);
+    let mut out = base[..keep].to_vec();
+    out.extend(rest.iter().cloned());
+    out
+}
+
+/// Why an absolute location may not be linked, if it may not.
+fn refused_location(
+    abs: &[String],
+    home: Option<&[String]>,
+    project: &[String],
+) -> Option<&'static str> {
+    if abs.is_empty() {
+        return Some("it is the filesystem root");
+    }
+    if abs.iter().any(|c| is_agentic(c)) {
+        return Some("a .agentic folder holds the app's runtime files");
+    }
+    if let Some(home) = home {
+        if abs == home {
+            return Some("it is the home folder itself");
+        }
+        if abs.len() > home.len()
+            && abs[..home.len()] == *home
+            && abs[home.len()].eq_ignore_ascii_case("library")
+        {
+            return Some("~/Library holds the app data folder and system files");
+        }
+    }
+    if !project.is_empty() && abs.len() <= project.len() && project[..abs.len()] == *abs {
+        return Some(if abs.len() == project.len() {
+            PROJECT_REFUSED
+        } else {
+            ANCESTOR_REFUSED
+        });
+    }
+    None
+}
+
+/// Checks a linked folder's path (AD-30) and returns where it resolves to
+/// on disk when that can be known, for the existence check. `None` (with an
+/// error) when the path is refused.
+fn folder_location(rep: &mut Report, places: &Places, t: &Text) -> Option<Option<PathBuf>> {
+    let written = t.value.as_str();
+    let refuse = |rep: &mut Report, why: &str| {
+        rep.error(
+            t.line,
+            format!("folder path '{written}' is not allowed: {why}"),
+            FOLDER_FIX,
+        );
+    };
+    if written.split('/').any(is_agentic) {
+        refuse(rep, "a .agentic folder holds the app's runtime files");
+        return None;
+    }
+    if written.starts_with('/') {
+        refuse(
+            rep,
+            "an absolute path; write it relative to the project or to ~/",
+        );
+        return None;
+    }
+    let home = places.home.as_deref().map(components);
+    let project = std::path::absolute(&places.project)
+        .map(|p| components(&p))
+        .unwrap_or_default();
+    let (home_relative, rest) = if written == "~" {
+        (true, "")
+    } else if let Some(rest) = written.strip_prefix("~/") {
+        (true, rest)
+    } else if written.starts_with('~') {
+        refuse(rep, "write ~/ for your own home folder");
+        return None;
+    } else {
+        (false, written)
+    };
+    let (parts, ups) = normalise(rest);
+    if home_relative {
+        if ups == 0 {
+            if parts.is_empty() {
+                refuse(rep, "it is the home folder itself");
+                return None;
+            }
+            if parts[0].eq_ignore_ascii_case("library") {
+                refuse(rep, "~/Library holds the app data folder and system files");
+                return None;
+            }
+            let Some(home) = &home else {
+                return Some(None);
+            };
+            let abs = climb(home, 0, &parts);
+            if let Some(why) = refused_location(&abs, Some(home), &project) {
+                refuse(rep, why);
+                return None;
+            }
+            return Some(Some(PathBuf::from(format!("/{}", abs.join("/")))));
+        }
+        let Some(home) = &home else {
+            refuse(rep, "it climbs above the home folder");
+            return None;
+        };
+        let abs = climb(home, ups, &parts);
+        if let Some(why) = refused_location(&abs, Some(home), &project) {
+            refuse(rep, why);
+            return None;
+        }
+        return Some(Some(PathBuf::from(format!("/{}", abs.join("/")))));
+    }
+    if ups == 0 {
+        if parts.is_empty() {
+            refuse(rep, PROJECT_REFUSED);
+            return None;
+        }
+        return Some(Some(places.project.join(parts.join("/"))));
+    }
+    // It climbs out of the project: judge where it lands.
+    let abs = climb(&project, ups, &parts);
+    if let Some(why) = refused_location(&abs, home.as_deref(), &project) {
+        refuse(rep, why);
+        return None;
+    }
+    Some(Some(PathBuf::from(format!("/{}", abs.join("/")))))
+}
+
+/// A seat's `capabilities:` with the defaults filled in (AD-46).
+fn seat_capabilities(
+    rep: &mut Report,
+    refs: &mut Refs,
+    f: &Fields,
+) -> BTreeMap<Capability, CapabilitySetting> {
+    let mut out: BTreeMap<Capability, CapabilitySetting> = Capability::all()
+        .into_iter()
+        .map(|c| {
+            (
+                c,
+                CapabilitySetting {
+                    on: c.default_on(),
+                    provider: BUILTIN_PROVIDER.to_string(),
+                },
+            )
+        })
+        .collect();
+    let Some(node) = f.get("capabilities") else {
+        return out;
+    };
+    if node.kind == Kind::Null {
+        return out;
+    }
+    let Some(c) = fields(rep, node, "capabilities") else {
+        return out;
+    };
+    let ids: Vec<&str> = Capability::all().iter().map(|c| c.id()).collect();
+    let mut allowed = ids.clone();
+    allowed.push(LEGACY_FOLDER_ACCESS_KEY);
+    c.allow(rep, &allowed);
+    let both = c.get("folder_access").is_some();
+    for (key, value) in c.entries {
+        let cap = if key.name == LEGACY_FOLDER_ACCESS_KEY {
+            if both {
+                rep.error(
+                    key.line,
+                    "both 'documents' and 'folder_access' are set; 'documents' is the old name of folder_access",
+                    "remove `documents:` and keep `folder_access:`",
+                );
+                continue;
+            }
+            Capability::FolderAccess
+        } else if let Some(cap) = Capability::parse(&key.name) {
+            cap
+        } else {
+            continue; // reported by allow()
+        };
+        let Some(e) = fields(rep, value, "capability") else {
+            continue;
+        };
+        e.allow(rep, &["on", "provider"]);
+        let on = e.bool(rep, "on");
+        if e.absent("on") {
+            rep.error(
+                key.line,
+                format!("capability '{}' is missing 'on'", key.name),
+                format!("add `on: true` or `on: false` under `{}:`", key.name),
+            );
+        }
+        let mut provider = BUILTIN_PROVIDER.to_string();
+        if let Some(p) = e.text(rep, "provider")
+            && p.value != BUILTIN_PROVIDER
+        {
+            match cap.provider_kind() {
+                None => rep.error(
+                    p.line,
+                    format!(
+                        "{} offers the built-in provider only, not '{}'",
+                        cap.id(),
+                        p.value
+                    ),
+                    "set `provider: builtin` or remove the provider line",
+                ),
+                Some(kind) => {
+                    refs.push(
+                        rep,
+                        p.line,
+                        RefKind::AccountOfKind {
+                            want: kind,
+                            user: cap.id().to_string(),
+                            alternative: Some("set `provider: builtin`".into()),
+                        },
+                        &p.value,
+                    );
+                    provider = p.value;
+                }
+            }
+        }
+        out.insert(
+            cap,
+            CapabilitySetting {
+                on: on.unwrap_or(cap.default_on()),
+                provider,
+            },
+        );
+    }
+    out
+}
+
+/// A seat's `folders:` (AD-30).
+fn seat_folders(rep: &mut Report, places: &Places, f: &Fields) -> Vec<Folder> {
+    let mut out = Vec::new();
+    let mut ids = Vec::new();
+    for item in f.list(rep, "folders") {
+        let Some(fo) = fields(rep, item, "folder") else {
+            continue;
+        };
+        fo.allow(rep, &["id", "path", "access", "include", "exclude"]);
+        let id = fo.req_id(rep, "id");
+        let path = fo.req_text(rep, "path", "notes");
+        let access = match fo.choice(rep, "access", &["read", "read_write"]) {
+            Some(a) if a.value == "read_write" => Access::ReadWrite,
+            _ => Access::Read,
+        };
+        let include = globs(rep, &fo, "include");
+        let exclude = globs(rep, &fo, "exclude");
+        let mut path_ok = false;
+        if let Some(p) = &path
+            && let Some(location) = folder_location(rep, places, p)
+        {
+            path_ok = true;
+            if let Some(location) = location {
+                match std::fs::metadata(&location) {
+                    Ok(m) if m.is_dir() => {}
+                    Ok(_) => {
+                        path_ok = false;
+                        rep.error(
+                            p.line,
+                            format!("folder path '{}' is not a folder", p.value),
+                            "link a folder, not a file",
+                        );
+                    }
+                    Err(_) => rep.warning(
+                        p.line,
+                        format!("folder '{}' does not exist yet", p.value),
+                        "create the folder or fix the path; the app checks it again when it links the folder",
+                    ),
+                }
+            }
+        }
+        if let Some(id) = &id {
+            ids.push(id.clone());
+        }
+        if let (Some(id), Some(path), true) = (id, path, path_ok) {
+            out.push(Folder {
+                id: id.value,
+                path: path.value,
+                access,
+                include,
+                exclude,
+            });
+        }
+    }
+    unique(rep, "folder", &ids);
+    out
+}
+
+/// A seat's `knowledge:` entries; a missing file is a warning, since the
+/// `.agentic/` folder does not travel with the project (AD-38).
+fn seat_knowledge(
+    rep: &mut Report,
+    places: &Places,
+    stem: &str,
+    f: &Fields,
+) -> Vec<KnowledgeEntry> {
+    let mut out = Vec::new();
+    let mut files = Vec::new();
+    for item in f.list(rep, "knowledge") {
+        let Some(k) = fields(rep, item, "knowledge entry") else {
+            continue;
+        };
+        k.allow(rep, &["file", "note"]);
+        let Some(file) = k.req_text(rep, "file", "reference.md") else {
+            continue;
+        };
+        let bad = file.value.starts_with('/')
+            || file.value.starts_with('~')
+            || file.value.contains('\\')
+            || file.value.split('/').any(|c| c == ".." || c.is_empty());
+        if bad {
+            rep.error(
+                file.line,
+                format!(
+                    "reference file '{}' must be a name inside .agentic/knowledge/{stem}/",
+                    file.value
+                ),
+                format!(
+                    "write the file name relative to .agentic/knowledge/{stem}/, without `..`, `~` or a leading /"
+                ),
+            );
+            continue;
+        }
+        let on_disk = places
+            .project
+            .join(".agentic/knowledge")
+            .join(stem)
+            .join(&file.value);
+        if !on_disk.is_file() {
+            rep.warning(
+                file.line,
+                format!(
+                    "reference file '{}' is not in .agentic/knowledge/{stem}/",
+                    file.value
+                ),
+                "copy the file there (that folder does not travel with the project), or remove the entry",
+            );
+        }
+        files.push(file.clone());
+        out.push(KnowledgeEntry {
+            file: file.value,
+            note: value(k.text(rep, "note")),
+        });
+    }
+    unique(rep, "reference file", &files);
+    out
+}
+
+/// The host of an http or https URL, or `None`.
+fn http_host(text: &str) -> Option<String> {
+    let u = url::Url::parse(text).ok()?;
+    if !matches!(u.scheme(), "http" | "https") {
+        return None;
+    }
+    u.host_str()
+        .filter(|h| !h.is_empty())
+        .map(|h| h.to_ascii_lowercase())
+}
+
+/// A seat's saved `links:`; a host off the allow-list is a warning.
+fn seat_links(rep: &mut Report, refs: &mut Refs, stem: &str, f: &Fields) -> Vec<Link> {
+    let mut out = Vec::new();
+    for item in f.list(rep, "links") {
+        let Some(l) = fields(rep, item, "link") else {
+            continue;
+        };
+        l.allow(rep, &["title", "url", "group"]);
+        let title = l.req_text(rep, "title", "Link title");
+        let url = l.req_text(rep, "url", "https://…");
+        let url = url.filter(|u| match http_host(&u.value) {
+            Some(host) => {
+                refs.host(
+                    rep,
+                    u.line,
+                    &host,
+                    stem,
+                    "link",
+                    format!(
+                        "allow {host} for this seat (add it to egress_hosts in tools.yaml; the app confirms a new host), or remove the link"
+                    ),
+                );
+                true
+            }
+            None => {
+                rep.error(
+                    u.line,
+                    format!("link '{}' is not an http or https URL", u.value),
+                    "use a web address starting with https:// (or http://)",
+                );
+                false
+            }
+        });
+        if let (Some(title), Some(url)) = (title, url) {
+            out.push(Link {
+                title: title.value,
+                url: url.value,
+                group: value(l.text(rep, "group")),
+            });
+        }
+    }
+    out
+}
+
 /// A seat's frontmatter (already parsed) plus its body.
 pub(crate) fn seat(
     rep: &mut Report,
     refs: &mut Refs,
+    places: &Places,
     stem: &str,
     root: &Node,
     body: &str,
@@ -717,10 +1357,19 @@ pub(crate) fn seat(
             "team",
             "description",
             "reports_to",
+            "goal",
+            "backstory",
+            "avatar",
             "model",
             "fallback",
+            "capabilities",
+            "skills",
             "tools",
             "budget",
+            "knowledge",
+            "links",
+            "folders",
+            "text_fallback",
         ],
     );
     id_is_stem(rep, &f, stem, "md");
@@ -735,6 +1384,26 @@ pub(crate) fn seat(
         refs.push(rep, r.line, RefKind::Seat, &r.value);
         refs.edge(rep, Tree::ReportsTo, stem, &r.value, r.line);
     }
+    let goal = f
+        .text(rep, "goal")
+        .filter(|t| max_chars(rep, t, "goal", GOAL_MAX_CHARS));
+    let backstory = f
+        .text(rep, "backstory")
+        .filter(|t| max_chars(rep, t, "backstory", BACKSTORY_MAX_CHARS));
+    let avatar = f.get("avatar").and_then(|n| {
+        let a = fields(rep, n, "avatar")?;
+        a.allow(rep, &["tint"]);
+        if a.absent("tint") {
+            rep.error(
+                a.line,
+                "avatar is missing 'tint'",
+                format!("add `tint:` with one of: {}", TINTS.join(", ")),
+            );
+        }
+        Some(Avatar {
+            tint: a.choice(rep, "tint", TINTS)?.value,
+        })
+    });
     let model = f
         .get("model")
         .and_then(|n| model_ref(rep, refs, n, "model"));
@@ -743,9 +1412,76 @@ pub(crate) fn seat(
         .into_iter()
         .filter_map(|n| model_ref(rep, refs, n, "fallback model"))
         .collect();
+    let capabilities = seat_capabilities(rep, refs, &f);
+    let folders = seat_folders(rep, places, &f);
+    if !folders.is_empty()
+        && !capabilities[&Capability::FolderAccess].on
+        && let Some((key, _)) = f.entries.iter().find(|(k, _)| k.name == "folders")
+    {
+        rep.warning(
+            key.line,
+            "folders are linked but folder_access is off, so this seat cannot read them",
+            "switch on folder_access, or remove the folders",
+        );
+    }
+    let text_fallback = f.bool(rep, "text_fallback").unwrap_or(false);
+    let skills = f.ids(rep, "skills");
+    for s in &skills {
+        refs.push(rep, s.line, RefKind::Skill, &s.value);
+    }
+    unique(rep, "skill", &skills);
+    let knowledge = seat_knowledge(rep, places, stem, &f);
+    let links = seat_links(rep, refs, stem, &f);
+
+    // Grants: the capability expansion, read_skill_file with a skill, then
+    // the listed tools that belong to no capability. Never a skill's
+    // allowed-tools (AD-38).
+    let on: Vec<Capability> = capabilities
+        .iter()
+        .filter(|(_, s)| s.on)
+        .map(|(c, _)| *c)
+        .collect();
+    let read_write = folders.iter().any(|f| f.access == Access::ReadWrite);
+    let mut grants: BTreeSet<String> = capability::expand(&on, read_write);
+    if !skills.is_empty() {
+        grants.insert(SKILL_TOOL.to_string());
+    }
     let tools = f.texts(rep, "tools");
     for t in &tools {
         refs.push(rep, t.line, RefKind::Tool, &t.value);
+        if builtin_tool(&t.value).is_none() {
+            grants.insert(t.value.clone()); // an MCP tool (or unknown, reported)
+            continue;
+        }
+        match capability_of_tool(&t.value) {
+            None if t.value == SKILL_TOOL && skills.is_empty() => rep.error(
+                t.line,
+                "read_skill_file comes with an attached skill",
+                "attach a skill under `skills:`, or remove read_skill_file from tools",
+            ),
+            None => {
+                grants.insert(t.value.clone());
+            }
+            Some(cap) if !on.contains(&cap) => rep.error(
+                t.line,
+                format!(
+                    "tool '{}' needs the {} capability, which is off",
+                    t.value,
+                    cap.id()
+                ),
+                format!(
+                    "switch on {0} in capabilities (`{0}: {{ on: true }}`), or remove {1} from tools",
+                    cap.id(),
+                    t.value
+                ),
+            ),
+            Some(_) if t.value == FOLDER_WRITE_TOOL && !read_write => rep.error(
+                t.line,
+                "tool 'write_file' needs a folder linked read_write",
+                "link a folder with `access: read_write` under folders:, or remove write_file from tools",
+            ),
+            Some(_) => {}
+        }
     }
     unique(rep, "tool", &tools);
     let budget = f.get("budget").and_then(|n| {
@@ -767,8 +1503,30 @@ pub(crate) fn seat(
         fallback,
         tools: tools.into_iter().map(|t| t.value).collect(),
         budget,
+        goal: value(goal),
+        backstory: value(backstory),
+        avatar,
+        capabilities,
+        folders,
+        text_fallback,
+        skills: skills.into_iter().map(|s| s.value).collect(),
+        knowledge,
+        links,
+        grants,
         instructions: body.to_string(),
     })
+}
+
+/// True when a seat's frontmatter switches `crawl` on, read from the node
+/// so that one local error does not cascade into Source errors.
+pub(crate) fn declared_crawl_on(root: &Node) -> bool {
+    root.as_map()
+        .and_then(|m| m.iter().find(|(k, _)| k.name == "capabilities"))
+        .and_then(|(_, caps)| caps.as_map())
+        .and_then(|m| m.iter().find(|(k, _)| k.name == Capability::Crawl.id()))
+        .and_then(|(_, c)| c.as_map())
+        .and_then(|m| m.iter().find(|(k, _)| k.name == "on"))
+        .is_some_and(|(_, v)| v.kind == Kind::Bool(true))
 }
 
 /// `workflows/<id>.yaml`.
@@ -842,10 +1600,26 @@ pub(crate) fn workflow(
                 "description",
                 "output_schema",
                 "max_tokens",
+                // Run-graph keys (AD-40..AD-42), declared here and checked
+                // from epic 3 (stories 3.14-3.16) and 4.15.
+                "seats",
+                "join",
+                "over_folder",
+                "routes",
+                "files",
+                "handoff",
+                "review",
+                "max_parallel",
             ],
         );
         let id = s.req_id(rep, "id");
-        let seat = s.req_id(rep, "seat");
+        // A fan-out step names its seats (or its folder routes) instead.
+        let fan_out = !s.absent("seats") || !s.absent("over_folder");
+        let seat = if fan_out {
+            s.id(rep, "seat")
+        } else {
+            s.req_id(rep, "seat")
+        };
         if let Some(seat) = &seat {
             refs.push(rep, seat.line, RefKind::Seat, &seat.value);
         }
@@ -858,10 +1632,10 @@ pub(crate) fn workflow(
         if let Some(id) = &id {
             step_ids.push(id.clone());
         }
-        if let (Some(id), Some(seat), Some(instruction)) = (id, seat, instruction) {
+        if let (Some(id), true, Some(instruction)) = (id, seat.is_some() || fan_out, instruction) {
             steps.push(Step {
                 id: id.value,
-                seat: seat.value,
+                seat: value(seat),
                 instruction: instruction.value,
                 description: value(s.text(rep, "description")),
                 output_schema: value(output_schema),
@@ -1242,12 +2016,430 @@ pub(crate) fn dashboard(
     })
 }
 
-/// `sources/<id>.yaml`: the checks every file gets and `id` = stem; its
-/// schema is validated from E1 story 12.
-pub(crate) fn source(rep: &mut Report, stem: &str, root: &Node) {
-    if let Some(f) = fields(rep, root, "source") {
-        id_is_stem(rep, &f, stem, "yaml");
+const SOURCE_TYPES: &[&str] = &[
+    "web-search",
+    "http-reader",
+    "crawler",
+    "api",
+    "feed",
+    "local-repository",
+    "knowledge",
+    "database",
+    "mcp",
+    "action",
+];
+/// Source types that read websites: they carry `terms_checked`.
+const WEBSITE_TYPES: &[&str] = &["http-reader", "crawler", "feed"];
+/// Source types that may render pages built by scripts (AD-39).
+const RENDER_TYPES: &[&str] = &["http-reader", "crawler"];
+
+/// An http or https URL in a Source's scope; its host, when it is one.
+fn scope_url(rep: &mut Report, t: &Text) -> Option<String> {
+    let host = http_host(&t.value);
+    if host.is_none() {
+        rep.error(
+            t.line,
+            format!("'{}' is not an http or https URL", t.value),
+            "use a web address starting with https:// (or http://)",
+        );
     }
+    host
+}
+
+/// Records a scope host for the owner seat's allow-list warning.
+fn scope_host(rep: &mut Report, refs: &mut Refs, owner: Option<&Text>, line: u32, host: &str) {
+    if let Some(owner) = owner {
+        refs.host(
+            rep,
+            line,
+            host,
+            &owner.value,
+            "scope",
+            format!(
+                "allow {host} for seat '{}' (add it to egress_hosts in tools.yaml; the app confirms a new host), or change the scope",
+                owner.value
+            ),
+        );
+    }
+}
+
+/// The line of `key` in `f`, or the mapping's line.
+fn key_line(f: &Fields, key: &str) -> u32 {
+    f.entries
+        .iter()
+        .find(|(k, _)| k.name == key)
+        .map_or(f.line, |(k, _)| k.line)
+}
+
+fn source_scope(
+    rep: &mut Report,
+    refs: &mut Refs,
+    owner: Option<&Text>,
+    node: &Node,
+) -> SourceScope {
+    let Some(s) = fields(rep, node, "scope") else {
+        return SourceScope::default();
+    };
+    s.allow(
+        rep,
+        &[
+            "seeds",
+            "url",
+            "include",
+            "exclude",
+            "allowed_hosts",
+            "max_depth",
+        ],
+    );
+    let mut seeds = Vec::new();
+    for t in s.texts(rep, "seeds") {
+        if let Some(host) = scope_url(rep, &t) {
+            scope_host(rep, refs, owner, t.line, &host);
+            seeds.push(t.value);
+        }
+    }
+    let url = s.text(rep, "url").filter(|t| match scope_url(rep, t) {
+        Some(host) => {
+            scope_host(rep, refs, owner, t.line, &host);
+            true
+        }
+        None => false,
+    });
+    let include = globs(rep, &s, "include");
+    let exclude = globs(rep, &s, "exclude");
+    let mut allowed_hosts = Vec::new();
+    for h in s.texts(rep, "allowed_hosts") {
+        let ok = !h.value.is_empty()
+            && h.value
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+            && h.value.contains('.');
+        if ok {
+            scope_host(rep, refs, owner, h.line, &h.value.to_ascii_lowercase());
+            allowed_hosts.push(h.value);
+        } else {
+            rep.error(
+                h.line,
+                format!("'{}' is not a host name", h.value),
+                "write the host only, without scheme or path, e.g. `- example.org`",
+            );
+        }
+    }
+    SourceScope {
+        seeds,
+        url: value(url),
+        include,
+        exclude,
+        allowed_hosts,
+        max_depth: s.int(rep, "max_depth", 0, 10).map(|v| v as u32),
+    }
+}
+
+fn source_limits(rep: &mut Report, node: &Node) -> SourceLimits {
+    let Some(l) = fields(rep, node, "limits") else {
+        return SourceLimits::default();
+    };
+    l.allow(
+        rep,
+        &[
+            "max_items_per_load",
+            "max_bytes_per_load",
+            "max_loads_per_day",
+            "max_spend_per_load",
+            "rate_per_host",
+        ],
+    );
+    let rate_per_host_ms = l.get("rate_per_host").and_then(|n| {
+        let seconds =
+            match n.kind {
+                Kind::Int(i) => i as f64,
+                Kind::Float(f) => f,
+                Kind::Null => return None,
+                _ => {
+                    rep.error(
+                    n.line,
+                    format!("'rate_per_host' must be a number of seconds, not {}", n.type_name()),
+                    "set `rate_per_host:` to the seconds between requests to one host, at least 1",
+                );
+                    return None;
+                }
+            };
+        if !(1.0..=86_400.0).contains(&seconds) {
+            rep.error(
+                n.line,
+                format!("'rate_per_host' is {seconds} seconds; it must be from 1 to 86400 seconds"),
+                "set `rate_per_host:` to the seconds between requests to one host, from 1 to 86400",
+            );
+            return None;
+        }
+        Some((seconds * 1000.0).round() as u64)
+    });
+    SourceLimits {
+        max_items_per_load: l
+            .int(rep, "max_items_per_load", 1, 10_000)
+            .map(|v| v as u32),
+        max_bytes_per_load: l
+            .int(rep, "max_bytes_per_load", 1, 1_000_000_000)
+            .map(|v| v as u64),
+        max_loads_per_day: l.int(rep, "max_loads_per_day", 1, 96).map(|v| v as u32),
+        max_spend_per_load: l.micros(rep, "max_spend_per_load"),
+        rate_per_host_ms,
+    }
+}
+
+const OUTPUT_FIX: &str = "write exactly one of `table: <table-id>` (with `key:` and `mapping:`), `records: true` or `knowledge: seat` (or team)";
+
+fn source_output(rep: &mut Report, refs: &mut Refs, f: &Fields) -> Option<SourceOutput> {
+    if f.absent("output") {
+        rep.error(f.line, "source is missing 'output'", OUTPUT_FIX);
+        return None;
+    }
+    let line = key_line(f, "output");
+    let o = fields(rep, f.get("output")?, "output")?;
+    o.allow(rep, &["table", "key", "mapping", "records", "knowledge"]);
+    let forms = ["table", "records", "knowledge"]
+        .iter()
+        .filter(|k| !o.absent(k))
+        .count();
+    if forms != 1 {
+        rep.error(
+            line,
+            "output must have exactly one of table, records or knowledge",
+            OUTPUT_FIX,
+        );
+        return None;
+    }
+    if o.absent("table") {
+        for k in ["key", "mapping"] {
+            if !o.absent(k) {
+                rep.error(
+                    key_line(&o, k),
+                    format!("'{k}' goes with a table output"),
+                    format!("remove `{k}:`, or write the output as `table: <table-id>`"),
+                );
+            }
+        }
+    }
+    if !o.absent("records") {
+        return match o.bool(rep, "records") {
+            Some(true) => Some(SourceOutput::Records),
+            Some(false) => {
+                rep.error(
+                    key_line(&o, "records"),
+                    "'records: false' gives the Source nowhere to put its items",
+                    OUTPUT_FIX,
+                );
+                None
+            }
+            None => None,
+        };
+    }
+    if !o.absent("knowledge") {
+        let scope = o.choice(rep, "knowledge", &["seat", "team"])?;
+        return Some(SourceOutput::Knowledge { scope: scope.value });
+    }
+    let table = o.id(rep, "table");
+    if let Some(t) = &table {
+        refs.push(rep, t.line, RefKind::Table, &t.value);
+    }
+    let key = o.req_text(rep, "key", "column_id");
+    if let (Some(t), Some(k)) = (&table, &key) {
+        refs.push(rep, k.line, RefKind::TableColumn(t.value.clone()), &k.value);
+    }
+    let mut mapping = BTreeMap::new();
+    match o.get("mapping") {
+        None => rep.error(
+            o.line,
+            "a table output needs 'mapping'",
+            "add `mapping:` with one `<column>: <source field>` line per column",
+        ),
+        Some(node) => {
+            if let Some(m) = fields(rep, node, "mapping") {
+                for (column, field) in m.entries {
+                    if let Some(t) = &table {
+                        refs.push(
+                            rep,
+                            column.line,
+                            RefKind::TableColumn(t.value.clone()),
+                            &column.name,
+                        );
+                    }
+                    match &field.kind {
+                        Kind::Str(s) if !s.trim().is_empty() => {
+                            mapping.insert(column.name.clone(), s.clone());
+                        }
+                        _ => rep.error(
+                            field.line,
+                            format!(
+                                "mapping for column '{}' must name a source field",
+                                column.name
+                            ),
+                            format!("write `{}: <source field>`", column.name),
+                        ),
+                    }
+                }
+            }
+        }
+    }
+    Some(SourceOutput::Table {
+        table: table?.value,
+        key: key?.value,
+        mapping,
+    })
+}
+
+/// `sources/<id>.yaml` (AD-39).
+pub(crate) fn source(
+    rep: &mut Report,
+    refs: &mut Refs,
+    stem: &str,
+    root: &Node,
+    text: &str,
+) -> Option<Source> {
+    let f = fields(rep, root, "source")?;
+    f.allow(
+        rep,
+        &[
+            "schema_version",
+            "id",
+            "name",
+            "description",
+            "type",
+            "owner_seat",
+            "account",
+            "scope",
+            "trigger",
+            "limits",
+            "output",
+            "render",
+            "terms_checked",
+        ],
+    );
+    id_is_stem(rep, &f, stem, "yaml");
+    let source_type = f.choice(rep, "type", SOURCE_TYPES);
+    if f.absent("type") {
+        rep.error(
+            f.line,
+            "source is missing 'type'",
+            format!("add `type:` with one of: {}", SOURCE_TYPES.join(", ")),
+        );
+    }
+    let kind = source_type
+        .as_ref()
+        .map(|t| t.value.clone())
+        .unwrap_or_default();
+    let owner = f.req_id(rep, "owner_seat");
+    if let Some(o) = &owner {
+        refs.push(rep, o.line, RefKind::Seat, &o.value);
+        if kind == "crawler" {
+            refs.push(rep, o.line, RefKind::CrawlOwner, &o.value);
+        }
+    }
+    let account = f.id(rep, "account");
+    if let Some(a) = &account {
+        let want = match kind.as_str() {
+            "crawler" | "http-reader" => Some(Some((
+                AccountKind::CrawlService,
+                "remove `account:` to use the built-in reader",
+            ))),
+            "web-search" => Some(Some((
+                AccountKind::Search,
+                "remove `account:` to use Local search",
+            ))),
+            "api" => Some(None),
+            "" => Some(None),
+            _ => None,
+        };
+        match want {
+            Some(Some((want, alternative))) => refs.push(
+                rep,
+                a.line,
+                RefKind::AccountOfKind {
+                    want,
+                    user: format!("a {kind} Source"),
+                    alternative: Some(alternative.into()),
+                },
+                &a.value,
+            ),
+            Some(None) => refs.push(rep, a.line, RefKind::Account, &a.value),
+            None => rep.error(
+                a.line,
+                format!("a {kind} Source takes no account"),
+                "remove `account:`",
+            ),
+        }
+    }
+    let scope = f
+        .get("scope")
+        .filter(|n| n.kind != Kind::Null)
+        .map(|n| source_scope(rep, refs, owner.as_ref(), n))
+        .unwrap_or_default();
+    let trigger = f
+        .get("trigger")
+        .filter(|n| n.kind != Kind::Null)
+        .and_then(|n| trigger(rep, refs, n));
+    let limits = f
+        .get("limits")
+        .filter(|n| n.kind != Kind::Null)
+        .map(|n| source_limits(rep, n))
+        .unwrap_or_default();
+    let output = source_output(rep, refs, &f);
+    let render = f.bool(rep, "render").unwrap_or(false);
+    if render && !kind.is_empty() && !RENDER_TYPES.contains(&kind.as_str()) {
+        rep.error(
+            key_line(&f, "render"),
+            format!("render: true is only for http-reader and crawler Sources, not {kind}"),
+            "remove `render: true`; only http-reader and crawler Sources render pages built by scripts",
+        );
+    }
+    let terms_fix =
+        "check that the site's terms allow automated access, then set `terms_checked: YYYY-MM-DD`";
+    let terms = f.text(rep, "terms_checked");
+    let terms_checked = match terms {
+        Some(t) if !t.value.trim().is_empty() => {
+            if t.value.parse::<jiff::civil::Date>().is_ok() {
+                Some(t.value)
+            } else {
+                rep.error(
+                    t.line,
+                    format!("'{}' is not a date", t.value),
+                    "write the date you checked the site's terms as YYYY-MM-DD",
+                );
+                None
+            }
+        }
+        Some(t) => {
+            if WEBSITE_TYPES.contains(&kind.as_str()) {
+                rep.warning(t.line, "terms_checked is empty", terms_fix);
+            }
+            None
+        }
+        None => {
+            if WEBSITE_TYPES.contains(&kind.as_str()) {
+                rep.warning(
+                    1,
+                    format!("a {kind} Source has no terms_checked date"),
+                    terms_fix,
+                );
+            }
+            None
+        }
+    };
+    Some(Source {
+        id: stem.to_string(),
+        name: value(f.text(rep, "name")),
+        description: value(f.text(rep, "description")),
+        source_type: source_type?.value,
+        owner_seat: owner?.value,
+        account: value(account),
+        scope,
+        trigger,
+        limits,
+        output: output?,
+        render,
+        terms_checked,
+        text: text.to_string(),
+    })
 }
 
 /// `schemas/<id>.json`: valid JSON, a JSON Schema, `schema_version: 1`.
@@ -1316,6 +2508,19 @@ pub(crate) fn declared_ids(root: &Node, key: &str) -> Vec<String> {
         .into_iter()
         .filter_map(|item| str_at(item, "id"))
         .collect()
+}
+
+/// The `(id, provider)` of each Account declared in accounts.yaml.
+pub(crate) fn declared_account_providers(root: &Node) -> Vec<(String, String)> {
+    items_at(root, "accounts")
+        .into_iter()
+        .filter_map(|item| Some((str_at(item, "id")?, str_at(item, "provider")?)))
+        .collect()
+}
+
+/// A table's declared column ids.
+pub(crate) fn declared_columns(root: &Node) -> Vec<String> {
+    declared_ids(root, "columns")
 }
 
 /// A workflow's declared team and step ids.

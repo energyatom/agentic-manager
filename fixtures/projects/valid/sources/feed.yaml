@@ -8,3 +8,4 @@ limits:
   max_items_per_load: 50
 output:
   records: true
+terms_checked: 2026-11-01

@@ -1,0 +1,11 @@
+schema_version: 1
+accounts:
+  - id: finder
+    provider: tavily
+    name: Search account
+    secret_ref: finder
+  - id: crawly
+    provider: firecrawl
+    name: Crawl service
+    base_url: https://crawl.example.org
+    secret_ref: crawly

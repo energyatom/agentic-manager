@@ -1,0 +1,8 @@
+schema_version: 1
+type: http-reader
+owner_seat: owner
+scope:
+  url: https://elsewhere.example.net/page
+output:
+  knowledge: seat
+terms_checked: ""

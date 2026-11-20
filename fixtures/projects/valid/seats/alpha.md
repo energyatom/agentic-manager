@@ -7,6 +7,14 @@ description: Gathers the new items.
 model:
   account: local-lmstudio
   model: example-local
+capabilities:
+  web_search:
+    on: true
+    provider: builtin
+  tables:
+    on: true
+skills:
+  - brief
 tools:
   - web_search
   - table_read
