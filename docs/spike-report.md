@@ -10,7 +10,7 @@ Each verdict links its runnable test or recorded demo.
 |---|---|---|---|
 | 1 | Provider port (Anthropic + OpenAI-compatible, streaming, tool calls, usage, cancel within 1 s) | **Pass (live).** Frontier half on the owner's Anthropic key (`claude-opus-5-5`). LM Studio half on `google/gemma-4-e4b`. A second local run on the reasoning model `qwen/qwen3.5-9b` streamed no answer text before the cancel; that is a finding for epic 2 (finding 8), not a failure of the criterion. | [`c1_providers.rs`](../crates/am-e2e/tests/spike/c1_providers.rs): recorded-fixture tests for both adapters, and the live tests `live_anthropic_c1` and `live_lm_studio_c1`. [Live run log below](#c1-live-run-2026-11-20). |
 | 2 | `kill -9` mid-run, resume on SQLite WAL | **Pass** | [`c2_crash_resume.rs`](../crates/am-e2e/tests/spike/c2_crash_resume.rs): SIGKILL lands while step 3's call is in flight. On restart the run resumes at step 3. Exactly one call is marked lost, settled at its reservation and re-issued. Every step completes exactly once, the ledger reconciles to the micro-dollar and the audit chain verifies. |
-| 3 | Cron + timezone + catch-up after sleep/wake | **Provisional: sleep demo inconclusive (not yet a verdict).** The automated tests pass. Attempt 1 (2026-11-20, forced sleep) crossed the 20:05Z fire time by only about 8 s, inside the 60 s on-time grace, so the missed fire ran once on wake but was classed `on_time` and the catch-up path was not exercised. It needs a sleep that wakes more than 60 s after a fire time. | [`c3_scheduler.rs`](../crates/am-e2e/tests/spike/c3_scheduler.rs): 09:30 Asia/Kolkata fires at 04:00Z. A three-day clock jump gives exactly one catch-up (`once`); the same holds across a restart from persisted `next_fire`. The `skip` and `all` policies are covered. Demo: `agentic spike c3`; [attempt 1 log below](#c3-sleep-demo-attempt-1-2026-11-20). |
+| 3 | Cron + timezone + catch-up after sleep/wake | **Pass (live sleep demo, 2026-11-20).** With the demo running, the Mac slept twice across fire times. On each wake the scheduler detected the wall-clock jump (525 s, then 478 s) and fired exactly one `catch_up` for the two slots it had missed. After a night with the demo stopped, a restart from the persisted `next_fire` also gave exactly one catch-up. Attempt 1 was inconclusive. | [`c3_scheduler.rs`](../crates/am-e2e/tests/spike/c3_scheduler.rs): 09:30 Asia/Kolkata fires at 04:00Z. A three-day clock jump gives exactly one catch-up (`once`); the same holds across a restart from persisted `next_fire`. The `skip` and `all` policies are covered. Demo: `agentic spike c3`; [attempt 2 log](#c3-sleep-demo-attempt-2-2026-11-20) and [attempt 1 log](#c3-sleep-demo-attempt-1-2026-11-20). |
 | 4 | Files to models | **Pass (live, verified answers; owner decision 2026-11-20).** Two runs on the owner's folder (`AM_SPIKE_DOCS_DIR`, 10 files of 7 types) with `claude-opus-5-5` and `google/gemma-4-e4b`. Every type the model's flags exclude was refused in words before any request (13 of 20 pairs per run, zero bytes sent). Every accepted answer (14 of 14 over both runs) is a word that appears in its file, checked by hand. The automated word match failed 2 rows per run only because the open question lets the model pick any distinctive word (finding 9). Confinement is covered by the offline tests. | [`c4_files_to_models.rs`](../crates/am-e2e/tests/spike/c4_files_to_models.rs) (`live_files_to_models_on_owner_folder`), [owner-folder runs below](#c4-live-runs-on-the-owners-folder-2026-11-20) and [synthetic-fixture table](#c4-on-synthetic-fixtures). The confinement cases pass offline: a symlink file and a symlinked folder leaving the root, `../`, an absolute path, a dangling outward symlink, a folder-link loop and a write on a read-only root are all refused and audited. |
 | 5 | MCP (rmcp) over stdio and Streamable HTTP | **Pass (live)** | [`c5_mcp.rs`](../crates/am-e2e/tests/spike/c5_mcp.rs), [run log below](#c5-live-run-2026-11-19). `server-filesystem@2.4.0 --read-only` lists only read tools and `read_text_file` returns the fixture text. `server-everything@2.3.1 streamableHttp` returns `echo`. The HTTP transport runs over `am-net`, and an unlisted port is refused. |
 | 6 | Loopback server Host, Origin, token, WebSocket | **Pass** | [`c6_server.rs`](../crates/am-e2e/tests/spike/c6_server.rs). Refused with 403: a bad Host, a foreign Origin on fetch, a foreign Origin on the WebSocket upgrade, a missing CSRF header or subprotocol, and a POST with no Origin. No CORS headers are sent. The launch code is single-use, and a failed exchange invalidates every outstanding code. |
@@ -18,16 +18,11 @@ Each verdict links its runnable test or recorded demo.
 | 8 | Signed + notarised Tauri build on a clean Mac | **Deferred: Apple Developer account.** The gate is epic 11 story 3, before v0.9-rc. Not counted. | Stand-in: [`am-desktop`](../crates/am-desktop/src/main.rs), an ad-hoc-signed `.app` (`Signature=adhoc`, hardened runtime flag). It links the core in-process, launches, serves the UI, and the webview exchanged its launch code ([log](#c8-stand-in-2026-11-19)). |
 | 9 | Agent productivity | **Pass** | A fresh Claude Code subagent built the ToolGate `max_uses_per_step` rule and its 7 tests ([`toolgate.rs`](../crates/am-engine/src/toolgate.rs)) with no human code edits. It wrote the tests failing first and passed `just check` on its second run. Summary [below](#c9-subagent-summary). |
 
-**REPLAN count (criteria 1–7 and 9): provisional.** Of the eight counted
-criteria, seven have a verdict (1, 2, 4, 5, 6, 7 and 9: all pass, 0 failures)
-and one is provisional until the owner's run lands:
-
-- criterion 3: a sleep demo that wakes more than 60 s after a fire time (attempt 1 was inconclusive). The owner closed story 1 on 2026-11-20 with this demo owed on 2026-11-21; its result is appended here.
-
-stack-spike.md allows "pending" only for criterion 5, so the count is not final
-and no replan decision can be taken until this run reports. Even a failure of
-criterion 3 would leave the count at one, below the threshold of two, so the
-stack holds either way; a single failure would get a local workaround here.
+**REPLAN count (criteria 1–7 and 9): final, 0 failures.** All eight counted
+criteria pass (1, 2, 3, 4, 5, 6, 7 and 9), so there is no replan (AD-2).
+Criterion 8 is deferred to the gate at the start of epic 11 story 3. The
+owner closed story 1 on 2026-11-20 with criterion 3's demo still owed, and the
+demo passed later the same morning.
 
 CI on `spike/1-1`: run
 [44597696551](https://github.com/energyatom/agentic-manager/actions/runs/44597696551) (head `ec1c16f`, after the review fixes).
@@ -224,6 +219,49 @@ verified answers rather than rewrite the check and run again.
 There was no PDF without a text layer in the folder, so that case rests on the
 two scanned JPEGs, which both models read.
 
+## C3 sleep demo, attempt 2 (2026-11-20)
+
+The demo was restarted on the same database at 02:14:50Z, after a night in which
+it had been stopped (last fire 2026-11-19T20:50Z). Then the owner put the Mac
+to sleep (Apple menu → Sleep):
+
+```text
+2026-11-20T02:14:50.863878Z scheduler started: cron `*/5 * * * *` in Asia/Kolkata
+2026-11-20T02:14:50.872752Z FIRE scheduled_for=02:10:00Z kind=catch_up
+2026-11-20T02:15:00.005917Z FIRE scheduled_for=02:15:00Z kind=on_time
+2026-11-20T02:25:15.457836Z FIRE scheduled_for=02:25:00Z kind=catch_up (wall clock jumped 525s: sleep/wake)
+2026-11-20T02:36:14.234416Z FIRE scheduled_for=02:35:00Z kind=catch_up (wall clock jumped 478s: sleep/wake)
+2026-11-20T02:40:00.005782Z FIRE scheduled_for=02:40:00Z kind=on_time
+… on time every 5 minutes to 03:05:00Z
+```
+
+`pmset -g log` for the same window (local time, +05:30; UTC in brackets):
+
+```text
+07:45:52 Sleep     Software Sleep                    [02:15:52Z]
+07:46:05 DarkWake  13 s, then Maintenance Sleep      [02:16:05Z]
+07:46:15 Sleep     Maintenance Sleep                 [02:16:15Z]
+07:55:13 DarkWake  until 07:58:13                    [02:25:13Z]
+07:58:13 Sleep     Maintenance Sleep                 [02:28:13Z]
+08:06:24 DarkWake                                    [02:36:24Z]
+08:37:56 Wake      DarkWake to FullWake (user)       [03:07:56Z]
+```
+
+Reading:
+- **On start:** after the night's downtime, the restart from persisted state
+  fired exactly one catch-up, for the latest missed slot (02:10Z), not one per
+  missed slot.
+- **First sleep (02:16:15Z to 02:25:13Z):** it crossed 02:20 and 02:25. On wake
+  the scheduler saw a 525 s jump and fired exactly one `catch_up`.
+- **Second sleep (02:28:13Z to 02:36:24Z):** it crossed 02:30 and 02:35. On wake
+  it saw a 478 s jump and fired exactly one `catch_up`.
+- **No duplicates and no missed on-time fires** afterwards.
+
+Both wakes were macOS DarkWakes (maintenance wakes with the screen off). The
+process resumed with them, and that is the wake the scheduler has to handle.
+Timestamps in the scheduler log run about 10 s ahead of `pmset`'s; the same
+skew appeared in attempt 1. Verdict: **pass**.
+
 ## C3 sleep demo, attempt 1 (2026-11-20)
 
 The owner's Mac runs in clamshell mode with external monitors, so it was put to
@@ -335,6 +373,6 @@ The code was committed unchanged (commit `7ead7ff`).
    appear in that file. Without it the run fails and says so. The run also
    fails when only one of the frontier and local models ran, when a file
    cannot be read, or when a type the model's flags allow is refused.
-4. **Sleep demo (criterion 3; attempt 1 inconclusive).** Run `agentic spike c3 --db /tmp/c3.db --cron "*/5 * * * *"`,
+4. **Sleep demo (criterion 3: done 2026-11-20, attempt 2 passed).** Run `agentic spike c3 --db /tmp/c3.db --cron "*/5 * * * *"`,
    close the lid across a fire time, then reopen. The log shows one
    `kind=catch_up` fire, with "wall clock jumped …s: sleep/wake".
