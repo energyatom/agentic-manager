@@ -12,6 +12,7 @@ workspace = true
 
 [dependencies]
 am-domain.workspace = true
+am-providers.workspace = true
 rmcp.workspace = true
 sse-stream.workspace = true
 http.workspace = true
