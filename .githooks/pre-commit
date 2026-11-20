@@ -2,6 +2,14 @@
 # Refuses a commit while `just check` is red (story 1.2 build hook, R7).
 # Enable once per clone with `just install-hooks` (sets core.hooksPath).
 # It checks the working tree as it stands, not only the staged files.
+#
+# git runs hooks with GIT_DIR and GIT_INDEX_FILE set; in a linked worktree
+# GIT_DIR is the absolute .git/worktrees/<name>. A test that runs `git init`
+# or `git -C` in a temporary folder would then act on this repository: on
+# 2026-11-21 xtask's denylist test re-initialised it and set core.bare = true.
+# `just check` runs from the work tree, so git finds it without these.
+unset GIT_DIR GIT_INDEX_FILE GIT_WORK_TREE GIT_PREFIX GIT_COMMON_DIR \
+    GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES
 if ! command -v just >/dev/null 2>&1; then
     echo "pre-commit: 'just' is not installed, so 'just check' cannot run; commit refused." >&2
     exit 1
