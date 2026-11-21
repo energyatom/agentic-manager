@@ -1,0 +1,71 @@
+# Review 2026-11-22: AD-15 interim CLI Account edit (rubric lens)
+
+Scope: the uncommitted diff on `replan/2026-11-22-cli-accounts` to `architecture-agentic-manager.md` (AD-15 Binds/Prevents/UI-class sentence and the new **Interim CLI Account edit** paragraph, the AD-32 "CLI class makes no config edit" clause, the R6 capability-map row), checked against the owner's words in `.memlog.md` (2026-11-22), epic 2 story 1 (`tickets/epic-accounts-model-routing/tickets/tickets.toml` id 1), epic 4 stories 17 and 18, epic 5 story 5, the epic 2 Notes (including the owner's second decision on the test terminal) and AD-6, AD-13, AD-16, AD-17, AD-25, AD-31, AD-32, AD-48. The owner decision itself is not questioned; only how the spine records it.
+
+## Verdict
+
+**Pass with fixes.** The amendment records the owner's four points (TTY-only, typed name, History plus widening audit, replacement recorded) and adds sensible mechanics (no CLI-token route, store lock, MCP/render refusal, key-before-config ordering, Undo is UI class). A grep of the spine finds no remaining line that says the CLI makes no config edit without the exception or that conflicts with the new paragraph (AD-13 line 210, AD-15 CLI-class list, AD-32 "never by the CLI" for project creation all stay consistent). But four points leave the epic 2 story 1 and epic 4 story 17/18 builders able to diverge, and one of them (retirement timing) contradicts the tickets outright.
+
+## Rubric
+
+| Check | Result |
+|---|---|
+| Fixes the divergence points for 2.1, 4.17, 5.5 | Partly: retirement moment, approved grant set, Account-key collisions, open path and `test` class are open (H1, H2, H4, M1, M5) |
+| Rule enforceable and prevents its stated divergence | Partly: "real interactive terminal" undefined; owner's test-terminal rule not in the spine; pty and cross-project children not covered (H3, M2) |
+| No contradiction with other ADs | AD-16 grant set silent (H2); AD-17 keychain naming collides with the key lifecycle (H4); AD-32 open path vs "writes only models/accounts.yaml" (M1); AD-6/AD-25/AD-48 consistent apart from small wording (L1, L4) |
+| No remaining contradictory spine line | None found by grep (`no config edit`, `config edit`, `UI class`, `confirm token`, `CLI token`, `CLI class`, `approved grant set`, `accounts.yaml`, `interactive TTY`) |
+| Covers ticket 2.1 and owner words | Owner's four points covered; the owner's 2026-11-22 test-terminal decision and the ticket's `list`/`test` commands are not (H3, M5) |
+
+## Findings
+
+### High
+
+**H1. Retirement moment contradicts epic 4 story 17 and epic 5 story 5, and "the confirm-token path" is unreachable from a CLI.**
+The spine retires the exception "when 4.17 and 5.5 have both shipped". Epic 4 builds before epic 5, so that is at 5.5. But 4.17's ticket says "This story retires epic 2 story 1's interim CLI exception: once the classifier ships … no CLI config edit remains", and 5.5's says the CLI path "is retired with epic 4 story 17". The 4.17 builder gets two opposite instructions. Separately, "from then on these commands go through `is_widening` and the confirm-token path" cannot be built: AD-15 issues the confirm token only over the UI session's live WebSocket and refuses one presented with the CLI token, and these commands use no token at all. Adding an Account is always widening, so a CLI `add` can never complete through that path; the only coherent end state is removal.
+*Fix (spine):* "The exception retires when epic 5 story 5 ships the UI Account card. From epic 4 story 17 until then, `agentic accounts add` classifies its patch with `is_widening` and writes the classifier's audit entries, and still uses the typed confirmation. When 5.5 ships, `agentic accounts add` and `remove` are removed (`list` and `test` stay) and print 'Add or remove Accounts in Models & Costs › Accounts'; no CLI config edit remains." *(Tickets, for Sofia):* make 4.17 "routes the interim CLI add through the classifier" and 5.5 "retires the interim CLI path"; if the owner instead wants retirement at 4.17, the spine must say "until 4.17 ships" and accept that no add path exists between 4.17 and 5.5.
+
+**H2. The interim write's effect on AD-16's approved grant set is not stated.**
+AD-16 says the store persists the approved grant set "each time an apply commits", and the Apply order commits it "when the apply may write it". A builder of 4.18 (or of the CLI after 4.18, under the spine's "until both" window) can read the interim `ConfigEdit` as an apply that updates the grant set, or as one that does not, in which case the next Reload or startup holds the new Account as an unconfirmed widening. These give different behaviour and different security: if the CLI write updates the grant set, any same-uid process that can obtain a pseudo-terminal (M2) gets a widening past the AD-16 hold, the one backstop for owner-uid writers.
+*Fix (spine, AD-15 interim paragraph and AD-16):* "The interim write never writes the approved grant set: the typed confirmation stands in for the confirm token on that edit only, not for the two-step confirmation that sets the baseline. Once epic 4 story 18's hold exists, the next Reload or startup lists each Account added this way as a widening for the UI-class two-step confirmation, and a project whose first approved grant set is written later lists them in its first-load hold." Add to AD-16's list of what never creates or updates the grant set: "… and the interim CLI Account edit (AD-15)".
+
+**H3. "Real interactive terminal" is undefined, and the owner's test-terminal decision is not in the spine.**
+The owner decided on 2026-11-22 (epic 2 Notes): "Confirm the fake-terminal path exists only in test builds (cfg(test) or a test-only crate). No env var, flag or feature in the release binary may enable it." That is the control that keeps the TTY check from being switched off, and it is only in a ticket. The spine also does not say what the check tests (stdin only, as written, lets stdout or stderr be redirected so the confirmation sentence is not seen by a person) or that it is the same predicate as AD-15's "CLI approvals require an interactive TTY" and AD-32's `--take-over`/`--confirm-move`.
+*Fix (spine):* "A real interactive terminal means stdin and the stream carrying the prompt are both terminals (`isatty`), checked by one `am-app` predicate that every 'interactive TTY' rule in AD-15 and AD-32 uses. The terminal is a port whose fake exists only under `cfg(test)` or in `am-testkit` as a dev-dependency; no env var, flag or Cargo feature of the release binary selects it, and a guard test fails if a fake terminal reaches the `agentic` binary's non-dev dependency graph (owner, 2026-11-22)."
+
+**H4. The key lifecycle collides with AD-17's keychain naming.**
+AD-17 stores every key under service `agentic-manager`, account `<account-id>`, with no project in the name. The amendment says `add` stores the key before the config write and "deletes it again if the write fails", and `remove` deletes it after its write commits. So: `add` with an id that already exists overwrites that key (and redirects every seat already using that Account); a failed `add` deletes a key that existed before it; `remove` in project A deletes the key that project B's Account of the same id still uses; and the UI-class Undo of a `remove` restores an Account whose keychain entry is gone. Two builders will handle these four cases differently.
+*Fix (spine):* "`add` refuses in words an id already in `models/accounts.yaml` or already present in the keychain (no overwrite; replacing a key is a separate UI-class action); its rollback deletes only an entry this `add` created. `remove` deletes the keychain entry only when no recent project's `models/accounts.yaml` names that id, else it leaves the key and says so; Undo of a `remove` restores the entry and the Account shows 'key missing' until a key is entered in the UI." Alternatively, flag AD-17 for a project-scoped keychain account (`<project-id>:<account-id>`) as a separate REPLAN.
+
+### Medium
+
+**M1. The CLI process's project-open path is unspecified, which contradicts "writes only `models/accounts.yaml`".**
+The command "opens the project's store as its one writer". AD-32's open path, run as written, can mint `project_id` into `company.yaml` (a System write), move a legacy `.agentic/` folder, migrate the store, write the `.agentic-open` marker or refuse on another Mac's marker. AD-32 now says the interim exception "writes only `models/accounts.yaml`", and the spine does not say which open steps the CLI process runs.
+*Fix:* "The command resolves the project with AD-32's checks in AD-32's order, read-only, and refuses in words naming `agentic serve` for any outcome that needs a write or decision other than the Account edit: no `project_id`, a legacy folder, a store needing migration, another Mac's marker or a live pid, a copy, move or changed id. It holds the runtime folder's exclusive lock (AD-32) for the whole command, writes no marker, and starts nothing."
+
+**M2. The Prevents claim overstates what a TTY check stops, and the MCP/render refusal reads only the target project.**
+Any same-uid process can get a pseudo-terminal (`script`, `expect`, `openpty`) and pass `isatty`. The refusal "while the project's config enables a stdio MCP server or a Source with `render: true`" reads only the target project. A stdio MCP child of project B, running as the owner, can drive `agentic accounts add --project <A>` while A is closed. In A itself the refusal rarely fires, because A's MCP children run only while A's server holds the lock. The owner's rule stands; the spine should record its residual honestly and name the backstop.
+*Fix:* reword Prevents to "a process without a terminal (an agent's tool call, a script, a non-interactive child) adding an Account". Add to the paragraph: "Residual: a same-uid process that allocates a pseudo-terminal passes the check; the AD-16 hold (H2) is the backstop. The MCP/render refusal also applies while any running `agentic` server on this Mac (from the app data dir's run files) has a stdio MCP server or a `render: true` Source enabled." If that extension is not wanted, write the residual down as accepted.
+
+**M3. Which Account kinds the exception covers is not stated.**
+AD-15's widening kind is "adding an Account (loopback, crawl-service, search or model)", and choosing or changing a capability's provider Account is a separate kind. Epic 2 stories 1 and 3 need only model Accounts (Anthropic, OpenAI, OpenAI-compatible). As written, a later builder could let the CLI add a search or crawl-service Account, which reaches capabilities (AD-46).
+*Fix:* "The exception covers model Accounts only (Anthropic, OpenAI, OpenAI-compatible). Search, crawl-service and scrape-provider Accounts, and choosing a capability's provider, stay UI class. A compatible base URL is checked by AD-12's and AD-48's rules (the app's own port, private and LAN ranges refused) before the sentence is printed."
+
+**M4. The order of confirmation and key storage is ambiguous.**
+"A mismatch writes nothing" and "`add` stores it before the config write" allow the key to be stored before the typed id is checked. Ticket 2.1's verify ("a wrong name writes nothing") expects nothing stored. The typed confirmation also has no expiry, while the token it stands in for expires in 2 minutes.
+*Fix:* "Order: terminal check, lock and open checks, MCP/render refusal, inputs, the sentence, the typed id (refused after 2 minutes without input), the key read without echo, the key stored, then the `ConfigEdit`. A mismatch or timeout stores no key and writes no file."
+
+**M5. `agentic accounts list` and `test` have no stated class, and `test` writes the store.**
+Ticket 2.1 ships `list` and `test`. `test` makes a model call, which AD-25 audits and the ledger records (and AD-31 stores probe results), so it is a store write from a CLI process outside the server. That is neither in AD-15's CLI-class list (read, status, validate, stop, plus the TTY decisions) nor in the exception.
+*Fix (AD-15):* "`agentic accounts list` is a read. `agentic accounts test` is one probe call by `Actor::Human` in its own process under the same store lock, writing its model-call audit, ledger and probe result through the writer. It needs no terminal and makes no config edit."
+
+### Low
+
+**L1. Audit entry shape.** AD-15's general widening audit names "kind, the seat or file it touches and the value". The interim entry gives kind, Account id and host but not the file. *Fix:* "(kind `account_added`, file `models/accounts.yaml`, the Account id and pinned host; no key); epic 4 story 17's `Widening` for an added Account keeps the kind name `account_added`."
+
+**L2. Lock holder wording.** "while `agentic serve` or `agentic service` holds the project" leaves out the desktop app, which links `am-app` in-process and holds the same lock. *Fix:* "while any process holds the project's runtime-folder lock (AD-32), naming it". The MCP/render refusal "naming the UI" points to a card that does not exist before 5.5. *Fix:* the refusal names what to do ("turn off the stdio MCP server or the `render: true` Source, or add the Account in the UI once it offers it").
+
+**L3. No creation of `models/accounts.yaml`.** The epic 2 Notes refuse a project without the file (ConfigCreate is epic 5 story 16's); the spine does not say so. *Fix:* "never creates `models/accounts.yaml` (a `ConfigCreate` is UI class); a project without it is refused in words." Also align ticket 2.1's "the Account's name" with the spine's "(its id)".
+
+**L4. Class wording and AD-6 citation.** AD-32's clause calls the exception the CLI class's ("the CLI class makes no config edit (…its one interim exception…)"), while AD-15 places it outside both classes (no token). Cross-process single-writer exclusivity comes from AD-32's lock, not AD-6. *Fix:* AD-32: "the CLI makes no config edit (AD-15), apart from the interim Account edit, which writes only `models/accounts.yaml`". AD-15: "opens the project's store as its one writer (AD-6) under the runtime folder's exclusive lock (AD-32)".
+
+**L5. CLI `remove` effect.** For parity with 5.5, "`remove` names the seats that will fall back before the typed confirmation" (optional).
