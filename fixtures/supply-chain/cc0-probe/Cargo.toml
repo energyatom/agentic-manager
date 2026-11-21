@@ -1,0 +1,14 @@
+# Licence-policy probe (story 1.9): a stand-in for a second CC0-1.0 crate. The
+# only CC0-1.0 exception in deny.toml is notify@8.2.2, so this crate must still
+# be rejected. Excluded from the workspace and never built;
+# xtask/tests/supply_chain.rs runs cargo-deny on cc0-consumer, which depends on it.
+[package]
+name = "cc0-probe"
+version = "0.1.0"
+edition = "2024"
+license = "CC0-1.0"
+description = "Licence-policy probe fixture; never built or published."
+publish = false
+
+[lib]
+path = "lib.rs"

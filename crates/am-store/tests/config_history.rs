@@ -311,3 +311,119 @@ fn config_history_filters_by_file_and_is_append_only() {
         .unwrap_err();
     assert_eq!(config_entries(&store).len(), 6);
 }
+
+// ---------------------------------------------------------------- story 1.9
+
+/// An outside edit's intent (story 1.9): `before` or `after` may be empty for
+/// a file created or deleted outside the app.
+fn outside(file: &str, before: &[u8], after: &[u8]) -> NewIntent {
+    NewIntent {
+        file: file.into(),
+        kind: HistoryKind::OutsideEdit,
+        ref_entry: None,
+        before_sha256: sha(before),
+        after_sha256: sha(after),
+        before: before.to_vec(),
+        after: after.to_vec(),
+        diff: format!("--- a/{file}\n+++ b/{file}\n@@ -1 +1 @@\n{CANARY}\n"),
+    }
+}
+
+/// Story 1.9: `OutsideEdit` is stored as `outside_edit`, takes no ref, reads
+/// back from the table and is audited as `config.outside_edit` with the
+/// Reload's Actor.
+#[test]
+fn config_history_outside_edit_takes_no_ref_and_is_audited_as_config_outside_edit() {
+    assert_eq!(HistoryKind::OutsideEdit.as_str(), "outside_edit");
+    assert_eq!(
+        HistoryKind::parse("outside_edit"),
+        Some(HistoryKind::OutsideEdit)
+    );
+    assert_eq!(
+        serde_json::to_value(HistoryKind::OutsideEdit).unwrap(),
+        json!("outside_edit")
+    );
+
+    let (_dir, store, history) = open();
+    let i = intent("seats/alpha.md", HistoryKind::OutsideEdit, None, 1);
+    let id = history.begin_intent(reviewer(), i.clone()).unwrap();
+    assert_eq!(history.pending_intents().unwrap()[0].intent, i);
+    let entry = history.commit_entry(reviewer(), id.clone()).unwrap();
+    assert_eq!(entry.kind, HistoryKind::OutsideEdit);
+    assert_eq!(entry.ref_entry, None);
+    assert_eq!(entry.who(), "You (Reviewer)");
+    assert_eq!(entry.diff, i.diff);
+    assert_eq!(history.entries(None).unwrap(), vec![entry.clone()]);
+    assert_eq!(history.entry(id.clone()).unwrap(), Some(entry.clone()));
+
+    let log = config_entries(&store);
+    let actions: Vec<&str> = log.iter().map(|e| e["action"].as_str().unwrap()).collect();
+    assert_eq!(actions, ["config.intent_opened", "config.outside_edit"]);
+    for e in &log {
+        assert_eq!(e["target"], id.as_str());
+        assert_eq!(e["args"]["file"], "seats/alpha.md");
+        assert_eq!(e["args"]["kind"], "outside_edit");
+        assert_eq!(
+            e["actor"],
+            json!({"kind": "human", "person": "owner", "hat": "Reviewer"})
+        );
+        assert_args_redacted(e);
+    }
+    assert_eq!(log[1]["args"]["entry_id"], id.as_str());
+
+    // An outside edit names no earlier entry.
+    let before = audit(&store).len();
+    let with_ref = intent(
+        "seats/alpha.md",
+        HistoryKind::OutsideEdit,
+        Some(entry.id.clone()),
+        2,
+    );
+    assert!(history.begin_intent(reviewer(), with_ref).is_err());
+    assert!(history.pending_intents().unwrap().is_empty());
+    assert_eq!(audit(&store).len(), before);
+}
+
+/// Story 1.9: a file created outside (no before-bytes) and one deleted
+/// outside (no after-bytes) are both History entries.
+#[test]
+fn config_history_outside_edit_records_created_and_deleted_files() {
+    let (_dir, store, history) = open();
+    let workflow = b"schema_version: 1\nname: X\n";
+    let seat = format!("---\nschema_version: 1\nname: Gamma\n---\n{CANARY}\n").into_bytes();
+    let created = history
+        .begin_intent(reviewer(), outside("workflows/x.yaml", b"", workflow))
+        .and_then(|id| history.commit_entry(reviewer(), id))
+        .unwrap();
+    let deleted = history
+        .begin_intent(reviewer(), outside("seats/gamma.md", &seat, b""))
+        .and_then(|id| history.commit_entry(reviewer(), id))
+        .unwrap();
+    assert!(created.before.is_empty());
+    assert_eq!(created.before_sha256, sha(b""));
+    assert_eq!(created.after, workflow);
+    assert_eq!(deleted.before, seat);
+    assert!(deleted.after.is_empty());
+    assert_eq!(deleted.after_sha256, sha(b""));
+    assert_eq!(
+        history.entries(None).unwrap(),
+        vec![created.clone(), deleted.clone()]
+    );
+    let done: Vec<(String, String)> = config_entries(&store)
+        .iter()
+        .filter(|e| e["action"] != "config.intent_opened")
+        .map(|e| {
+            (
+                e["action"].as_str().unwrap().to_string(),
+                e["target"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        done,
+        [
+            ("config.outside_edit".to_string(), created.id.clone()),
+            ("config.outside_edit".to_string(), deleted.id.clone()),
+        ]
+    );
+}

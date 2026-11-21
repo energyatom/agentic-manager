@@ -27,15 +27,20 @@ pub enum HistoryKind {
     Undo,
     /// Wrote an older entry's after-bytes back (`ref_entry` names it).
     Restore,
+    /// A change made outside the app (another editor, git) and applied by a
+    /// Reload (story 1.9); names no earlier entry. `before` or `after` is
+    /// empty for a file created or deleted outside.
+    OutsideEdit,
 }
 
 impl HistoryKind {
-    /// The stored name: `edit`, `undo` or `restore`.
+    /// The stored name: `edit`, `undo`, `restore` or `outside_edit`.
     pub fn as_str(self) -> &'static str {
         match self {
             HistoryKind::Edit => "edit",
             HistoryKind::Undo => "undo",
             HistoryKind::Restore => "restore",
+            HistoryKind::OutsideEdit => "outside_edit",
         }
     }
 
@@ -44,6 +49,7 @@ impl HistoryKind {
             "edit" => Some(HistoryKind::Edit),
             "undo" => Some(HistoryKind::Undo),
             "restore" => Some(HistoryKind::Restore),
+            "outside_edit" => Some(HistoryKind::OutsideEdit),
             _ => None,
         }
     }

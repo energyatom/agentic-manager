@@ -203,7 +203,8 @@ pub enum WriteCommand {
         intent: NewIntent,
     },
     /// Deletes the intent and inserts its History entry in one transaction,
-    /// audited `config.edited`, `config.undone` or `config.restored`.
+    /// audited `config.edited`, `config.undone`, `config.restored` or
+    /// `config.outside_edit`.
     CommitConfigEntry {
         intent_id: String,
     },

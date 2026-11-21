@@ -108,6 +108,14 @@ pub enum WriteError {
     },
     #[error("refused: {0}")]
     NoChange(String),
+    /// Story 1.9: the session refuses the app's own write while a config
+    /// file on disk differs from the accepted bytes (an outside change not
+    /// yet reloaded), so the write never takes that change in silently.
+    #[error(
+        "refused: {} changed on disk outside the app; Reload (or undo that change) first, then make the edit",
+        .files.join(", ")
+    )]
+    ChangedOnDisk { files: Vec<String> },
     #[error(
         "refused: {file} changed since this entry ({entry}), so undoing it would lose the later change; restore an entry instead"
     )]
@@ -171,7 +179,7 @@ impl fmt::Display for Joined<'_> {
 /// The lines of `bytes` (the config file `file` as it is now) that hold a
 /// secret-looking value, as the validator detects one: a key-shaped text on
 /// any line, or a secret-named key holding a value.
-fn secret_lines(file: &str, bytes: &[u8]) -> Vec<u32> {
+pub(crate) fn secret_lines(file: &str, bytes: &[u8]) -> Vec<u32> {
     let text = String::from_utf8_lossy(bytes);
     let mut rep = Report::new(file);
     checks::text_secrets(&mut rep, &text, 1);
@@ -198,7 +206,7 @@ fn secret_lines(file: &str, bytes: &[u8]) -> Vec<u32> {
 const OWN_WRITES: usize = 1024;
 const TMP_SUFFIX: &str = ".am-tmp";
 
-fn sha256_hex(bytes: &[u8]) -> String {
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 
@@ -358,6 +366,7 @@ impl ConfigWriter {
     pub fn undo(&self, actor: Actor, id: &str) -> Result<HistoryEntry, WriteError> {
         let _one = self.serial()?;
         let entry = self.entry(id)?;
+        refuse_absent(&entry, true)?;
         self.resolve(&entry.file)?;
         let current = self.read(&entry.file)?;
         if sha256_hex(&current) != entry.after_sha256 {
@@ -380,6 +389,7 @@ impl ConfigWriter {
     pub fn restore(&self, actor: Actor, id: &str) -> Result<HistoryEntry, WriteError> {
         let _one = self.serial()?;
         let entry = self.entry(id)?;
+        refuse_absent(&entry, false)?;
         self.resolve(&entry.file)?;
         let current = self.read(&entry.file)?;
         if sha256_hex(&current) == entry.after_sha256 {
@@ -449,6 +459,16 @@ impl ConfigWriter {
         self.own
             .lock()
             .is_ok_and(|own| own.iter().any(|(f, h)| f == file && h == sha256))
+    }
+
+    /// Forgets the fingerprints of this writer's writes to `file` (story
+    /// 1.9): the session calls it once a write returned, so they cover only
+    /// writes in flight and a later outside save of the same bytes is
+    /// announced.
+    pub(crate) fn forget_own_writes(&self, file: &str) {
+        if let Ok(mut own) = self.own.lock() {
+            own.retain(|(f, _)| f != file);
+        }
     }
 
     /// This writer's recent writes as (file, sha256), oldest first.
@@ -723,6 +743,29 @@ fn insert_after_schema_version(text: &str, line: &str) -> Option<String> {
     done.then_some(out)
 }
 
+/// Refuses an Undo or Restore of an outside edit that would create or
+/// delete its file (story 1.9): in an `outside_edit` entry an empty side
+/// means the file was absent, and the writer never creates or deletes a
+/// config file. `undo` writes `before` back, `restore` writes `after`.
+fn refuse_absent(entry: &HistoryEntry, undo: bool) -> Result<(), WriteError> {
+    if entry.kind != HistoryKind::OutsideEdit {
+        return Ok(());
+    }
+    let action = if undo { "undo" } else { "restore" };
+    let target = if undo { &entry.before } else { &entry.after };
+    let words = if target.is_empty() {
+        "would delete the file; the app never deletes a config file, so delete it by hand"
+    } else if undo && entry.after.is_empty() {
+        "would create the file again; the app never creates a config file, so create it by hand (this entry holds its earlier content)"
+    } else {
+        return Ok(());
+    };
+    Err(WriteError::BadEdit(format!(
+        "{}: entry {} recorded a change made outside the app, and to {action} it {words}",
+        entry.file, entry.id
+    )))
+}
+
 /// A failed replace: `No` when the file kept its bytes for certain, `Maybe`
 /// when the intent must stay for the next reconcile.
 enum Written {
@@ -817,7 +860,7 @@ fn exact_name(listed: &[String], wanted: &str) -> Result<(), String> {
 /// The errors in `after` that `before` does not account for, matched as a
 /// multiset on (file, message, fix): the line is left out because an edit
 /// may move an error it did not cause.
-fn added_errors(before: Vec<Finding>, after: Vec<Finding>) -> Vec<Finding> {
+pub(crate) fn added_errors(before: Vec<Finding>, after: Vec<Finding>) -> Vec<Finding> {
     let mut known: BTreeMap<(String, String, String), usize> = BTreeMap::new();
     for f in before {
         *known.entry((f.file, f.message, f.fix)).or_default() += 1;

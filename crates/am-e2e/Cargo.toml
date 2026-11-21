@@ -25,6 +25,11 @@ path = "tests/cli_validate.rs"
 name = "config_history"
 path = "tests/config_history.rs"
 
+# Story 1.9: outside edits wait for Reload, on a real store.
+[[test]]
+name = "config_reload"
+path = "tests/config_reload.rs"
+
 [[test]]
 name = "trust_targets"
 path = "tests/trust_targets.rs"
