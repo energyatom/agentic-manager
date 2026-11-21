@@ -8,9 +8,12 @@
 - source_plan: `_bmad-output/initiative-agentic-manager/tickets/epic-foundations-rust-spike/tickets/story-blank-department-role-templates-and-the-company-a-sample-plan.md`
   summary: The Company A sample ships no synthetic drop files or rows for table-t1, so a freshly installed sample has an empty T1 until a load runs.
   evidence: The reference says T1 is loaded from a drop folder of synthetic CSV and xlsx files, but `.agentic/drop/` is runtime and the story 1.5 ticket does not list drop files. The golden-run fixtures (epic 3) or the Local Repository story (4.7) should supply them.
+  resolved: 2026-11-22, named in new story 4.19 (epic 1 story 11 sweep scoping).
 - source_plan: `_bmad-output/initiative-agentic-manager/tickets/epic-foundations-rust-spike/tickets/story-blank-department-role-templates-and-the-company-a-sample-plan.md`
   summary: company.yaml has no company-wide caps key, so the Company A sample's ₹600-a-week company cap is not written; epic 4's budget stories should add the key and the sample's value.
   evidence: Owner decision (c) of story 1.5 (2026-11-20). reference-workload.md sets ₹600 a week for the company; the sample's description names the gap.
+  resolved: 2026-11-22, owned by story 4.2, whose company week cap needs the key (epic 1 story 11 sweep scoping).
 - source_plan: `_bmad-output/initiative-agentic-manager/tickets/epic-foundations-rust-spike/tickets/story-hash-chained-audit-log-plan.md`
   summary: Writer commands that change no row (MarkLost on an already settled call, StartStep on an unknown step id) still commit and audit outcome `ok`; they should refuse or audit a "no change" outcome.
   evidence: Spike behaviour predating story 1.7 (`apply` in crates/am-store/src/lib.rs: MarkLost's `WHERE ... AND settled = 0` and StartStep's UPDATE return Ok when 0 rows change); found by the story 1.7 quick review. The workflow-engine stories that own these commands should decide refuse vs. "no change".
+  resolved: 2026-11-22, named in new story 3.18 (epic 1 story 11 sweep scoping).

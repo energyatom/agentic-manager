@@ -103,6 +103,17 @@ hitl = false
 risk = "high"
 
 [[entry]]
+id = 18
+type = "story"
+title = "Writer commands that change nothing say so"
+description = "Deferred from epic 1 story 7 (its quick review; deferred-work.md): writer commands that change no row, MarkLost on an already settled call and StartStep on an unknown step id, still commit and audit outcome `ok` with arguments naming a status they did not set. Each such command either refuses in words or commits an audit entry whose outcome is `no change`, chosen per command in this story's plan (arch AD-6, AD-25), and none records a state it did not set."
+verify = "Written first, failing: MarkLost on a settled call and StartStep on an unknown step id each give the chosen result (a worded refusal, or an audit entry with outcome `no change`), change no row, and leave no audit entry naming a status it did not set; story 9's kill-and-resume test still passes."
+covers = ["R3", "R5"]
+after = [9]
+hitl = false
+risk = "medium"
+
+[[entry]]
 id = 10
 type = "story"
 title = "Context overflow pauses with a Question"
@@ -175,7 +186,7 @@ title = "Refactor sweep"
 description = "Cleanup only, scoped at its start from the plans and review findings this epic deferred: no new behaviour; scope pushed out of another story becomes a new story."
 verify = "`just check` and CI on main are green, including the rule_15 suite, the kill-and-resume test and the fan-out, hand-off, review and lineage suites, and every deferred finding from this epic is closed or named in a new story."
 covers = []
-after = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 14, 15, 16, 17]
+after = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 14, 15, 16, 17, 18]
 hitl = false
 risk = "low"
 

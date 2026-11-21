@@ -160,6 +160,17 @@ hitl = false
 risk = "high"
 
 [[entry]]
+id = 19
+type = "story"
+title = "The Company A sample ships synthetic drop files for Table T1"
+description = "Deferred from epic 1 story 5 (review finding 13; deferred-work.md): reference-workload.md loads Table T1 from a drop folder of synthetic CSV and xlsx files, but a drop folder is runtime state, so the sample ships none and a freshly applied sample has an empty T1. The sample carries its synthetic files under `runtime-seed/drop/<source-id>/` (templates hold no `.agentic/`, arch AD-32), copied into the runtime folder's drop folder when the sample is applied, so the first load of the sample's Local Repository Source fills T1 with provenance (arch AD-39)."
+verify = "Written first, failing: applying the Company A sample to a fresh project places its synthetic files in the Source's drop folder; one load run fills T1 with the expected rows, each with provenance, and handles the files by the Source's policy; `agentic validate` passes on the sample; no sample name appears in `crates/` or `web/src`."
+covers = ["R7"]
+after = [7, 11]
+hitl = false
+risk = "medium"
+
+[[entry]]
 id = 18
 type = "story"
 title = "Outside edits and startup that widen wait for the two-step confirmation"
@@ -188,7 +199,7 @@ title = "Refactor sweep"
 description = "Cleanup only, scoped at its start from the plans and review findings this epic deferred: no new behaviour; scope pushed out of another story becomes a new story."
 verify = "`just check` and CI on main are green, including the rule_08, rule_10, rule_11 and rule_14 suites, and every deferred finding from this epic is closed or named in a new story."
 covers = []
-after = [1, 2, 3, 4, 5, 6, 16, 7, 8, 9, 10, 11, 14, 15, 17, 18]
+after = [1, 2, 3, 4, 5, 6, 16, 7, 8, 9, 10, 11, 14, 15, 17, 18, 19]
 hitl = false
 risk = "low"
 
