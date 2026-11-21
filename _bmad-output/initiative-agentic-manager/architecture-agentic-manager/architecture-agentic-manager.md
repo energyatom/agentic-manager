@@ -118,7 +118,7 @@ flowchart BT
 
 - **Binds:** every crate, package and template; C1.
 - **Prevents:** shipping under the superseded Apache-2.0 line, or linking a copyleft dependency.
-- **Rule:** The repository and every crate and package are MIT. **This supersedes the earlier Apache-2.0 line.** `cargo-deny` and the npm licence check allow only MIT, MIT-0, Apache-2.0, BSD-2/3-Clause, ISC, Zlib, Unicode-3.0 and MPL-2.0 (MIT-0 amended 2026-11-20, architect REPLAN, owner: MIT without the attribution clause, so it adds no obligation; it lets `jsonschema` link through `borrow-or-share`). GPL, LGPL and AGPL fail CI. A native library linked into the binary needs a permissive licence recorded in `THIRD_PARTY.md` (v1 links none: pdfium was dropped on 2026-11-19 with bundled OCR, AD-46).
+- **Rule:** The repository and every crate and package are MIT. **This supersedes the earlier Apache-2.0 line.** `cargo-deny` and the npm licence check allow only MIT, MIT-0, Apache-2.0, BSD-2/3-Clause, ISC, Zlib, Unicode-3.0 and MPL-2.0 (MIT-0 amended 2026-11-20, architect REPLAN, owner: MIT without the attribution clause, so it adds no obligation; it lets `jsonschema` link through `borrow-or-share`). One per-crate exception (amended 2026-11-21, owner, "Exception for notify"): CC0-1.0 is allowed for the `notify` crate alone, through a cargo-deny `[[licenses.exceptions]]` entry in `deny.toml` naming that crate at its pinned Stack version, so a version bump is reviewed again; it is not added to the allow-list, notify's own dependencies stay under the allow-list, and any other CC0-1.0 crate fails CI. A further exception is an owner decision. GPL, LGPL and AGPL fail CI. A native library linked into the binary needs a permissive licence recorded in `THIRD_PARTY.md` (v1 links none: pdfium was dropped on 2026-11-19 with bundled OCR, AD-46).
 
 ### Boundaries and ports
 
@@ -490,7 +490,7 @@ stateDiagram-v2
 | process-wrap (we enable tokio1, process-group, kill-on-drop; rmcp also turns on its default features; stdio MCP children) | 10.0.1 |
 | keyring-core (the `keyring` facade is not linked, AD-17; amended 2026-11-20, architect REPLAN) | 1.0.1 |
 | apple-native-keyring-store (feature `keychain`; macOS only, AD-47) | 1.0.2 |
-| notify | 8.2.2 |
+| notify (CC0-1.0, allowed for this crate only by AD-3's per-crate exception, 2026-11-21; checked with `cargo info`: 8.2.2 and 9.0.0 are CC0-1.0, its dependencies are on the allow-list: notify-types, bitflags, libc and log MIT OR Apache-2.0, objc2-core-foundation and objc2-core-services on macOS Zlib OR Apache-2.0 OR MIT, walkdir and same-file taken under MIT, inotify ISC and mio MIT on Linux; linked from epic 1 story 9, the config watcher, and AD-39's drop folders) | 8.2.2 |
 | serde-saphyr (YAML) | 2.1.1 |
 | jsonschema (`default-features = false`: no `resolve-http`, no `resolve-file`; MIT, its graph holds MIT-0 `borrow-or-share`, AD-3; checked on crates.io 2026-11-20; linked from epic 3 story 5) | 0.61.2 |
 | globset (Unlicense OR MIT, taken under MIT; `default-features = false`; the one glob matcher, Consistency Conventions; amended 2026-11-20, architect REPLAN) | 0.4.21 |
