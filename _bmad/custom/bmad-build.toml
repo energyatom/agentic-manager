@@ -5,10 +5,14 @@
 # change"): story 1.1 and story 1.13 both shipped code whose tests were not
 # seen failing first. From now on the red run is logged in the plan before
 # anything under a `src/` folder changes, and the implementer is told so.
+#
+# Owner 2026-11-21: docs/owner-standing-rules.md says what to decide without
+# asking and what always stops for the owner; read it before asking.
 
 [workflow]
 
 persistent_facts = [
+  """Owner standing rules (owner, 2026-11-21). Read `docs/owner-standing-rules.md` at the start of the run and again before asking the owner anything. Items on its "Decide yourself" list are yours: make the call, record the choice and the reason in the plan (Design Notes or Implementation Notes), and do not ask. Items on its "Always stop and ask the owner" list are never decided by you: stop and ask, naming the rule that applies. When a question fits neither list, prefer the reversible engineering choice inside the architecture, record it with its reason, and carry on; ask only if it is owner-level (a deviation from the ticket's intent, an AD or a frozen plan). The workflow's own checkpoints (plan approval) still apply.""",
   """Red run first (owner decision 2026-11-21, epic 1 Notes). Before any change to a file under a `src/` folder (`crates/*/src/`, `xtask/src/`, `web/src/`), the story's acceptance tests are written outside `src/` (`tests/` folders, `crates/am-e2e/tests/`), run, and seen failing. The red run is then logged in the plan's `## Implementation Notes` under a `Red run` heading: the exact command and its failing output (the failing test names and the first failure lines; a compile error that names the missing API counts). Only after that entry exists may any `src/` file change. A run against a skeleton made after the code, mutation evidence, or tests written alongside the code is not a substitute. If code under `src/` changed before the entry existed, stop and tell the owner; do not record it as a deviation and carry on.""",
 ]
 
