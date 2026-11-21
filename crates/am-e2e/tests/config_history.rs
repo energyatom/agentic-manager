@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use am_config::{ConfigEdit, ConfigWriter, EditOp, FailPoint, WriteError};
 use am_domain::{Actor, ConfigHistory, HistoryKind};
-use am_store::{Store, StoreConfigHistory, open_project, verify_jsonl};
+use am_store::{Store, StoreConfigHistory, verify_jsonl};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
@@ -38,17 +38,9 @@ fn sha(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 
+/// A stream copy (story 1.13: never `std::fs::copy`).
 fn copy_dir(from: &Path, to: &Path) {
-    std::fs::create_dir_all(to).unwrap();
-    for entry in std::fs::read_dir(from).unwrap() {
-        let entry = entry.unwrap();
-        let target = to.join(entry.file_name());
-        if entry.file_type().unwrap().is_dir() {
-            copy_dir(&entry.path(), &target);
-        } else {
-            std::fs::copy(entry.path(), &target).unwrap();
-        }
-    }
+    am_testkit::copy_tree(from, to);
 }
 
 /// A copy of the valid fixture whose seat body holds the canary.
@@ -68,8 +60,11 @@ struct Open {
     writer: ConfigWriter,
 }
 
+/// The project's runtime folder for these tests: a hidden folder the config
+/// loader does not read, so it goes with the temporary project.
 fn open(root: &Path) -> Open {
-    let (store, _) = open_project(root).unwrap();
+    let layout = am_domain::RuntimeLayout::at(root.join(".runtime-test"));
+    let (store, _) = am_store::open_runtime(&layout, "test-mac".into()).unwrap();
     let history = Arc::new(StoreConfigHistory::new(&store).unwrap());
     let writer = ConfigWriter::open(root, history.clone()).unwrap();
     Open {

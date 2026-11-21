@@ -1,7 +1,10 @@
 //! Story 1.4: `agentic validate <project>` as the owner runs it. The command
 //! is `am_app::cli::validate`, the same function the `agentic` binary calls;
 //! it returns the process exit code (0 no errors, 1 errors, 2 usage or a
-//! missing folder) and writes the report to the given streams.
+//! missing folder) and writes the report to the given streams. Story 1.13:
+//! `--template` (what `just validate` runs over templates/ and fixtures/)
+//! checks reference files against the folder's `runtime-seed/` and refuses a
+//! `project_id`; on a project, validate never writes an id.
 #![forbid(unsafe_code)]
 
 use std::path::{Path, PathBuf};
@@ -118,7 +121,7 @@ fn broken_anatomy_prints_every_error_with_a_fix_and_exits_one() {
 #[test]
 fn anatomy_fixture_exits_zero_with_its_warnings() {
     let path = fixture("anatomy");
-    let (code, out, _) = validate(&[path.to_str().unwrap()]);
+    let (code, out, _) = validate(&["--template", path.to_str().unwrap()]);
     assert_eq!(code, 0, "{out}");
     for want in [
         "seats/scout.md:8: warning: ",
@@ -181,7 +184,7 @@ fn template_folders() -> Vec<PathBuf> {
 }
 
 fn assert_clean(path: &Path) {
-    let (code, out, err) = validate(&[path.to_str().unwrap()]);
+    let (code, out, err) = validate(&["--template", path.to_str().unwrap()]);
     assert_eq!(code, 0, "{}:\n{out}{err}", path.display());
     assert!(
         out.contains("0 errors, 0 warnings"),
@@ -241,6 +244,77 @@ fn every_template_folder_exits_zero() {
     }
 }
 
+// Story 1.13: the project id and the seed reference files.
+
+#[test]
+fn template_mode_refuses_a_project_id_with_file_line_and_fix() {
+    let dir = tempfile::tempdir().unwrap();
+    copy_dir(&templates().join("departments/blank"), dir.path());
+    let company = dir.path().join("company.yaml");
+    let text = std::fs::read_to_string(&company).unwrap();
+    let id = am_domain::ProjectId::mint();
+    std::fs::write(
+        &company,
+        text.replacen(
+            "schema_version: 1\n",
+            &format!("schema_version: 1\nproject_id: {id}\n"),
+            1,
+        ),
+    )
+    .unwrap();
+    let (code, out, _) = validate(&["--template", dir.path().to_str().unwrap()]);
+    assert_eq!(code, 1, "{out}");
+    has_finding_with_fix(
+        &out,
+        "company.yaml:2: a template or fixture carries no project_id",
+    );
+    assert!(out.contains("remove the `project_id:` line"), "{out}");
+    // As a project the same folder is fine, and validate writes nothing.
+    let before = std::fs::read(&company).unwrap();
+    let (code, out, _) = validate(&[dir.path().to_str().unwrap()]);
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(std::fs::read(&company).unwrap(), before);
+}
+
+#[test]
+fn a_project_without_a_runtime_folder_skips_the_reference_file_warning_and_gets_no_id() {
+    let dir = tempfile::tempdir().unwrap();
+    copy_dir(&fixture("anatomy"), dir.path());
+    let company = dir.path().join("company.yaml");
+    let before = std::fs::read(&company).unwrap();
+    let (code, out, _) = validate(&[dir.path().to_str().unwrap()]);
+    assert_eq!(code, 0, "{out}");
+    assert!(!out.contains("absent.md"), "{out}");
+    assert!(out.contains("0 errors, 2 warnings"), "{out}");
+    assert_eq!(std::fs::read(&company).unwrap(), before, "no id is written");
+}
+
+#[test]
+fn no_template_or_fixture_ships_a_legacy_runtime_folder() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    fn walk(dir: &Path, found: &mut Vec<PathBuf>) {
+        for e in std::fs::read_dir(dir).unwrap() {
+            let e = e.unwrap();
+            if e.file_type().unwrap().is_dir() {
+                if e.file_name() == am_domain::runtime::LEGACY_DIR {
+                    found.push(e.path());
+                }
+                walk(&e.path(), found);
+            }
+        }
+    }
+    let mut found = Vec::new();
+    walk(&root.join("templates"), &mut found);
+    walk(&root.join("fixtures"), &mut found);
+    assert!(found.is_empty(), "{found:?}");
+    assert!(
+        fixture("anatomy")
+            .join(am_domain::runtime::RUNTIME_SEED)
+            .join("knowledge/full/guide.md")
+            .is_file()
+    );
+}
+
 #[test]
 fn warnings_alone_exit_zero() {
     let dir = tempfile::tempdir().unwrap();
@@ -277,15 +351,7 @@ fn bad_usage_exits_two() {
     assert_eq!(code, 2);
 }
 
+/// A stream copy (story 1.13: never `std::fs::copy`).
 fn copy_dir(from: &Path, to: &Path) {
-    std::fs::create_dir_all(to).unwrap();
-    for entry in std::fs::read_dir(from).unwrap() {
-        let entry = entry.unwrap();
-        let target = to.join(entry.file_name());
-        if entry.file_type().unwrap().is_dir() {
-            copy_dir(&entry.path(), &target);
-        } else {
-            std::fs::copy(entry.path(), &target).unwrap();
-        }
-    }
+    am_testkit::copy_tree(from, to);
 }

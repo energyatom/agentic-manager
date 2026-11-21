@@ -21,11 +21,8 @@ use super::live;
 fn copy_fixture_folder() -> (tempfile::TempDir, PathBuf) {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path().join("docs");
-    std::fs::create_dir(&dir).unwrap();
-    for e in std::fs::read_dir(fixture("folders/spike")).unwrap() {
-        let e = e.unwrap();
-        std::fs::copy(e.path(), dir.join(e.file_name())).unwrap();
-    }
+    // A stream copy (story 1.13: never `std::fs::copy`).
+    am_testkit::copy_tree(&fixture("folders/spike"), &dir);
     (tmp, dir)
 }
 

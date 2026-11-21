@@ -44,6 +44,7 @@ const COLUMN_TYPES: &[&str] = &[
 /// and the writer's canonical order (story 1.8).
 pub(crate) const COMPANY_KEYS: &[&str] = &[
     "schema_version",
+    "project_id",
     "name",
     "description",
     "timezone",
@@ -295,10 +296,35 @@ fn web_url(rep: &mut Report, t: &Text, name: &str) -> bool {
     ok
 }
 
-/// `company.yaml`.
-pub(crate) fn company(rep: &mut Report, refs: &mut Refs, root: &Node) -> Option<Company> {
+/// `company.yaml`. A `project_id` (AD-32) must be a UUIDv7; a template or
+/// fixture (`template`) carries none.
+pub(crate) fn company(
+    rep: &mut Report,
+    refs: &mut Refs,
+    root: &Node,
+    template: bool,
+) -> Option<Company> {
     let f = fields(rep, root, "company.yaml")?;
     f.allow(rep, COMPANY_KEYS);
+    let project_id = f.text(rep, "project_id").filter(|t| {
+        if template {
+            rep.error(
+                t.line,
+                "a template or fixture carries no project_id",
+                "remove the `project_id:` line; the app gives each project its own id when it is first opened",
+            );
+            return false;
+        }
+        if am_domain::ProjectId::parse(&t.value).is_none() {
+            rep.error(
+                t.line,
+                format!("project_id '{}' is not a project id", t.value),
+                "write back the id this project had (its runtime folder's name), or remove the line to treat the folder as a new project",
+            );
+            return false;
+        }
+        true
+    });
     let name = f.req_text(rep, "name", "My company");
     let description = value(f.text(rep, "description"));
     let tz = f
@@ -386,6 +412,7 @@ pub(crate) fn company(rep: &mut Report, refs: &mut Refs, root: &Node) -> Option<
     unique(rep, "hat", &hat_ids);
 
     Some(Company {
+        project_id: value(project_id),
         name: name?.value,
         description,
         timezone: tz?.value,
@@ -943,11 +970,14 @@ const FOLDER_FIX: &str = "link a folder inside the project (e.g. `path: notes`) 
 
 /// Where a seat's relative paths resolve: the project folder and the
 /// owner's home folder (when known). Resolution is lexical: nothing follows
-/// a symlink at validate time.
+/// a symlink at validate time. Reference files are looked for in
+/// `knowledge_root` (a runtime folder's `knowledge/`, or a template's
+/// `runtime-seed/knowledge/`); with none, their existence is not checked.
 #[derive(Default)]
 pub(crate) struct Places {
     pub project: PathBuf,
     pub home: Option<PathBuf>,
+    pub knowledge_root: Option<PathBuf>,
 }
 
 /// Plain text of at most `max` characters (counted as chars).
@@ -1026,13 +1056,14 @@ fn components(path: &Path) -> Vec<String> {
     out
 }
 
-/// True for a `.agentic` path component, ignoring case (APFS does).
+/// True for a legacy runtime folder's path component, ignoring case (APFS
+/// does).
 fn is_agentic(component: &str) -> bool {
-    component.eq_ignore_ascii_case(".agentic")
+    am_domain::runtime::is_legacy_component(component)
 }
 
-const PROJECT_REFUSED: &str = "it is the project folder itself, which holds .agentic/";
-const ANCESTOR_REFUSED: &str = "it holds the project folder, which holds .agentic/";
+const PROJECT_REFUSED: &str = "it is the project folder itself, which holds its configuration";
+const ANCESTOR_REFUSED: &str = "it holds the project folder, which holds its configuration";
 
 /// `base` (absolute components) climbed by `ups` then extended by `rest`.
 fn climb(base: &[String], ups: usize, rest: &[String]) -> Vec<String> {
@@ -1318,8 +1349,10 @@ fn seat_folders(rep: &mut Report, places: &Places, f: &Fields) -> Vec<Folder> {
     out
 }
 
-/// A seat's `knowledge:` entries; a missing file is a warning, since the
-/// `.agentic/` folder does not travel with the project (AD-38).
+/// A seat's `knowledge:` entries, relative to its knowledge folder
+/// (`knowledge/<seat-id>/` in the project's runtime folder, AD-32). A file
+/// missing from the folder the caller names is a warning; with none (a
+/// project not yet opened on this Mac) it is not checked.
 fn seat_knowledge(
     rep: &mut Report,
     places: &Places,
@@ -1344,29 +1377,28 @@ fn seat_knowledge(
             rep.error(
                 file.line,
                 format!(
-                    "reference file '{}' must be a name inside .agentic/knowledge/{stem}/",
+                    "reference file '{}' must be a name inside the seat's knowledge folder (knowledge/{stem}/)",
                     file.value
                 ),
                 format!(
-                    "write the file name relative to .agentic/knowledge/{stem}/, without `..`, `~` or a leading /"
+                    "write the file name relative to knowledge/{stem}/, without `..`, `~` or a leading /"
                 ),
             );
             continue;
         }
-        let on_disk = places
-            .project
-            .join(".agentic/knowledge")
-            .join(stem)
-            .join(&file.value);
-        if !on_disk.is_file() {
-            rep.warning(
-                file.line,
-                format!(
-                    "reference file '{}' is not in .agentic/knowledge/{stem}/",
-                    file.value
-                ),
-                "copy the file there (that folder does not travel with the project), or remove the entry",
-            );
+        if let Some(root) = &places.knowledge_root {
+            let folder = root.join(stem);
+            if !folder.join(&file.value).is_file() {
+                rep.warning(
+                    file.line,
+                    format!(
+                        "reference file '{}' is not in {}",
+                        file.value,
+                        folder.display()
+                    ),
+                    "copy the file there (reference files live in the project's runtime folder, not in the project), or remove the entry",
+                );
+            }
         }
         files.push(file.clone());
         out.push(KnowledgeEntry {

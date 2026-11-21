@@ -57,7 +57,8 @@ impl Default for FolderCaps {
 }
 
 /// Link a folder: canonicalise it and refuse the filesystem root, the home
-/// folder itself, `~/Library` and any `.agentic` folder.
+/// folder itself, `~/Library` and any legacy in-project runtime folder
+/// (`am_domain::runtime::LEGACY_DIR`).
 pub fn link_folder(id: &str, path: &Path, access: Access) -> Result<GrantRoot, FolderError> {
     let shown = path.display().to_string();
     let canonical = path
@@ -78,7 +79,10 @@ pub fn link_folder(id: &str, path: &Path, access: Access) -> Result<GrantRoot, F
             "the home folder itself and ~/Library cannot be linked".into(),
         ));
     }
-    if canonical.components().any(|c| c.as_os_str() == ".agentic") {
+    if canonical
+        .components()
+        .any(|c| c.as_os_str() == am_domain::runtime::LEGACY_DIR)
+    {
         return Err(FolderError::Refused(
             shown,
             "app runtime folders cannot be linked".into(),

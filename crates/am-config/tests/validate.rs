@@ -14,16 +14,8 @@ fn fixture(name: &str) -> PathBuf {
 }
 
 fn copy_dir(from: &Path, to: &Path) {
-    std::fs::create_dir_all(to).unwrap();
-    for entry in std::fs::read_dir(from).unwrap() {
-        let entry = entry.unwrap();
-        let target = to.join(entry.file_name());
-        if entry.file_type().unwrap().is_dir() {
-            copy_dir(&entry.path(), &target);
-        } else {
-            std::fs::copy(entry.path(), &target).unwrap();
-        }
-    }
+    // A stream copy (story 1.13: never `std::fs::copy`).
+    am_testkit::copy_tree(from, to);
 }
 
 /// A copy of the valid fixture in a temporary folder, to add or change files in.

@@ -16,8 +16,15 @@
 //!
 //! [`ConfigWriter`] is the only code that writes these files: canonical key
 //! order, Markdown bodies kept byte for byte, atomic replace, History through
-//! the `am_domain::ConfigHistory` port, Undo and Restore (story 1.8). The
+//! the `am_domain::ConfigHistory` port, Undo and Restore (story 1.8), and the
+//! targeted `project_id` insert of [`ConfigIdentityAssign`] (story 1.13). The
 //! watcher and config migrations come in later stories.
+//!
+//! Story 1.13 (AD-32): [`load_in`] names where reference files are checked
+//! ([`LoadOptions`]: the project's runtime folder, a template's
+//! `runtime-seed/`, or nowhere) and whether the folder is a template (which
+//! carries no `project_id`); [`read_company`] and [`decisions_locked`] are the
+//! resolver's reads before a project opens.
 #![forbid(unsafe_code)]
 
 mod canon;
@@ -44,7 +51,8 @@ pub use snapshot::ConfigSnapshot;
 #[cfg(feature = "test-support")]
 pub use writer::FailPoint;
 pub use writer::{
-    ConfigEdit, ConfigWriter, EditOp, ReconcileReport, WriteError, canonical_bytes, config_files,
+    ConfigEdit, ConfigIdentityAssign, ConfigWriter, EditOp, ReconcileReport, WriteError,
+    canonical_bytes, config_files,
 };
 
 use finding::Report;
@@ -92,9 +100,44 @@ const FOLDERS: &[(&str, &str)] = &[
 ];
 const MODEL_FILES: &[&str] = &["accounts", "prices", "capabilities"];
 
-/// Reads and checks the project at `root`.
+/// How [`load_in`] reads a folder.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LoadOptions {
+    /// Where seats' reference files are looked for (`<folder>/<seat-id>/`);
+    /// `None` skips the existence warning.
+    pub knowledge_root: Option<PathBuf>,
+    /// The folder is a template or fixture: a `project_id` is an error.
+    pub template: bool,
+}
+
+impl LoadOptions {
+    /// A project, checked against `knowledge_root` (its runtime folder's
+    /// `knowledge/`, when it has one on this Mac).
+    pub fn project(knowledge_root: Option<PathBuf>) -> LoadOptions {
+        LoadOptions {
+            knowledge_root,
+            template: false,
+        }
+    }
+
+    /// A template or fixture at `root`: reference files under its
+    /// `runtime-seed/knowledge/`, and no `project_id`.
+    pub fn template(root: &Path) -> LoadOptions {
+        LoadOptions {
+            knowledge_root: Some(am_domain::runtime::seed_knowledge(root)),
+            template: true,
+        }
+    }
+}
+
+/// Reads and checks the project at `root` (no reference-file check).
 pub fn load(root: &Path) -> Result<Loaded, LoadError> {
-    load_with(root, BTreeMap::new())
+    load_in(root, LoadOptions::default())
+}
+
+/// Reads and checks the folder at `root` as `opts` says.
+pub fn load_in(root: &Path, opts: LoadOptions) -> Result<Loaded, LoadError> {
+    load_full(root, BTreeMap::new(), opts)
 }
 
 /// [`load`], reading each file named in `overrides` (project-relative path
@@ -102,6 +145,14 @@ pub fn load(root: &Path) -> Result<Loaded, LoadError> {
 /// before anything is written. Only existing files are overridden: the
 /// folders are still listed from disk.
 pub fn load_with(root: &Path, overrides: BTreeMap<String, Vec<u8>>) -> Result<Loaded, LoadError> {
+    load_full(root, overrides, LoadOptions::default())
+}
+
+fn load_full(
+    root: &Path,
+    overrides: BTreeMap<String, Vec<u8>>,
+    opts: LoadOptions,
+) -> Result<Loaded, LoadError> {
     if !root.exists() {
         return Err(LoadError::NotFound(root.to_path_buf()));
     }
@@ -112,7 +163,9 @@ pub fn load_with(root: &Path, overrides: BTreeMap<String, Vec<u8>>) -> Result<Lo
         places: kinds::Places {
             project: root.to_path_buf(),
             home: std::env::var_os("HOME").map(PathBuf::from),
+            knowledge_root: opts.knowledge_root,
         },
+        template: opts.template,
         overrides,
         ..Loader::default()
     };
@@ -123,6 +176,8 @@ pub fn load_with(root: &Path, overrides: BTreeMap<String, Vec<u8>>) -> Result<Lo
 #[derive(Default)]
 struct Loader {
     places: kinds::Places,
+    /// A template or fixture (story 1.13): no `project_id`.
+    template: bool,
     /// Bytes to read instead of a file's (see [`load_with`]).
     overrides: BTreeMap<String, Vec<u8>>,
     reports: BTreeMap<String, Report>,
@@ -189,7 +244,7 @@ impl Loader {
                     self.declared
                         .teams
                         .extend(kinds::declared_ids(&node, "teams"));
-                    self.company = kinds::company(&mut rep, &mut self.refs, &node);
+                    self.company = kinds::company(&mut rep, &mut self.refs, &node, self.template);
                 }
                 self.merge(rep);
             }
@@ -444,4 +499,147 @@ fn frontmatter<'t>(rep: &mut Report, text: &'t str, fix: &str) -> Option<(&'t st
 fn body_first_line(text: &str, body: &str) -> u32 {
     let start = text.len() - body.len();
     u32::try_from(text[..start].matches('\n').count()).unwrap_or(0) + 1
+}
+
+// ---------------------------------------------------------------- opening
+
+/// What [`read_company`] found in `company.yaml` before a project opens.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompanyHead {
+    pub project_id: Option<am_domain::ProjectId>,
+    /// The line holding `project_id`, when there is one.
+    pub project_id_line: Option<u32>,
+}
+
+/// Why a folder cannot be opened as a project, in words.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum CompanyRefusal {
+    #[error(
+        "the folder holds no project yet; create one with the first-run wizard (opening the app in your browser), not from the command line"
+    )]
+    Empty,
+    #[error(
+        "the folder holds config files but no company.yaml, so it is not a project the app can open"
+    )]
+    NoCompanyYaml,
+    #[error("company.yaml cannot be read: {0}")]
+    Unreadable(String),
+    #[error(
+        "company.yaml has schema_version {found}, newer than this app knows ({known}); update the app"
+    )]
+    TooNew { found: i64, known: i64 },
+    #[error(
+        "company.yaml line {line}: project_id '{value}' is not a project id; write back the id this project had (its runtime folder's name), or remove the line to treat the folder as a new project"
+    )]
+    BadProjectId { line: u32, value: String },
+}
+
+/// True when `root` holds any config file or folder of a project.
+fn has_config(root: &Path) -> bool {
+    let files = ["company.yaml", "tools.yaml"];
+    let dirs = ["models", "skills"];
+    files.iter().any(|f| root.join(f).is_file())
+        || dirs.iter().any(|d| root.join(d).is_dir())
+        || FOLDERS.iter().any(|(d, _)| root.join(d).is_dir())
+}
+
+/// Reads `company.yaml`'s `schema_version` and `project_id` (nothing else is
+/// checked: the open does not validate the project). Refused in words when
+/// the folder holds no project, config files but no `company.yaml`, an
+/// unreadable file, a newer `schema_version` or a malformed `project_id`.
+pub fn read_company(root: &Path) -> Result<CompanyHead, CompanyRefusal> {
+    let path = root.join("company.yaml");
+    if !path.is_file() {
+        return Err(if has_config(root) {
+            CompanyRefusal::NoCompanyYaml
+        } else {
+            CompanyRefusal::Empty
+        });
+    }
+    let bytes = std::fs::read(&path).map_err(|e| CompanyRefusal::Unreadable(e.to_string()))?;
+    let text = String::from_utf8(bytes)
+        .map_err(|_| CompanyRefusal::Unreadable("it is not UTF-8 text".into()))?;
+    let node = node::parse(&text, 0)
+        .map_err(|e| CompanyRefusal::Unreadable(format!("line {}: {}", e.line, e.message)))?;
+    let entries = match &node.kind {
+        node::Kind::Map(m) => m.as_slice(),
+        node::Kind::Null => &[],
+        _ => {
+            return Err(CompanyRefusal::Unreadable(
+                "it does not hold key: value pairs".into(),
+            ));
+        }
+    };
+    let get = |k: &str| {
+        entries
+            .iter()
+            .find(|(key, _)| key.name == k)
+            .map(|(_, v)| v)
+    };
+    if let Some(v) = get("schema_version")
+        && let node::Kind::Int(n) = v.kind
+        && n > checks::SCHEMA_VERSION
+    {
+        return Err(CompanyRefusal::TooNew {
+            found: n,
+            known: checks::SCHEMA_VERSION,
+        });
+    }
+    let Some(v) = get("project_id") else {
+        return Ok(CompanyHead {
+            project_id: None,
+            project_id_line: None,
+        });
+    };
+    let value = match &v.kind {
+        node::Kind::Str(s) => s.clone(),
+        _ => v.raw.clone().unwrap_or_else(|| v.type_name().to_string()),
+    };
+    match am_domain::ProjectId::parse(&value) {
+        Some(id) => Ok(CompanyHead {
+            project_id: Some(id),
+            project_id_line: Some(v.line),
+        }),
+        None => Err(CompanyRefusal::BadProjectId {
+            line: v.line,
+            value,
+        }),
+    }
+}
+
+/// Why the CLI's project-open decisions (`--take-over`, `--confirm-move`)
+/// move to the UI (AD-15): the project's config enables a stdio MCP server
+/// or a Source with `render: true` (children that run as the owner). Read
+/// through am-config with no store; a `tools.yaml` or Source file with an
+/// error counts as enabling one (fails closed). `None` when neither.
+pub fn decisions_locked(root: &Path) -> Option<String> {
+    let mut loader = Loader {
+        places: kinds::Places {
+            project: root.to_path_buf(),
+            home: std::env::var_os("HOME").map(PathBuf::from),
+            knowledge_root: None,
+        },
+        ..Loader::default()
+    };
+    loader.read_all(root);
+    let mut reasons = Vec::new();
+    for s in &loader.tools.mcp_servers {
+        if s.transport == "stdio" {
+            reasons.push(format!("the stdio MCP server `{}` is enabled", s.id));
+        }
+    }
+    for s in loader.sources.values() {
+        if s.render {
+            reasons.push(format!("the Source `{}` has render: true", s.id));
+        }
+    }
+    for (file, rep) in &loader.reports {
+        let config = file == "tools.yaml" || file.starts_with("sources/");
+        if config && rep.findings.iter().any(|f| f.severity == Severity::Error) {
+            reasons.push(format!(
+                "{file} has an error, so it is read as enabling a child that runs as you"
+            ));
+        }
+    }
+    (!reasons.is_empty()).then(|| reasons.join("; "))
 }

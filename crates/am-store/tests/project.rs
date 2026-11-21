@@ -1,8 +1,12 @@
-//! Story 1.6: opening a project's `.agentic/` folder (AD-6, AD-7, AD-32).
-//! One test per row of the story's I/O matrix; files and modes are checked
-//! on disk. The "no Actor" row is the `compile_fail` doctest on
-//! `Writer::exec` (`cargo test --doc -p am-store`). The process-level rows
-//! (`agentic serve --project`) are in `am-e2e/tests/project_open.rs`.
+//! Stories 1.6 and 1.13: opening a project's runtime folder (AD-6, AD-7,
+//! AD-32). Since story 1.13 the folder lies outside the project
+//! (`<runtime base>/<project-id>/`, resolved by am-app) and am-store opens the
+//! folder it is given; the lock record's host is the one it is given (the
+//! identity port's Mac name). One test per row of the stories' I/O matrices;
+//! files and modes are checked on disk. The "no Actor" row is the
+//! `compile_fail` doctest on `Writer::exec` (`cargo test --doc -p am-store`).
+//! The process-level rows (`agentic serve --project`) are in
+//! `am-app/tests/serve_project.rs`.
 #![forbid(unsafe_code)]
 #![cfg(unix)]
 
@@ -12,21 +16,31 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use am_domain::Actor;
-use am_store::{SCHEMA_VERSION, StoreError, WriteCommand, open_project};
+use am_domain::{Actor, RuntimeLayout};
+use am_store::{OpenReport, SCHEMA_VERSION, Store, StoreError, WriteCommand};
 use rusqlite::{Connection, OpenFlags};
 
 const CHILD_ENV: &str = "AM_STORE_LOCK_CHILD";
+const HOST: &str = "Test Mac (port)";
+
+/// The runtime folder used by these tests: `rt/` in a temporary base.
+fn layout(base: &Path) -> RuntimeLayout {
+    RuntimeLayout::at(base.join("rt"))
+}
+
+fn open_project(base: &Path) -> Result<(Store, OpenReport), StoreError> {
+    am_store::open_runtime(&layout(base), HOST.to_string())
+}
 
 fn mode(path: &Path) -> u32 {
     std::fs::metadata(path).unwrap().permissions().mode() & 0o777
 }
 
-fn agentic(root: &Path) -> PathBuf {
-    root.join(".agentic")
+fn agentic(base: &Path) -> PathBuf {
+    layout(base).dir().to_path_buf()
 }
 
-/// `.agentic/` made by hand, owner-only, as an earlier app version left it.
+/// The runtime folder made by hand, owner-only, as an earlier open left it.
 fn existing_agentic(root: &Path) -> PathBuf {
     let dir = agentic(root);
     std::fs::DirBuilder::new().mode(0o700).create(&dir).unwrap();
@@ -41,7 +55,7 @@ fn user_version(db: &Path) -> i64 {
 }
 
 fn backups(root: &Path) -> Vec<PathBuf> {
-    match std::fs::read_dir(agentic(root).join("backups")) {
+    match std::fs::read_dir(layout(root).backups_pre_migration()) {
         Ok(rd) => rd.map(|e| e.unwrap().path()).collect(),
         Err(_) => Vec::new(),
     }
@@ -68,20 +82,15 @@ fn sys() -> Actor {
 // ------------------------------------------------------------ new project
 
 #[test]
-fn new_project_creates_an_owner_only_ignored_folder_at_the_latest_version() {
+fn new_project_creates_an_owner_only_folder_at_the_latest_version() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
 
     let (store, report) = open_project(root).unwrap();
 
     let ag = agentic(root);
-    assert_eq!(mode(&ag), 0o700, ".agentic/ mode");
-    assert_eq!(
-        std::fs::read_to_string(ag.join(".gitignore"))
-            .unwrap()
-            .trim(),
-        "*"
-    );
+    assert_eq!(mode(&ag), 0o700, "runtime folder mode");
+    assert!(!ag.join(".gitignore").exists(), "no .gitignore any more");
     let db = ag.join("state.db");
     assert_eq!(mode(&db), 0o600, "state.db mode");
     assert_eq!(mode(&ag.join("lock")), 0o600, "lock mode");
@@ -102,12 +111,19 @@ fn new_project_creates_an_owner_only_ignored_folder_at_the_latest_version() {
         (1..SCHEMA_VERSION).map(|v| (v, v + 1, None)).collect();
     assert_eq!(rows, want);
 
-    // Nothing is written into the project outside `.agentic/`.
+    // Nothing is written outside the runtime folder it was given.
     let top: Vec<String> = std::fs::read_dir(root)
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
-    assert_eq!(top, vec![".agentic".to_string()]);
+    assert_eq!(top, vec!["rt".to_string()]);
+    let mut inside: Vec<String> = std::fs::read_dir(&ag)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| !n.starts_with("state.db-"))
+        .collect();
+    inside.sort();
+    assert_eq!(inside, vec!["lock".to_string(), "state.db".to_string()]);
 
     // The store works through the single writer.
     store
@@ -146,15 +162,24 @@ fn older_database_is_backed_up_then_migrated_keeping_its_rows() {
     assert_eq!((step.from, step.to), (old, SCHEMA_VERSION));
     let backup = step.backup.clone().expect("a backup before migrating");
 
-    // The backup: in .agentic/backups/, named by version and time, 0600, old data.
-    assert_eq!(backup.parent().unwrap(), ag.join("backups"));
+    // The backup: in backups/pre-migration/, named by time and version,
+    // 0600, old data.
+    assert_eq!(
+        backup.parent().unwrap(),
+        layout(root).backups_pre_migration()
+    );
     let name = backup.file_name().unwrap().to_string_lossy().into_owned();
     assert!(
-        name.starts_with(&format!("state-v{old}-")) && name.ends_with(".db"),
+        name.starts_with("state-") && name.ends_with(&format!("-v{old}.db")),
         "{name}"
     );
     assert_eq!(mode(&backup), 0o600, "backup mode");
     assert_eq!(mode(&ag.join("backups")), 0o700, "backups/ mode");
+    assert_eq!(
+        mode(&layout(root).backups_pre_migration()),
+        0o700,
+        "pre-migration/ mode"
+    );
     assert_eq!(backups(root), vec![backup.clone()]);
     assert_eq!(user_version(&backup), old);
     let b = Connection::open_with_flags(&backup, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
@@ -267,7 +292,10 @@ fn second_open_is_refused_naming_the_holder() {
     };
     let holder = holder.clone().expect("the holder is named");
     assert_eq!(holder.pid, std::process::id());
-    assert!(!holder.host.is_empty());
+    assert_eq!(
+        holder.host, HOST,
+        "the host is the identity port's Mac name"
+    );
     let own_command = std::env::args_os()
         .map(|a| a.to_string_lossy().into_owned())
         .collect::<Vec<_>>()
@@ -417,4 +445,106 @@ fn loose_permissions_on_the_folder_are_refused() {
         assert_eq!(std::fs::read_dir(&ag).unwrap().count(), 0);
         assert_eq!(mode(&ag), loose);
     }
+}
+
+/// A kept legacy folder inside the runtime folder is covered by the mode
+/// check too (AD-32: exempt from mode repair, not from the check).
+#[test]
+fn a_loose_kept_legacy_folder_is_refused_not_repaired() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let ag = existing_agentic(root);
+    let kept = layout(root).legacy_copy("2026-11-21", 1);
+    std::fs::create_dir(&kept).unwrap();
+    std::fs::set_permissions(&kept, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let err = match open_project(root) {
+        Err(e) => e,
+        Ok(_) => panic!("a loose kept folder must be refused"),
+    };
+    assert!(
+        err.to_string()
+            .contains(&format!("chmod 700 {}", kept.display())),
+        "{err}"
+    );
+    assert_eq!(mode(&kept), 0o755, "not repaired");
+    assert!(
+        !ag.join("state.db").exists(),
+        "refused before anything is written"
+    );
+}
+
+// ------------------------------------------------------------ backups (1.13)
+
+/// AD-7: five successive migrations leave exactly the three newest
+/// pre-migration backups; a kept legacy folder beside them is untouched.
+#[test]
+fn five_migrations_keep_the_three_newest_backups_and_no_sweep_touches_kept_legacy() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let ag = existing_agentic(root);
+    let kept = layout(root).legacy_copy("2026-11-21", 1);
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&kept)
+        .unwrap();
+    std::fs::set_permissions(&kept, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::write(kept.join("state.db"), b"kept bytes").unwrap();
+    let db = ag.join("state.db");
+    let mut made = Vec::new();
+    for _ in 0..5 {
+        let _ = std::fs::remove_file(&db);
+        for side in ["state.db-wal", "state.db-shm"] {
+            let _ = std::fs::remove_file(ag.join(side));
+        }
+        am_store::testing::database_at_version(&db, SCHEMA_VERSION - 1).unwrap();
+        let (store, report) = open_project(root).unwrap();
+        made.push(report.applied[0].backup.clone().unwrap());
+        drop(store);
+    }
+    let mut left = backups(root);
+    left.sort();
+    assert_eq!(left.len(), 3, "{left:?}");
+    assert_eq!(left, made[2..].to_vec(), "the three newest are kept");
+    assert_eq!(std::fs::read(kept.join("state.db")).unwrap(), b"kept bytes");
+}
+
+/// The version check the resolver runs before anything is written: a
+/// read-only connection, nothing created or changed.
+#[test]
+fn checking_a_database_reads_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("state.db");
+    am_store::check_database(&db).unwrap();
+    assert!(!db.exists(), "an absent database is not created");
+    am_store::testing::database_at_version(&db, SCHEMA_VERSION + 1).unwrap();
+    let before = std::fs::read(&db).unwrap();
+    let names = || {
+        let mut v: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        v.sort();
+        v
+    };
+    assert_eq!(names(), vec!["state.db".to_string()]);
+    let err = am_store::check_database(&db).unwrap_err();
+    assert!(matches!(err, StoreError::TooNew { .. }), "{err:?}");
+    assert_eq!(std::fs::read(&db).unwrap(), before);
+    // No -wal or -shm file appears beside it (a WAL database).
+    assert_eq!(names(), vec!["state.db".to_string()]);
+    // A current database passes, and nothing appears beside it either.
+    let current = tempfile::tempdir().unwrap();
+    let db = current.path().join("state.db");
+    am_store::testing::database_at_version(&db, SCHEMA_VERSION).unwrap();
+    let side = |d: &std::path::Path| {
+        let mut v: Vec<String> = std::fs::read_dir(d)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        v.sort();
+        v
+    };
+    let before = side(current.path());
+    am_store::check_database(&db).unwrap();
+    assert_eq!(side(current.path()), before);
 }

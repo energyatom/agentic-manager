@@ -15,6 +15,7 @@ pub mod content;
 pub mod llm;
 pub mod mcp;
 pub mod net;
+pub mod runtime;
 pub mod secrets;
 pub mod tool_manifest;
 pub mod workspace;
@@ -49,6 +50,10 @@ pub use mcp::{McpClient, McpError, McpToolInfo};
 pub use net::{
     AuthRef, AuthScheme, BodyChunks, Caller, EgressClient, EgressError, HttpMethod, HttpRequest,
     HttpResponse,
+};
+pub use runtime::{
+    IdentityError, MacId, ProjectId, ProjectIdentity, RootIdentity, RuntimeBase, RuntimeLayout,
+    VolumeState,
 };
 pub use secrets::{SecretError, SecretStore, SecretString};
 pub use workspace::{Access, GrantRoot, PathError, WorkspacePath};

@@ -1,7 +1,7 @@
 //! The `agentic` binary. Commands:
 //!
-//! - `agentic serve [--project <path>] [--port N] [--no-browser]`
-//! - `agentic validate [<project>]` (exit 0 no errors, 1 errors, 2 usage or no folder)
+//! - `agentic serve [--project <path> [--confirm-move] [--take-over]] [--port N] [--no-browser]`
+//! - `agentic validate [--template] [<folder>]` (exit 0 no errors, 1 errors, 2 usage or no folder)
 //! - `agentic audit export <project> [--out <file>]`, `agentic audit verify <file>`
 //!   (exit 0 OK, 1 failure or a broken chain, 2 usage)
 //! - `agentic spike c1 [--provider anthropic|lmstudio|ollama] [--model M]`
@@ -44,7 +44,13 @@ async fn main() {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let args = Args(argv.clone());
     match argv.first().map(String::as_str) {
-        Some("serve") => serve(&args).await,
+        Some("serve") => {
+            // Every exit after the marker is written goes through here, after
+            // `serve` has returned and dropped the open project (the marker
+            // first, then the store's lock): no `process::exit` in between.
+            let code = serve(&args).await;
+            std::process::exit(code);
+        }
         Some("validate") => {
             let code =
                 am_app::cli::validate(&argv[1..], &mut std::io::stdout(), &mut std::io::stderr());
@@ -74,44 +80,53 @@ async fn main() {
     }
 }
 
-async fn serve(args: &Args) {
-    // With a project: open it (owner-only `.agentic/`, the exclusive lock,
-    // backup and migrations), print the report and hold the store (whose
-    // writer owns the lock) for the server's life (AD-32, AD-7). Without
-    // one, nothing is opened.
+const SERVE_USAGE: &str = "usage: agentic serve [--project <path> [--confirm-move] [--take-over]] [--port N] [--no-browser]";
+
+/// `agentic serve`: with a project, resolves and opens it (AD-32, story
+/// 1.13: the runtime folder outside the project, the marker, the store and
+/// the config writer), prints the report and holds it for the server's
+/// life. Returns the exit code; the open project is dropped (marker removed,
+/// then the store's lock released) before it returns.
+async fn serve(args: &Args) -> i32 {
     let project = args.value("--project");
     if args.flag("--project") && project.as_deref().is_none_or(|p| p.starts_with("--")) {
-        eprintln!("usage: agentic serve [--project <path>] [--port N] [--no-browser]");
+        eprintln!("{SERVE_USAGE}");
         eprintln!("agentic: --project needs the project folder");
-        std::process::exit(2);
+        return 2;
     }
-    let _project = project.map(|p| {
-        let root = PathBuf::from(&p);
-        let (store, report) = am_store::open_project(&root)
-            .unwrap_or_else(|e| fail(&format!("cannot open the project {p}: {e}")));
-        let lines = report.lines();
-        if lines.is_empty() {
-            println!(
-                "agentic: project {p}: database at version {}",
-                report.version
-            );
-        }
-        for line in lines {
+    if project.is_none() && (args.flag("--confirm-move") || args.flag("--take-over")) {
+        eprintln!("{SERVE_USAGE}");
+        eprintln!("agentic: --confirm-move and --take-over need --project");
+        return 2;
+    }
+    // Installed before the project opens (see `stop_signal`).
+    let stop = stop_signal();
+    let opened = match &project {
+        None => None,
+        Some(p) => match open(p, args) {
+            Ok(o) => Some(o),
+            Err(e) => {
+                eprintln!("agentic: cannot open the project {p}: {e}");
+                return 1;
+            }
+        },
+    };
+    if let (Some(o), Some(p)) = (&opened, &project) {
+        for line in &o.lines {
             println!("agentic: project {p}: {line}");
         }
-        // The config writer (AD-16): removes temp files a crashed write left,
-        // then completes or drops the intents it left (story 1.8).
-        let writer = config_writer(&root, &store)
-            .unwrap_or_else(|e| fail(&format!("cannot open the project {p}: {e}")));
-        (store, writer)
-    });
+    }
     let port: u16 = args
         .value("--port")
         .and_then(|p| p.parse().ok())
         .unwrap_or(0);
-    let (listener, port) = am_server::bind(port)
-        .await
-        .unwrap_or_else(|e| fail(&format!("cannot bind 127.0.0.1: {e}")));
+    let (listener, port) = match am_server::bind(port).await {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("agentic: cannot bind 127.0.0.1: {e}");
+            return 1;
+        }
+    };
     let state = am_server::AppState::new(port);
     println!("agentic: serving on http://127.0.0.1:{port}");
     if !args.flag("--no-browser") {
@@ -125,39 +140,59 @@ async fn serve(args: &Args) {
             eprintln!("agentic: opening a browser is not supported on this platform yet");
         }
     }
-    let shutdown = async {
-        let _ = tokio::signal::ctrl_c().await;
+    let code = match am_server::serve(listener, state, stop).await {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("agentic: {e}");
+            1
+        }
     };
-    if let Err(e) = am_server::serve(listener, state, shutdown).await {
-        fail(&e.to_string());
-    }
+    drop(opened);
+    code
 }
 
-/// The project's config writer over its store's History, after AD-16's
-/// startup reconcile (by the system, audited).
-fn config_writer(
-    root: &std::path::Path,
-    store: &am_store::Store,
-) -> Result<am_config::ConfigWriter, String> {
-    let history = am_store::StoreConfigHistory::new(store).map_err(|e| e.to_string())?;
-    let writer =
-        am_config::ConfigWriter::open(root, Arc::new(history)).map_err(|e| e.to_string())?;
-    let report = writer
-        .reconcile(am_domain::Actor::System {
-            component: "config-writer".into(),
-        })
-        .map_err(|e| e.to_string())?;
-    let p = root.display();
-    for entry in &report.completed {
-        println!(
-            "agentic: project {p}: completed the interrupted write of {} (History entry {})",
-            entry.file, entry.id
-        );
+/// Resolves and opens the project at `p` (am-app's runtime resolver over
+/// the OS identity adapter, with the terminal for `--confirm-move` and
+/// `--take-over`).
+fn open(p: &str, args: &Args) -> Result<am_app::runtime::Opened, am_app::runtime::Refusal> {
+    use am_app::runtime::{OpenRequest, Places, TerminalPrompt, open_project};
+    let places = Places::from_env()?;
+    let identity = am_app::identity::system();
+    let req = OpenRequest {
+        root: PathBuf::from(p),
+        confirm_move: args.flag("--confirm-move"),
+        take_over: args.flag("--take-over"),
+    };
+    open_project(&places, identity.as_ref(), &req, &mut TerminalPrompt)
+}
+
+/// Resolves on Ctrl-C (SIGINT), SIGTERM or SIGHUP: a clean close.
+/// The stop signals, installed when this is called, not when the returned
+/// future is first polled: `serve` calls it before the project opens, so a
+/// SIGINT, SIGTERM or SIGHUP that arrives after the marker is written but
+/// before the server runs still ends in a clean stop that removes the marker
+/// (AD-32), instead of the default action killing the process.
+fn stop_signal() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        if let (Ok(mut int), Ok(mut term), Ok(mut hup)) = (
+            signal(SignalKind::interrupt()),
+            signal(SignalKind::terminate()),
+            signal(SignalKind::hangup()),
+        ) {
+            return Box::pin(async move {
+                tokio::select! {
+                    _ = int.recv() => {}
+                    _ = term.recv() => {}
+                    _ = hup.recv() => {}
+                }
+            });
+        }
     }
-    for id in &report.dropped {
-        println!("agentic: project {p}: dropped the unwritten config change {id}");
-    }
-    Ok(writer)
+    Box::pin(async {
+        let _ = tokio::signal::ctrl_c().await;
+    })
 }
 
 async fn spike_run(args: &Args) {

@@ -3,14 +3,14 @@ title: 'Runtime folder outside the project'
 type: feature
 ticket: 13
 created: '2026-11-21'
-status: ready-for-dev
+status: in-review
 baseline_revision: '6efd9bc85d0008b7ebc80528fb033cc59876ac86'
 route: full
 route_source: auto
 risk: high
-review: ''
-review_source: ''
-lenses_ran: []
+review: quick
+review_source: pinned
+lenses_ran: [quick]
 review_loop_iteration: 0
 context:
   - '{project-root}/AGENTS.md'
@@ -277,15 +277,15 @@ context:
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] Tests first: every matrix row and every rewritten older test. Run them and record the failures in Implementation Notes.
-- [ ] Build in this order:
+- [x] Tests first: every matrix row and every rewritten older test. Run them and record the failures in Implementation Notes.
+- [x] Build in this order:
   1. am-domain
   2. am-testkit (fake, `copy_tree`)
   3. am-store: `open_runtime`, `stream_copy`, backups, the legacy move
   4. am-config: `ConfigIdentityAssign`, `load_in`, `project_id`, the flag-lock query
   5. am-app: identity, `mac-id`, resolver, index, marker, signals, CLI
   6. the remaining literals and helpers, and `clippy.toml`
-- [ ] xtask `runtime-paths`, the `justfile`, the seed and `.gitignore` moves, and the docs.
+- [x] xtask `runtime-paths`, the `justfile`, the seed and `.gitignore` moves, and the docs.
 
 **Acceptance Criteria:**
 - Given the repo after this story, when `cargo xtask runtime-paths` runs, then it passes, and a planted `"/a/.agentic/b"` fails it.
@@ -294,6 +294,49 @@ context:
 - Given the Linux CI job, when it builds and runs nextest, then it is green on the Linux adapter.
 
 ## Implementation Notes
+
+- 2026-11-21 (implementer):
+  - **Where it landed.** `am-domain/src/runtime.rs` (layout, ids, constants, `ProjectIdentity` port); `am-testkit` (`FakeProjectIdentity`, `copy_tree`); `am-store` (`open_runtime`, `check_database`, `lock_holder`, `fsx::stream_copy`, `legacy.rs`, `backups/pre-migration/` with the three newest kept, `OpenReport::legacy_kept`); `am-config` (`project_id` in `COMPANY_KEYS`, `ConfigIdentityAssign`, `load_in`/`LoadOptions`, `read_company`, `decisions_locked`); `am-app/src/identity.rs` (macOS stub-able adapter, Linux adapter, unsupported branch) and `am-app/src/runtime.rs` (places, `mac-id`, root record and index, marker guard, terminal prompt, the resolver, the read-only resolve); `main.rs` (`serve` returns its exit code, SIGTERM/SIGHUP/SIGINT); `cli.rs` (`validate --template`, `audit export` through the read-only resolve); `xtask runtime-paths`.
+  - **Tests first, as run.** am-store: the rewritten `project.rs`/`audit.rs` and the new `legacy.rs` failed first (7 failures: a tempdir is 0755 on macOS, so the runtime folder moved to `rt/`; then 2: the legacy read-only open left `-shm`/`-wal` in the old folder, fixed by opening it `immutable` when it has no WAL). am-config `identity.rs` and the rewritten anatomy/templates tests failed first (compile, then 2 failures on the moved seed path in `fixtures/templates/sample.json` and the anatomy warnings, now read with `--template`). xtask `runtime_paths.rs` failed first (unknown task), then caught three `".agentic-open"` literals in the new am-app tests. am-app `identity_tools.rs` failed first on the hang case (a killed tool's child kept the pipe open; the wait for its output is now bounded). The am-app `runtime_open.rs` and `serve_project.rs` rows were written right after the resolver skeleton and were not run against the old code; they pass now.
+  - **Dependencies.** No new crate and no new external dependency. The workspace `uuid` gains its `v4` feature for this Mac's random id (`rng` was already on for v7, so `Cargo.lock` gains no package). am-app gains dev-dependencies on `am-testkit` and on itself with a `test-support` feature (the mint fail point), as am-config already does.
+  - **Choices the plan left open.** A `stat` device that is not a disk and looks like a share (`//…`, `host:/…`, `map …`) is the v1 network-share refusal; any other non-disk device names `stat`. An unknown VolumeUUID (`diskutil` "Could not find disk") or an empty MountPoint is "unmounted". A copy is detected by reading `company.yaml` through `/.vol/<device>/<file id>` (macOS) or the recorded path (Linux). An unreadable marker counts as another Mac's. `decisions_locked` fails closed when `tools.yaml` or a Source file has an error. Audits: `project.moved`, `project.taken_over` and `project.legacy_moved` (target: the project id).
+  - **Verification.** `just check` green on macOS (fmt, clippy `-D warnings`, 395 nextest tests, doctests, check-deps, check-forbid, denylist, runtime-paths, `validate --template` over fixtures and templates); a planted `std::fs::copy` fails clippy; `git ls-files templates fixtures | grep '/\.agentic/'` is empty. The Linux job was not run here (no Linux target installed); its branches compile only by inspection until CI runs.
+
+- 2026-11-21 (build session, after the implementer):
+  - **am-app failing run, after the fact.** The implementer did not run `runtime_open.rs` and `serve_project.rs` before the resolver was written. The build session therefore stubbed the resolver back to a skeleton (`open_project`, `find_runtime`, `read_mac_id` and `mint_mac_id` refuse; `knowledge_root` is `None`) with the tests unchanged. `cargo nextest run -p am-app --features am-app/test-support` then ran 59 tests: 45 failed and 14 passed. Every `runtime_open` matrix test failed except `the_fake_is_a_project_identity`. Every new or rewritten `serve_project` and `audit_cli` test failed. The 14 that passed are the identity-tool adapter tests (already seen failing earlier) and the older tests about usage and a missing folder. The implementation was then restored byte for byte. This was a run against a skeleton made afterwards, not a true tests-first order; the owner decides whether it is accepted.
+  - **Verification**, run by the build session: the plan's nextest command passed (376 passed; the 6 skipped are pre-existing live or opt-in tests). `cargo xtask runtime-paths` is clean. `git ls-files templates fixtures | grep '/\.agentic/'` prints nothing. `just check` is green.
+
+- 2026-11-21 (finishing session, owner's instructions of 2026-11-21):
+  - **Tests-first exception, accepted by the owner.** The owner accepted the am-app gap as an exception, recorded like story 1.1's ("Accept as an exception, recorded like the 1.1 spike exception, with the stub-run evidence (45/59 failing) in the plan"). The evidence is the build session's stub run above: `cargo nextest run -p am-app --features am-app/test-support` against a resolver skeleton gave 45 failed and 14 passed. Re-run here on the same skeleton (`open_project`, `find_runtime`, `read_mac_id` and `mint_mac_id` refuse; `knowledge_root` returns `None`): `59 tests run: 14 passed, 45 failed`. That is a run made after the code; it is recorded as the exception's evidence, not as a tests-first run. Epic 1 Notes record the exception and the owner's process fix, which logs the red run before any `src/` change from now on.
+  - **The 14 tests that passed against the skeleton.**
+
+    | Test | What it checks | Behaviour before 1.13? | Against its own unit's skeleton | Strengthened? |
+    |---|---|---|---|---|
+    | `audit_cli::verify_names_a_line_that_is_not_json` | `audit verify` names a non-JSON line, exit 1 | Yes (story 1.7; 1.13 only adds the temp HOME) | n/a | No |
+    | `audit_cli::bad_usage_exits_two` | `agentic audit` usage errors exit 2 | Yes (story 1.7) | n/a | No |
+    | `serve_project::serve_with_a_missing_project_folder_is_a_usage_error` | `serve --project <missing>` is a usage error | Yes (story 1.6) | n/a | No |
+    | `serve_project::serve_without_a_project_is_unchanged` | `serve` without `--project` still serves | Yes (story 1.6) | n/a | No |
+    | `identity::tests::plist_values_are_read_by_key` | plist key extraction | No (new) | Fails | No |
+    | `identity::macos::tests::disk_and_share_devices` | disk and share device names | No (new) | Fails | No |
+    | `identity_tools::working_tools_give_the_volume_uuid_the_inode_and_the_name` | stub tools give the identity | No (new) | Fails | No |
+    | `identity_tools::a_failing_tool_is_named_with_what_it_returned` | a failing tool is named with its output | No (new) | Fails | No |
+    | `identity_tools::a_hanging_tool_is_stopped_at_the_limit_and_named` | the time limit | No (new) | Fails | No |
+    | `identity_tools::output_without_the_expected_value_is_refused_naming_the_tool` | output without the key | No (new) | Fails | No |
+    | `identity_tools::a_share_is_not_supported_in_v1` | a share device is refused | No (new) | Fails | No |
+    | `identity_tools::an_unknown_volume_reads_as_unmounted` | an unknown VolumeUUID is unmounted | No (new) | Fails | No |
+    | `identity_tools::the_production_adapter_uses_the_real_tools_and_ten_seconds` | the production constructor | No (new) | Fails | No |
+    | `runtime_open::the_fake_is_a_project_identity` | the testkit fake is a `ProjectIdentity` | No (new) | Fails | No |
+
+    - Four check behaviour that existed before 1.13. 1.13 changed only their harness (a temp HOME), so passing against the resolver skeleton is right.
+    - The other ten are new in 1.13. They test the identity adapter (`am-app/src/identity.rs`) and the am-testkit fake, which the resolver skeleton does not stub, not the resolver.
+    - Each of the ten was therefore run against a skeleton of its own unit: the adapter's `root`, `locate`, `mac_name`, `run_tool`, `plist_string`, `is_disk`, `is_share` and `macos()` stubbed, and the fake's `root`, `locate` and `mac_name` returning a tool error. Command: `cargo nextest run -p am-app --features am-app/test-support --no-fail-fast -E 'binary(identity_tools) | test(/plist_values_are_read_by_key|disk_and_share_devices|the_fake_is_a_project_identity/)'`. Result: `12 tests run: 0 passed, 12 failed` (the ten, plus `a_failing_tool_refuses_the_open_with_nothing_written` and the new `a_disk_volume_with_no_volume_uuid_is_not_supported_in_v1`).
+    - None needed strengthening. Both files were restored byte for byte, checked with `cmp`.
+  - **Review fixes, each test seen failing first** (by a run against the code without the fix, or with the bug put back):
+    - Finding 4: `identity_tools::a_disk_volume_with_no_volume_uuid_is_not_supported_in_v1` failed (1 failed), then passed.
+    - Findings 3, 5, 6 and 7: `runtime_open::{a_copy_whose_original_cannot_be_read_is_refused_not_moved, an_indexed_root_whose_record_cannot_be_read_is_refused_not_minted_over, a_renamed_project_folder_updates_its_recorded_path, this_macs_marker_is_refused_only_while_its_process_holds_the_project}`. Run: `4 tests run: 0 passed, 4 failed` ("the open must be refused" ×2; recorded path still `projects/a`; "already open on this Mac (pid … opened 2026-11-20T10:00:00.000Z)").
+    - Finding 1: `project::checking_a_database_reads_only` failed against the old plain read-only open (`["state.db", "state.db-shm", "state.db-wal"]`), then passed. Its last step asked `database_at_version` to lower a version, which it never does, so the current-version case now uses a fresh database.
+    - Finding 10: `runtime_open::a_failure_after_the_legacy_move_still_reports_and_audits_it_on_the_next_open` failed with the early `Done` put back into `move_legacy`, then passed.
+  - **Left over from the cut-off build session.** am-store did not compile: `legacy.rs` still called `open_source`, which the finding 1 fix had moved to `lib.rs` as `open_read_only`. The call now goes to `crate::open_read_only`.
 
 ## Plan Change Log
 
@@ -327,6 +370,31 @@ context:
 - 2026-11-21 — The owner approved the rewritten plan, including the item 4 rule (a crash during a plain mint is refused as a removed id, with the worded fix). Status set to `ready-for-dev`; the frozen block is locked again.
 
 ## Review Triage Log
+
+Quick lens, 2026-11-21 (one context-free reviewer over the full diff; 15 findings).
+
+1. **`check_database` leaves `-wal`/`-shm` in the legacy folder.** Fixed: `open_read_only` opens `immutable` when there is no `-wal`, and the test checks for side files (red then green).
+2. **Signals between the marker and the server kill the process and leave the marker.** Fixed: `stop_signal()` installs the SIGINT, SIGTERM and SIGHUP handlers when called, and `serve` calls it before `open()`. No test can reliably hit that window, so this was checked by inspection.
+3. **A failed read of the original's `company.yaml` counts as "not a copy", so the copy is treated as a move.** Fixed: refused in words naming the original and the read error (red then green). Kept as decided: a folder that exists with the recorded file id but no longer holds the id (inode reuse, or the id removed from the original) is still a move.
+4. **A disk volume with no VolumeUUID is a tool error, not the v1 refusal.** Fixed:
+   - a `diskutil` plist that describes a volume (it names its `DeviceIdentifier`) but has no `VolumeUUID` is refused as not supported in v1;
+   - output that is not such a plist still names the tool;
+   - the message now says "a volume with no VolumeUUID, such as a network share";
+   - red then green.
+5. **The root index is never read, so an unreadable record lets a root be minted over.** Fixed:
+   - an index line whose runtime folder still exists but whose record cannot be read survives index rewrites;
+   - a root the index lists for such a folder is refused, naming the record;
+   - red then green.
+6. **A `Normal` open never refreshes the recorded path.** Fixed: a renamed or moved folder (same file id) rewrites its record (red then green).
+7. **A reused pid makes this Mac's left-over marker look live.** Fixed: the marker refuses only while its pid is alive and the runtime folder's store lock is held (`am_store::lock_is_held`, a shared try-lock on a fresh handle that never rewrites the file). A reused pid's marker is replaced (red then green).
+8. **The clone-refused counter is dead code, so "zero clone attempts" is always true.** Fixed: the dead `clone_file` and `clone_attempts` are removed. The test still arms the file and asserts that it went through `stream_copy` and verified. No clone path exists, because clippy bans `std::fs::copy`. **Needs the owner:** the frozen matrix row says "zero clone attempts recorded", and that counter no longer exists. The evidence is now the armed file's stream copy plus the clippy ban.
+9. **Runtime paths spelled outside `RuntimeLayout`.** Fixed: `acquire` uses `RuntimeLayout::lock()`, `legacy.rs` names `state.db` through `RuntimeLayout`, and the resolver's legacy check uses `RuntimeLayout::at(old).state_db()`.
+10. **A failure after the move loses its report and audit.** Fixed: `move_legacy` no longer marks the journal done; the resolver marks it after the `project.legacy_moved` audit. Shown by a new fail point `AfterLegacyMove`: red with the early `Done` put back, then green.
+11. **The `PROJECT_REFUSED` message still says the project holds `.agentic/`.** Fixed: it now says "which holds its configuration", and the same for the ancestor message.
+12. **AC "having first been seen to fail" not met for the am-app resolver rows.** Owner exception (2026-11-21), recorded in Implementation Notes and epic 1 Notes with the 45/59 evidence and the 14-test audit.
+13. **The Linux job has not run.** Open until CI runs on the branch: the Linux job builds the core and runs nextest.
+14. **The serve tests use the real identity tools on macOS.** Kept as is. These tests run the production binary, which can only take its identity from the OS, since a flag or env var for identity is forbidden. Every matrix row that needs scripted identity runs in `runtime_open.rs` through the am-testkit fake, and the stub-tool adapter is covered in `identity_tools.rs`.
+15. **`just validate` skips the moved anatomy seeds.** Fixed: the `validate` loop includes `fixtures/projects/anatomy/` with `--template`.
 
 ## Design Notes
 

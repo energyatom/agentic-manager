@@ -12,7 +12,7 @@ export CARGO_TARGET_DIR := env_var_or_default("CARGO_TARGET_DIR", env_var("HOME"
 default: check
 
 # The story gate: format, lints, every offline test and the repo checks.
-check: fmt-check clippy test doctest check-deps check-forbid denylist validate
+check: fmt-check clippy test doctest check-deps check-forbid denylist runtime-paths validate
 
 fmt-check:
     cargo fmt --all -- --check
@@ -44,16 +44,22 @@ check-forbid:
 denylist:
     cargo xtask denylist
 
-# AD-16, AD-33: `agentic validate` on every valid fixture project and every
-# shipped template (the Blank department, the role templates and the sample
-# company; each must exit 0). The broken fixtures are asserted by the
-# am-config and cli_validate tests instead.
+# AD-32 (story 1.13): no Rust string literal under crates/ spells a runtime
+# path (`.agentic` at its start or after `/`) outside am_domain::RuntimeLayout.
+runtime-paths:
+    cargo xtask runtime-paths
+
+# AD-16, AD-33: `agentic validate --template` on every valid fixture project
+# and every shipped template (the Blank department, the role templates and
+# the sample company; each must exit 0): reference files are checked against
+# each folder's runtime-seed/, and a `project_id` is refused (story 1.13). The
+# broken fixtures are asserted by the am-config and cli_validate tests instead.
 validate:
     #!/usr/bin/env bash
     set -euo pipefail
     cargo build -q -p am-app --bin agentic
-    for project in fixtures/projects/valid*/ templates/departments/*/ templates/roles/*/ templates/samples/*/; do
-        "$CARGO_TARGET_DIR/debug/agentic" validate "$project"
+    for project in fixtures/projects/valid*/ fixtures/projects/anatomy/ templates/departments/*/ templates/roles/*/ templates/samples/*/; do
+        "$CARGO_TARGET_DIR/debug/agentic" validate --template "$project"
     done
 
 # AD-3 licence allow-list plus bans and sources on both graphs (macOS: whole

@@ -1,7 +1,12 @@
 # AD-12: am-net::EgressClient is the only HTTP client; nothing else constructs
 # a reqwest client (am-net allows it at its single construction site).
 # AD-39: chromiumoxide's WebSocket/HTTP launchers are banned.
+# Story 1.13: `std::fs::copy` is banned: its first step on macOS is
+# clonefile(2), which fails with EPERM under ~/Library/CloudStorage/ for a
+# file without a com.apple.macl grant; copy by stream (am_store::stream_copy,
+# am_testkit::copy_tree).
 disallowed-methods = [
+    { path = "std::fs::copy", reason = "clonefile(2) fails with EPERM under ~/Library/CloudStorage/; copy by stream (story 1.13)" },
     { path = "reqwest::Client::new", reason = "use am_net::EgressClient (AD-12)" },
     { path = "reqwest::Client::builder", reason = "use am_net::EgressClient (AD-12)" },
     { path = "reqwest::ClientBuilder::new", reason = "use am_net::EgressClient (AD-12)" },

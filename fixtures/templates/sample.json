@@ -255,7 +255,7 @@
     "id": "d1-notes",
     "type": "knowledge",
     "team": "d1",
-    "dir": ".agentic/knowledge/team-d1"
+    "dir": "runtime-seed/knowledge/team-d1"
   },
   "files": {
     "pdf": 2,

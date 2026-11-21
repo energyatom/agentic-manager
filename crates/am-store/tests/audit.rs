@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 use am_domain::{Actor, Usage};
 use am_store::{
-    Reader, SCHEMA_VERSION, Store, StoreError, TriggerRow, WriteCommand, open_project, verify_jsonl,
+    OpenReport, Reader, SCHEMA_VERSION, Store, StoreError, TriggerRow, WriteCommand, verify_jsonl,
 };
 use rusqlite::{Connection, params};
 use serde_json::{Value, json};
@@ -23,8 +23,17 @@ fn sys() -> Actor {
     }
 }
 
+/// The runtime folder the store opens (story 1.13): `rt/` in `root`.
+fn layout(root: &Path) -> am_domain::RuntimeLayout {
+    am_domain::RuntimeLayout::at(root.join("rt"))
+}
+
 fn db(root: &Path) -> PathBuf {
-    root.join(".agentic").join("state.db")
+    layout(root).state_db()
+}
+
+fn open_project(root: &Path) -> Result<(Store, OpenReport), StoreError> {
+    am_store::open_runtime(&layout(root), "test-mac".into())
 }
 
 fn sha256_hex(s: &str) -> String {
@@ -535,7 +544,7 @@ fn a_new_project_audits_every_migration_step_the_first_included() {
 #[test]
 fn an_older_project_audits_the_one_step_it_applies() {
     let dir = tempfile::tempdir().unwrap();
-    let ag = dir.path().join(".agentic");
+    let ag = layout(dir.path()).dir().to_path_buf();
     std::fs::create_dir(&ag).unwrap();
     #[cfg(unix)]
     {
@@ -585,7 +594,7 @@ fn spike_hash(
 #[test]
 fn a_chain_written_by_1_6_binaries_verifies_after_migrating_and_writing() {
     let dir = tempfile::tempdir().unwrap();
-    let ag = dir.path().join(".agentic");
+    let ag = layout(dir.path()).dir().to_path_buf();
     std::fs::create_dir(&ag).unwrap();
     #[cfg(unix)]
     {

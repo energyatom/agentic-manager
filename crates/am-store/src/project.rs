@@ -1,32 +1,37 @@
-//! Opening a project (AD-32, AD-6, AD-7): its runtime folder `.agentic/`,
-//! the exclusive project lock and the migrated store.
+//! Opening a project's runtime folder (AD-32, AD-6, AD-7): the exclusive
+//! project lock and the migrated store. Since story 1.13 the folder lies
+//! outside the project, at `<runtime base>/<project-id>/`; `am-app` resolves
+//! it and am-store opens the folder it is given ([`RuntimeLayout`]). It
+//! never computes the base and never reads HOME.
 //!
-//! - `.agentic/` is created 0700 and holds a `.gitignore` of `*`, so git
-//!   ignores it without the app touching a project file. An existing folder
-//!   with any group or other permission bit is refused, naming the fix.
-//! - `.agentic/lock` (0600) is held with the OS file lock by the store's
-//!   writer thread, so it is released exactly when the read-write connection
+//! - The runtime folder is created 0700 when missing (its parent must
+//!   exist). An existing folder, or a kept `legacy-agentic-*` folder inside
+//!   it, with any group or other permission bit is refused, naming the fix
+//!   (the kept folders are exempt from repair, not from the check).
+//! - `lock` (0600) is held with the OS file lock by the store's writer
+//!   thread, so it is released exactly when the read-write connection
 //!   closes (the last [`Store`] or `Writer` handle dropped); it records the
-//!   holder (pid, host, command, start time).
+//!   holder (pid, host, command, start time). The host is the one the caller
+//!   gives: the `ProjectIdentity` port's Mac name, never a fallback.
 //!   A second open is refused, naming that holder. The OS drops the lock when
 //!   its holder dies, so a file left by a killed process never blocks; the
 //!   next holder rewrites it.
-//! - `.agentic/state.db` (0600) is opened through [`Store`], which backs up
-//!   and migrates it and returns the [`OpenReport`].
+//! - `state.db` (0600) is opened through [`Store`], which backs up (to
+//!   `backups/pre-migration/`, the three newest kept) and migrates it and
+//!   returns the [`OpenReport`].
 //!
-//! Nothing outside `.agentic/` is written.
+//! Nothing outside the runtime folder is written.
 
 use std::fmt;
 use std::fs::{File, TryLockError};
 use std::io::{Seek, SeekFrom, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Duration;
+
+use am_domain::RuntimeLayout;
 
 use crate::migrations::OpenReport;
 use crate::{Store, StoreError, fsx, now_ts};
-
-/// The runtime folder inside a project.
-pub const AGENTIC_DIR: &str = ".agentic";
 
 /// Who holds a project's lock.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,7 +54,7 @@ impl fmt::Display for LockHolder {
 }
 
 impl LockHolder {
-    fn current() -> LockHolder {
+    fn current(host: String) -> LockHolder {
         let command = std::env::args_os()
             .map(|a| a.to_string_lossy().into_owned())
             .collect::<Vec<_>>()
@@ -57,7 +62,7 @@ impl LockHolder {
             .replace(['\n', '\r'], " ");
         LockHolder {
             pid: std::process::id(),
-            host: host_name(),
+            host: host.replace(['\n', '\r'], " "),
             command,
             started_at: now_ts(),
         }
@@ -85,32 +90,6 @@ impl LockHolder {
     }
 }
 
-/// The machine's name, for the lock record; never fails.
-fn host_name() -> String {
-    let clean = |s: &str| {
-        let s = s.trim();
-        (!s.is_empty()).then(|| s.replace(['\n', '\r'], " "))
-    };
-    if let Some(h) = std::fs::read_to_string("/proc/sys/kernel/hostname")
-        .ok()
-        .and_then(|s| clean(&s))
-    {
-        return h;
-    }
-    if let Some(h) = std::process::Command::new("hostname")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .and_then(|o| clean(&String::from_utf8_lossy(&o.stdout)))
-    {
-        return h;
-    }
-    std::env::var("HOSTNAME")
-        .ok()
-        .and_then(|s| clean(&s))
-        .unwrap_or_else(|| "an unknown host".to_string())
-}
-
 /// Words for a refusal: the holder, or that it could not be read.
 pub(crate) fn holder_words(holder: &Option<LockHolder>) -> String {
     match holder {
@@ -133,43 +112,32 @@ impl Drop for ProjectLock {
     }
 }
 
-/// Opens the project at `root`: prepares `.agentic/`, takes the lock and
-/// opens (backing up and migrating) `.agentic/state.db`. The lock lives as
-/// long as the store's read-write connection.
-pub fn open_project(root: &Path) -> Result<(Store, OpenReport), StoreError> {
+/// Opens the runtime folder `layout`: prepares the folder, takes the lock
+/// (recording `host`, the identity port's Mac name) and opens (backing up
+/// and migrating) its `state.db`. The lock lives as long as the store's
+/// read-write connection.
+pub fn open_runtime(
+    layout: &RuntimeLayout,
+    host: String,
+) -> Result<(Store, OpenReport), StoreError> {
     if !cfg!(unix) {
         return Err(StoreError::Unsupported);
     }
-    let dir = prepare_dir(root)?;
-    let lock = acquire(&dir)?;
-    Store::open_reporting(&dir.join("state.db"), Some(lock))
+    prepare_dir(layout)?;
+    let lock = acquire(layout, host)?;
+    Store::open_reporting(
+        &layout.state_db(),
+        &layout.backups_pre_migration(),
+        Some(lock),
+    )
 }
 
-fn prepare_dir(root: &Path) -> Result<PathBuf, StoreError> {
-    match std::fs::metadata(root) {
-        Ok(m) if m.is_dir() => {}
-        Ok(_) => {
-            return Err(StoreError::Invalid(format!(
-                "{} is not a folder; give the project folder",
-                root.display()
-            )));
-        }
-        Err(_) => {
-            return Err(StoreError::Invalid(format!(
-                "the project folder {} does not exist",
-                root.display()
-            )));
-        }
-    }
-    let dir = root.join(AGENTIC_DIR);
-    match std::fs::symlink_metadata(&dir) {
-        Ok(m) if m.is_dir() => {
-            if let Some(mode) = fsx::mode_bits(&m)
-                && mode & 0o077 != 0
-            {
-                return Err(StoreError::LoosePermissions { path: dir, mode });
-            }
-        }
+/// The runtime folder exists (0700) or is created; it, and every kept
+/// legacy folder in it, has no group or other permission bit.
+fn prepare_dir(layout: &RuntimeLayout) -> Result<(), StoreError> {
+    let dir = layout.dir();
+    match std::fs::symlink_metadata(dir) {
+        Ok(m) if m.is_dir() => check_private(dir, &m)?,
         Ok(_) => {
             return Err(StoreError::Invalid(format!(
                 "{} is not a folder (a file or a link); move it aside and open the project again",
@@ -177,36 +145,46 @@ fn prepare_dir(root: &Path) -> Result<PathBuf, StoreError> {
             )));
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            fsx::ensure_private_dir(&dir)
+            fsx::ensure_private_dir(dir)
                 .map_err(|e| StoreError::io(format!("cannot create {}", dir.display()), e))?;
         }
         Err(e) => {
             return Err(StoreError::io(format!("cannot read {}", dir.display()), e));
         }
     }
-    let ignore = dir.join(".gitignore");
-    match fsx::create_private_file(&ignore) {
-        Ok(mut f) => f
-            .write_all(b"*\n")
-            .map_err(|e| StoreError::io(format!("cannot write {}", ignore.display()), e))?,
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
-        Err(e) => {
-            return Err(StoreError::io(
-                format!("cannot create {}", ignore.display()),
-                e,
-            ));
+    let entries = std::fs::read_dir(dir)
+        .map_err(|e| StoreError::io(format!("cannot read {}", dir.display()), e))?;
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if RuntimeLayout::is_kept_legacy(&name)
+            && let Ok(m) = std::fs::symlink_metadata(entry.path())
+            && m.is_dir()
+        {
+            check_private(&entry.path(), &m)?;
         }
     }
-    Ok(dir)
+    Ok(())
 }
 
-fn acquire(dir: &Path) -> Result<ProjectLock, StoreError> {
-    let path = dir.join("lock");
+fn check_private(dir: &Path, m: &std::fs::Metadata) -> Result<(), StoreError> {
+    if let Some(mode) = fsx::mode_bits(m)
+        && mode & 0o077 != 0
+    {
+        return Err(StoreError::LoosePermissions {
+            path: dir.to_path_buf(),
+            mode,
+        });
+    }
+    Ok(())
+}
+
+fn acquire(layout: &RuntimeLayout, host: String) -> Result<ProjectLock, StoreError> {
+    let path = layout.lock();
     let io_err = |what: &str, e| StoreError::io(format!("cannot {what} {}", path.display()), e);
     // The record is built before the lock is taken and written right after,
     // so a refused opener during a stale-lock takeover can read the previous
     // (dead) holder's record only for the length of that write.
-    let holder = LockHolder::current();
+    let holder = LockHolder::current(host);
     let mut file = fsx::open_private_file(&path).map_err(|e| io_err("open", e))?;
     match file.try_lock() {
         Ok(()) => {}
@@ -225,9 +203,29 @@ fn acquire(dir: &Path) -> Result<ProjectLock, StoreError> {
     Ok(ProjectLock { file })
 }
 
+/// The holder recorded in a runtime folder's lock file, read without taking
+/// the lock (for a refusal's words); `None` when there is none.
+pub fn lock_holder(layout: &RuntimeLayout) -> Option<LockHolder> {
+    std::fs::read_to_string(layout.lock())
+        .ok()
+        .and_then(|t| LockHolder::parse(&t))
+}
+
+/// Whether a live process holds the runtime folder's store lock, checked by
+/// trying a shared lock on a fresh handle that is released at once; the
+/// file is neither created nor rewritten. The OS drops a dead holder's lock,
+/// so this tells a left-over marker from an open project (a reused pid
+/// holds nothing).
+pub fn lock_is_held(layout: &RuntimeLayout) -> bool {
+    match File::open(layout.lock()) {
+        Ok(f) => matches!(f.try_lock_shared(), Err(TryLockError::WouldBlock)),
+        Err(_) => false,
+    }
+}
+
 /// The holder writes its record right after taking the lock; a refusal that
 /// lands in between waits briefly for it.
-fn read_holder(path: &Path) -> Option<LockHolder> {
+pub(crate) fn read_holder(path: &Path) -> Option<LockHolder> {
     for _ in 0..20 {
         if let Some(h) = std::fs::read_to_string(path)
             .ok()
@@ -261,10 +259,9 @@ mod tests {
     }
 
     #[test]
-    fn current_holder_has_a_host() {
-        let h = LockHolder::current();
+    fn current_holder_records_the_given_host_on_one_line() {
+        let h = LockHolder::current("Office\nMac".into());
         assert_eq!(h.pid, std::process::id());
-        assert!(!h.host.is_empty());
-        assert!(!h.host.contains('\n'));
+        assert_eq!(h.host, "Office Mac");
     }
 }

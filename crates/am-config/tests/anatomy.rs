@@ -8,6 +8,7 @@ mod common;
 
 use am_config::Severity;
 use am_domain::capability::{AccountKind, Capability};
+use am_domain::runtime::LEGACY_DIR;
 use am_domain::workspace::Access;
 use common::*;
 
@@ -108,7 +109,8 @@ fn a_folder_is_read_only_by_default() {
 #[test]
 fn refused_folders_are_errors_naming_the_allowed_forms() {
     let found = findings(&fixture("broken-anatomy"));
-    for (line, path) in [(8, "~/Library/x"), (10, ".agentic/x")] {
+    let legacy = format!("{LEGACY_DIR}/x");
+    for (line, path) in [(8, "~/Library/x"), (10, legacy.as_str())] {
         let f = at(&found, "seats/refused.md", line, path);
         assert_eq!(f.severity, Severity::Error);
         assert!(f.message.contains("not allowed"), "{}", f.message);
@@ -131,8 +133,8 @@ fn every_refused_folder_form_is_an_error() {
         "~/Library",
         "~/Library/Application Support/agentic-manager",
         "~/notes/../Library/x",
-        "notes/.agentic/x",
-        ".agentic",
+        &format!("notes/{LEGACY_DIR}/x"),
+        LEGACY_DIR,
         ".",
         "notes/..",
         "../../../../../../../../../../../../..",
@@ -439,7 +441,10 @@ fn broken_skills_and_seat_give_one_error_each() {
 
 #[test]
 fn an_unlisted_link_host_and_a_missing_reference_file_are_warnings() {
-    let loaded = am_config::load(&fixture("anatomy")).unwrap();
+    // Story 1.13: reference files are checked against the template's
+    // runtime-seed/ (validate --template), not a folder in the project.
+    let root = fixture("anatomy");
+    let loaded = am_config::load_in(&root, am_config::LoadOptions::template(&root)).unwrap();
     let soft = in_file(&loaded.findings, "seats/soft.md");
     assert_eq!(soft.len(), 2, "{soft:#?}");
     let f = at(&loaded.findings, "seats/soft.md", 7, "absent.md");
@@ -480,7 +485,9 @@ fn the_seat_allow_list_is_the_project_egress_list() {
 
 #[test]
 fn the_anatomy_fixture_has_only_its_three_warnings() {
-    let loaded = am_config::load(&fixture("anatomy")).unwrap();
+    // As `agentic validate --template` reads it (story 1.13).
+    let root = fixture("anatomy");
+    let loaded = am_config::load_in(&root, am_config::LoadOptions::template(&root)).unwrap();
     assert!(
         errors(&loaded.findings).is_empty(),
         "{:#?}",
@@ -543,7 +550,13 @@ fn the_project_folder_and_its_ancestors_are_refused_however_written() {
         let path = spelling.replace("{name}", &name);
         let refused = refused_with(copy.path(), &path);
         assert_eq!(refused.len(), 1, "{path}: {refused:#?}");
-        assert!(refused[0].message.contains(".agentic/"), "{path}");
+        // The project no longer holds a runtime folder (AD-32); the words
+        // name what it does hold.
+        assert!(
+            refused[0].message.contains("holds its configuration"),
+            "{path}: {}",
+            refused[0].message
+        );
     }
 }
 
@@ -553,7 +566,7 @@ fn a_dot_agentic_part_is_refused_in_any_case() {
         let copy = copy_of("anatomy");
         let refused = refused_with(copy.path(), path);
         assert_eq!(refused.len(), 1, "{path}: {refused:#?}");
-        assert!(refused[0].message.contains(".agentic"), "{path}");
+        assert!(refused[0].message.contains(LEGACY_DIR), "{path}");
     }
 }
 

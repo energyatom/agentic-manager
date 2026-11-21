@@ -1,0 +1,32 @@
+# Team overrides for bmad-build (tracked; personal ones go in bmad-build.user.toml).
+# _bmad/custom/bmad-build-auto.toml carries the same rule for bmad-build-auto.
+#
+# Owner decision 2026-11-21 (epic 1 Notes, "Red run logged before any src
+# change"): story 1.1 and story 1.13 both shipped code whose tests were not
+# seen failing first. From now on the red run is logged in the plan before
+# anything under a `src/` folder changes, and the implementer is told so.
+
+[workflow]
+
+persistent_facts = [
+  """Red run first (owner decision 2026-11-21, epic 1 Notes). Before any change to a file under a `src/` folder (`crates/*/src/`, `xtask/src/`, `web/src/`), the story's acceptance tests are written outside `src/` (`tests/` folders, `crates/am-e2e/tests/`), run, and seen failing. The red run is then logged in the plan's `## Implementation Notes` under a `Red run` heading: the exact command and its failing output (the failing test names and the first failure lines; a compile error that names the missing API counts). Only after that entry exists may any `src/` file change. A run against a skeleton made after the code, mutation evidence, or tests written alongside the code is not a substitute. If code under `src/` changed before the entry existed, stop and tell the owner; do not record it as a deviation and carry on.""",
+]
+
+implementation_handoff = """
+Run the implementation in two phases, each by a subagent with no prior conversation context. Do not merge the phases.
+
+**Phase 1: tests and the red run.** Launch a subagent with this prompt:
+
+> Read {plan_file} fully. Load every file listed in its frontmatter `context:` before you start. Your job is only the failing tests: write every acceptance test the plan asks for (every I/O & Edge-Case Matrix row and every rewritten older test) outside any `src/` folder. You may not create or change any file under a `src/` folder (`crates/*/src/`, `xtask/src/`, `web/src/`), not even a stub, a skeleton or a `#[cfg(test)]` module. Run the tests and see them fail. Then append to the plan's `## Implementation Notes` a `Red run` entry: the exact command and its failing output (the failing test names and the first failure lines; a compile error that names the missing API counts). Report the test files you wrote and the red run.
+
+**Gate.** When phase 1 returns, check it yourself before going on:
+- `{plan_file}`'s `## Implementation Notes` holds a `Red run` entry with a command and failing output.
+- Using version control, no path under a `src/` folder changed since `baseline_revision` (tracked and untracked).
+If either check fails, HALT and tell the owner. Do not start phase 2.
+
+**Phase 2: implementation.** Launch a subagent with this prompt:
+
+> Read {plan_file} fully and implement it. The plan is the sole source of truth, and its `Red run` entry in `## Implementation Notes` is already logged. Load every file listed in its frontmatter `context:` before you start. Do not weaken, skip or delete a test from the red run to make it pass; if a test disagrees with the plan, stop and report.
+>
+> When done, report what you changed, how you verified it, and anything left incomplete or risky.
+"""

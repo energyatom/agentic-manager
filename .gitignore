@@ -1,7 +1,8 @@
 # Superseded planning inputs: kept locally for the owner, never published.
 _archive/
 
-# Build and runtime output
+# Build and runtime output (`.agentic/` is the legacy in-project runtime
+# folder older binaries wrote)
 target/
 node_modules/
 .agentic/
@@ -20,15 +21,10 @@ __pycache__/
 !templates/**/*.png
 !crates/am-desktop/icons/*.png
 
-# Fixture projects keep their synthetic runtime files (reference files in
-# .agentic/knowledge/<seat-id>/) so validate sees the same tree in CI.
-!fixtures/projects/*/.agentic/
-
-# The sample company ships D1's team Knowledge notes in .agentic/knowledge/;
-# every other runtime file under .agentic/ stays ignored.
-!templates/samples/*/.agentic/
-templates/samples/*/.agentic/*
-!templates/samples/*/.agentic/knowledge/
+# Runtime state lives outside every project (AD-32, story 1.13); templates
+# and fixtures ship their seed reference files under runtime-seed/, never
+# .agentic/. A project's open marker is never committed.
+.agentic-open
 
 # Spike run outputs (owner file names and answers); never committed
 crates/am-e2e/c4*.md

@@ -12,6 +12,10 @@
 //! - [`CollectEvents`] (an `EventSink`) and [`CollectAudit`] (an `AuditSink`).
 //! - [`InMemoryConfigHistory`]: a `ConfigHistory` without SQLite, for am-config's tests.
 //! - [`recorded`] and [`fixture`]: paths and bytes under `fixtures/`.
+//! - [`FakeProjectIdentity`]: a `ProjectIdentity` (AD-32) from std metadata,
+//!   with scripted tool failures, unmounted volumes and a network share.
+//! - [`copy_tree`]: a stream copy of a folder (never `std::fs::copy`, whose
+//!   `clonefile(2)` step fails with EPERM under `~/Library/CloudStorage/`).
 #![forbid(unsafe_code)]
 
 use std::collections::HashMap;
@@ -755,5 +759,189 @@ impl am_domain::ConfigHistory for InMemoryConfigHistory {
         id: String,
     ) -> Result<Option<am_domain::HistoryEntry>, am_domain::HistoryError> {
         Ok(self.state()?.entries.iter().find(|e| e.id == id).cloned())
+    }
+}
+
+// ---------------------------------------------------------------- files
+
+/// Copies the folder `from` into `to` (created as needed), reading and
+/// writing every file's bytes: never `std::fs::copy`, whose first step on
+/// macOS is `clonefile(2)`. Links are not followed or copied.
+pub fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
+    std::fs::create_dir_all(to).unwrap_or_else(|e| panic!("cannot create {}: {e}", to.display()));
+    let mut entries: Vec<_> = std::fs::read_dir(from)
+        .unwrap_or_else(|e| panic!("cannot list {}: {e}", from.display()))
+        .map(|e| e.unwrap())
+        .collect();
+    entries.sort_by_key(|e| e.file_name());
+    for entry in entries {
+        let target = to.join(entry.file_name());
+        let kind = entry.file_type().unwrap();
+        if kind.is_dir() {
+            copy_tree(&entry.path(), &target);
+        } else if kind.is_file() {
+            stream_copy_file(&entry.path(), &target);
+        }
+    }
+}
+
+/// One file's bytes, read and written through a buffer.
+pub fn stream_copy_file(from: &std::path::Path, to: &std::path::Path) {
+    use std::io::{Read, Write};
+    let mut src =
+        std::fs::File::open(from).unwrap_or_else(|e| panic!("cannot read {}: {e}", from.display()));
+    let mut dst =
+        std::fs::File::create(to).unwrap_or_else(|e| panic!("cannot create {}: {e}", to.display()));
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        let n = src.read(&mut buf).unwrap();
+        if n == 0 {
+            break;
+        }
+        dst.write_all(&buf[..n]).unwrap();
+    }
+    dst.sync_all().unwrap();
+}
+
+// ---------------------------------------------------------------- identity
+
+/// A [`am_domain::ProjectIdentity`] for tests. A root's identity comes from
+/// std metadata (volume `fake-volume-<device>`, the folder's inode), so a
+/// copy of a folder is another root and a renamed one is the same root.
+/// Tool failures, unmounted volumes and a network share are scripted.
+pub struct FakeProjectIdentity {
+    state: Mutex<FakeIdentityState>,
+}
+
+struct FakeIdentityState {
+    mac_name: Result<String, am_domain::IdentityError>,
+    root_failure: Option<am_domain::IdentityError>,
+    locate_failure: Option<am_domain::IdentityError>,
+    unmounted: Vec<String>,
+    calls: usize,
+}
+
+impl FakeProjectIdentity {
+    /// A Mac called `mac_name` whose tools all work.
+    pub fn new(mac_name: &str) -> FakeProjectIdentity {
+        FakeProjectIdentity {
+            state: Mutex::new(FakeIdentityState {
+                mac_name: Ok(mac_name.to_string()),
+                root_failure: None,
+                locate_failure: None,
+                unmounted: Vec::new(),
+                calls: 0,
+            }),
+        }
+    }
+
+    fn state(&self) -> std::sync::MutexGuard<'_, FakeIdentityState> {
+        self.state.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Every root lookup fails with `err` (a tool that failed, hung or
+    /// printed no key; or `NetworkShare`).
+    pub fn fail_root(&self, err: am_domain::IdentityError) {
+        self.state().root_failure = Some(err);
+    }
+
+    /// The Mac-name lookup fails with `err`.
+    pub fn fail_mac_name(&self, err: am_domain::IdentityError) {
+        self.state().mac_name = Err(err);
+    }
+
+    /// Locating a recorded root fails with `err`.
+    pub fn fail_locate(&self, err: am_domain::IdentityError) {
+        self.state().locate_failure = Some(err);
+    }
+
+    /// The volume `volume` reads as not mounted.
+    pub fn unmount(&self, volume: &str) {
+        self.state().unmounted.push(volume.to_string());
+    }
+
+    /// The volume `volume` reads as mounted again.
+    pub fn mount(&self, volume: &str) {
+        self.state().unmounted.retain(|v| v != volume);
+    }
+
+    /// How many identity calls were made.
+    pub fn calls(&self) -> usize {
+        self.state().calls
+    }
+
+    /// The fake's identity of `root` (as [`am_domain::ProjectIdentity::root`]
+    /// gives it when no failure is scripted).
+    pub fn identity_of(root: &std::path::Path) -> std::io::Result<am_domain::RootIdentity> {
+        let (dev, ino) = dev_ino(root)?;
+        Ok(am_domain::RootIdentity {
+            volume: format!("fake-volume-{dev}"),
+            file_id: ino,
+            path: root.to_path_buf(),
+        })
+    }
+}
+
+#[cfg(unix)]
+fn dev_ino(path: &std::path::Path) -> std::io::Result<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    let m = std::fs::metadata(path)?;
+    Ok((m.dev(), m.ino()))
+}
+
+#[cfg(not(unix))]
+fn dev_ino(_path: &std::path::Path) -> std::io::Result<(u64, u64)> {
+    Err(std::io::Error::other("not supported on this platform yet"))
+}
+
+impl am_domain::ProjectIdentity for FakeProjectIdentity {
+    fn root(
+        &self,
+        root: &std::path::Path,
+    ) -> Result<am_domain::RootIdentity, am_domain::IdentityError> {
+        let failure = {
+            let mut st = self.state();
+            st.calls += 1;
+            st.root_failure.clone()
+        };
+        if let Some(e) = failure {
+            return Err(e);
+        }
+        FakeProjectIdentity::identity_of(root).map_err(|e| am_domain::IdentityError::Tool {
+            tool: "fake stat".into(),
+            output: e.to_string(),
+        })
+    }
+
+    fn locate(
+        &self,
+        recorded: &am_domain::RootIdentity,
+    ) -> Result<am_domain::VolumeState, am_domain::IdentityError> {
+        let (failure, unmounted) = {
+            let mut st = self.state();
+            st.calls += 1;
+            (
+                st.locate_failure.clone(),
+                st.unmounted.contains(&recorded.volume),
+            )
+        };
+        if let Some(e) = failure {
+            return Err(e);
+        }
+        if unmounted {
+            return Ok(am_domain::VolumeState::Unmounted);
+        }
+        let present = dev_ino(&recorded.path).is_ok_and(|(dev, ino)| {
+            format!("fake-volume-{dev}") == recorded.volume && ino == recorded.file_id
+        });
+        Ok(am_domain::VolumeState::Mounted {
+            root: present.then(|| recorded.path.clone()),
+        })
+    }
+
+    fn mac_name(&self) -> Result<String, am_domain::IdentityError> {
+        let mut st = self.state();
+        st.calls += 1;
+        st.mac_name.clone()
     }
 }

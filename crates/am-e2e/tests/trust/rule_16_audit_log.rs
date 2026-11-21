@@ -12,7 +12,7 @@
 use std::path::{Path, PathBuf};
 
 use am_domain::{Actor, SecretStore, Usage};
-use am_store::{Store, TriggerRow, WriteCommand, open_project, verify_jsonl};
+use am_store::{OpenReport, Store, StoreError, TriggerRow, WriteCommand, verify_jsonl};
 use am_testkit::FakeSecretStore;
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
@@ -27,8 +27,17 @@ fn sys() -> Actor {
     }
 }
 
+/// The runtime folder the store opens (story 1.13): `rt/` in `root`.
+fn layout(root: &Path) -> am_domain::RuntimeLayout {
+    am_domain::RuntimeLayout::at(root.join("rt"))
+}
+
 fn db(root: &Path) -> PathBuf {
-    root.join(".agentic").join("state.db")
+    layout(root).state_db()
+}
+
+fn open_project(root: &Path) -> Result<(Store, OpenReport), StoreError> {
+    am_store::open_runtime(&layout(root), "test-mac".into())
 }
 
 fn sha256_hex(s: &str) -> String {
