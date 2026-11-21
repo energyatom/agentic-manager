@@ -36,6 +36,7 @@ use std::time::{Duration, Instant};
 use am_domain::{Actor, ConfigHistory, HistoryEntry, HistoryError, HistoryKind, NewIntent};
 use notify::{RecursiveMode, Watcher};
 
+use crate::migrate::MigrationOffer;
 use crate::writer::{added_errors, secret_lines, sha256_hex};
 use crate::{
     CompanyRefusal, ConfigEdit, ConfigSnapshot, ConfigWriter, FOLDERS, Finding, LoadError,
@@ -113,10 +114,52 @@ pub enum SessionError {
     Load(#[from] LoadError),
     #[error("the project has errors, so no snapshot can be built:\n{}", lines(.findings))]
     Invalid { findings: Vec<Finding> },
+    /// Story 1.10 (AD-7, AD-16): config files are at an older
+    /// `schema_version`; nothing runs until the owner accepts the offers.
+    /// `blocked` names each older file that cannot be offered yet (a
+    /// secret-looking value, a link, a step's reason), with what to do.
+    #[error("{}", pending_words(.offers, .blocked, .unmigratable))]
+    /// `unmigratable` names each older file with no step path, as
+    /// `<file> (schema_version <n>)`: they stay errors after the accept.
+    MigrationPending {
+        offers: Vec<MigrationOffer>,
+        blocked: Vec<String>,
+        unmigratable: Vec<String>,
+    },
     #[error(transparent)]
     Write(#[from] WriteError),
     #[error("cannot watch the project folder: {0}")]
     Watch(String),
+}
+
+fn offer_files(offers: &[MigrationOffer]) -> String {
+    let files: Vec<String> = offers
+        .iter()
+        .map(|o| format!("{} from schema_version {} to {}", o.file, o.from, o.to))
+        .collect();
+    files.join(", ")
+}
+
+fn pending_words(offers: &[MigrationOffer], blocked: &[String], unmigratable: &[String]) -> String {
+    let mut words = if blocked.is_empty() {
+        format!(
+            "the project waits for a config migration ({}); review each diff and accept the migration before the project opens",
+            offer_files(offers)
+        )
+    } else {
+        format!(
+            "the project waits for a config migration that cannot be accepted yet, because:\n- {}\n(also waiting: {})",
+            blocked.join("\n- "),
+            offer_files(offers)
+        )
+    };
+    if !unmigratable.is_empty() {
+        words.push_str(&format!(
+            "\nthese files cannot be migrated by the app and stay errors after the accept (rewrite them by hand): {}",
+            unmigratable.join(", ")
+        ));
+    }
+    words
 }
 
 fn lines(findings: &[Finding]) -> String {
@@ -211,6 +254,18 @@ impl ConfigSession {
             .watch(root, RecursiveMode::Recursive)
             .map_err(|e| SessionError::Watch(e.to_string()))?;
         let accepted = scan(root);
+        // A pending migration builds no snapshot (AD-16): nothing runs on
+        // bytes the owner has not accepted.
+        let offers = crate::migrate::offers_in(root, &accepted);
+        if !offers.is_empty() {
+            let blocked = crate::migrate::blocked(root, &accepted);
+            let unmigratable = crate::migrate::no_path(root, &accepted);
+            return Err(SessionError::MigrationPending {
+                offers,
+                blocked,
+                unmigratable,
+            });
+        }
         let loaded = load_exact(root, accepted.clone(), opts.clone())?;
         let Some(snapshot) = loaded.snapshot else {
             let findings = loaded
@@ -682,7 +737,7 @@ fn names(root: &Path, rel: &str) -> Vec<String> {
 }
 
 /// Every tracked file on disk with its bytes.
-fn scan(root: &Path) -> BTreeMap<String, Vec<u8>> {
+pub(crate) fn scan(root: &Path) -> BTreeMap<String, Vec<u8>> {
     let mut rels: Vec<String> = vec![COMPANY.into(), "tools.yaml".into()];
     rels.extend(MODEL_FILES.iter().map(|m| format!("models/{m}.yaml")));
     for (folder, _) in FOLDERS {

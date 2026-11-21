@@ -11,8 +11,11 @@ publish.workspace = true
 workspace = true
 
 [features]
-# Crash simulation for the writer's tests (`ConfigWriter::fail_at`): enabled
-# only through dev-dependencies (this crate's tests and am-e2e), never in the app.
+# Test builds only, enabled through dev-dependencies (this crate's tests and
+# am-e2e), never in the app: crash simulation for the writer's tests
+# (`ConfigWriter::fail_at`), and the test-only config migration step from
+# schema_version 0 to 1 (story 1.10), so test builds offer v0 files and
+# release builds do not.
 test-support = []
 
 [dependencies]

@@ -427,3 +427,79 @@ fn config_history_outside_edit_records_created_and_deleted_files() {
         ]
     );
 }
+
+// --------------------------------------------------------------- story 1.10
+
+/// Story 1.10: `Migration` is stored as `migration`, takes no ref (as an
+/// outside edit), reads back from the table and is audited as
+/// `config.migrated` with the accept's Actor; a crash after the rename is
+/// still settled by `config.reconciled`.
+#[test]
+fn config_history_migration_takes_no_ref_and_is_audited_as_config_migrated() {
+    assert_eq!(HistoryKind::Migration.as_str(), "migration");
+    assert_eq!(
+        HistoryKind::parse("migration"),
+        Some(HistoryKind::Migration)
+    );
+    assert_eq!(
+        serde_json::to_value(HistoryKind::Migration).unwrap(),
+        json!("migration")
+    );
+
+    let (_dir, store, history) = open();
+    let i = intent("seats/alpha.md", HistoryKind::Migration, None, 1);
+    let id = history.begin_intent(reviewer(), i.clone()).unwrap();
+    assert_eq!(history.pending_intents().unwrap()[0].intent, i);
+    let entry = history.commit_entry(reviewer(), id.clone()).unwrap();
+    assert_eq!(entry.kind, HistoryKind::Migration);
+    assert_eq!(entry.ref_entry, None);
+    assert_eq!(entry.who(), "You (Reviewer)");
+    assert_eq!(entry.diff, i.diff);
+    assert_eq!(
+        (entry.before.clone(), entry.after.clone()),
+        (i.before, i.after)
+    );
+    assert_eq!(history.entries(None).unwrap(), vec![entry.clone()]);
+    assert_eq!(history.entry(id.clone()).unwrap(), Some(entry.clone()));
+
+    let log = config_entries(&store);
+    let actions: Vec<&str> = log.iter().map(|e| e["action"].as_str().unwrap()).collect();
+    assert_eq!(actions, ["config.intent_opened", "config.migrated"]);
+    for e in &log {
+        assert_eq!(e["target"], id.as_str());
+        assert_eq!(e["args"]["file"], "seats/alpha.md");
+        assert_eq!(e["args"]["kind"], "migration");
+        assert_eq!(
+            e["actor"],
+            json!({"kind": "human", "person": "owner", "hat": "Reviewer"})
+        );
+        assert_args_redacted(e);
+    }
+    assert_eq!(log[1]["args"]["entry_id"], id.as_str());
+
+    // A migration names no earlier entry.
+    let before = audit(&store).len();
+    let with_ref = intent(
+        "seats/alpha.md",
+        HistoryKind::Migration,
+        Some(entry.id.clone()),
+        2,
+    );
+    assert!(history.begin_intent(reviewer(), with_ref).is_err());
+    assert!(history.pending_intents().unwrap().is_empty());
+    assert_eq!(audit(&store).len(), before);
+
+    // A migration intent left by a crash after the rename is reconciled.
+    let left = history
+        .begin_intent(
+            reviewer(),
+            intent("workflows/digest.yaml", HistoryKind::Migration, None, 3),
+        )
+        .unwrap();
+    let done = history.reconcile_intent(sys(), left.clone()).unwrap();
+    assert_eq!(done.kind, HistoryKind::Migration);
+    assert_eq!(done.actor, reviewer(), "the entry keeps the accept's Actor");
+    let last = config_entries(&store).pop().unwrap();
+    assert_eq!(last["action"], "config.reconciled");
+    assert_eq!(last["args"]["kind"], "migration");
+}

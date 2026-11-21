@@ -31,16 +31,22 @@ pub enum HistoryKind {
     /// Reload (story 1.9); names no earlier entry. `before` or `after` is
     /// empty for a file created or deleted outside.
     OutsideEdit,
+    /// A config file stepped to the current `schema_version` on the owner's
+    /// accept of a migration offer (story 1.10, AD-7); names no earlier
+    /// entry.
+    Migration,
 }
 
 impl HistoryKind {
-    /// The stored name: `edit`, `undo`, `restore` or `outside_edit`.
+    /// The stored name: `edit`, `undo`, `restore`, `outside_edit` or
+    /// `migration`.
     pub fn as_str(self) -> &'static str {
         match self {
             HistoryKind::Edit => "edit",
             HistoryKind::Undo => "undo",
             HistoryKind::Restore => "restore",
             HistoryKind::OutsideEdit => "outside_edit",
+            HistoryKind::Migration => "migration",
         }
     }
 
@@ -50,6 +56,7 @@ impl HistoryKind {
             "undo" => Some(HistoryKind::Undo),
             "restore" => Some(HistoryKind::Restore),
             "outside_edit" => Some(HistoryKind::OutsideEdit),
+            "migration" => Some(HistoryKind::Migration),
             _ => None,
         }
     }
@@ -126,8 +133,8 @@ pub trait ConfigHistory: Send + Sync {
     /// Commits the intent row (with its audit entry); returns its id.
     fn begin_intent(&self, actor: Actor, intent: NewIntent) -> Result<String, HistoryError>;
     /// Deletes the intent and inserts its History entry (with the audit
-    /// entry `config.edited`, `config.undone` or `config.restored`) in one
-    /// transaction.
+    /// entry `config.edited`, `config.undone`, `config.restored`,
+    /// `config.outside_edit` or `config.migrated`) in one transaction.
     fn commit_entry(&self, actor: Actor, intent_id: String) -> Result<HistoryEntry, HistoryError>;
     /// Removes an intent whose file was never written (`config.intent_dropped`).
     fn drop_intent(&self, actor: Actor, intent_id: String) -> Result<(), HistoryError>;

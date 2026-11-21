@@ -8,7 +8,8 @@
 //!   can only ever hold hashes.
 //! - `CommitConfigEntry` deletes the intent and inserts the History entry in
 //!   one transaction, audited `config.edited`, `config.undone`,
-//!   `config.restored` or `config.outside_edit` (story 1.9) by its kind;
+//!   `config.restored`, `config.outside_edit` (story 1.9) or
+//!   `config.migrated` (story 1.10) by its kind;
 //!   `ReconcileConfigIntent` does the same at
 //!   startup, audited `config.reconciled`; `DropConfigIntent` deletes an
 //!   intent whose file was never written, audited `config.intent_dropped`.
@@ -107,12 +108,15 @@ pub(crate) fn begin(
         return Err(invalid("the file would not change"));
     }
     match (i.kind, &i.ref_entry) {
-        (HistoryKind::Edit | HistoryKind::OutsideEdit, None) => {}
+        (HistoryKind::Edit | HistoryKind::OutsideEdit | HistoryKind::Migration, None) => {}
         (HistoryKind::Edit, Some(_)) => {
             return Err(invalid("an edit names no earlier entry"));
         }
         (HistoryKind::OutsideEdit, Some(_)) => {
             return Err(invalid("an outside edit names no earlier entry"));
+        }
+        (HistoryKind::Migration, Some(_)) => {
+            return Err(invalid("a migration names no earlier entry"));
         }
         (_, None) => return Err(invalid("an undo or restore names the entry it acts on")),
         (_, Some(r)) => {
@@ -209,6 +213,7 @@ pub(crate) fn complete(
             Some(HistoryKind::Undo) => "config.undone",
             Some(HistoryKind::Restore) => "config.restored",
             Some(HistoryKind::OutsideEdit) => "config.outside_edit",
+            Some(HistoryKind::Migration) => "config.migrated",
             None => return Err(invalid(format!("unknown kind '{}'", s.kind))),
         }
     };

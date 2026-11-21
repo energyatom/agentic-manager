@@ -33,6 +33,11 @@
 //! lines and line endings), through the same intent, rename and commit, so
 //! `reconcile` settles a crash after the rename. It commits History and its
 //! audit only, never an approved grant set (AD-16).
+//!
+//! Story 1.10 (AD-7): the owner's accept of migration offers (see `migrate`)
+//! writes every offered file as one `migration` entry each through the same
+//! sequence, after one check of the whole migrated project; it is refused
+//! before any write when a file changed since it was offered.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
@@ -47,6 +52,7 @@ use sha2::{Digest, Sha256};
 
 use crate::canon::{self, FileKind};
 use crate::finding::Report;
+use crate::migrate::{self, MigrationOffer};
 use crate::{FOLDERS, Finding, LoadError, MODEL_FILES, Severity, checks, linediff, load_with};
 
 /// One change to a file's tree. A path names mapping keys, and list items by
@@ -116,10 +122,32 @@ pub enum WriteError {
         .files.join(", ")
     )]
     ChangedOnDisk { files: Vec<String> },
-    #[error(
-        "refused: {file} changed since this entry ({entry}), so undoing it would lose the later change; restore an entry instead"
-    )]
+    /// The file no longer holds the bytes an Undo's entry wrote, or (story
+    /// 1.10, `entry` empty) the bytes it held when a migration was offered.
+    #[error("{}", changed_since(.file, .entry))]
     ChangedSince { file: String, entry: String },
+    /// Story 1.10 (AD-7): a migration is accepted only by the owner.
+    #[error(
+        "refused: only the owner accepts a config migration (AD-7); {actor} cannot, and nothing was written"
+    )]
+    NotOwner { actor: String },
+    /// Story 1.10: a migration accept stopped part-way (a file changed, an
+    /// I/O or History error). `migrated` were written, each with its History
+    /// entry; `file` was written too when `written` (a failure after its
+    /// rename: its entry is recorded by `reconcile` at the next start); the
+    /// rest were not.
+    #[error("{}", stopped_words(.file, .migrated, *.written, .cause))]
+    MigrationStopped {
+        file: String,
+        migrated: Vec<String>,
+        written: bool,
+        cause: Box<WriteError>,
+    },
+    /// Story 1.10: an empty accept while no config file is older.
+    #[error(
+        "refused: there is nothing to migrate; every config file is at the schema_version this app reads"
+    )]
+    NothingToMigrate {},
     #[error(
         "refused: {file} holds a secret-looking value (line {}); remove it by hand first, then make the change (keys live in the Keychain; reference an Account instead), so that no key is ever kept in History",
         Joined(.lines)
@@ -136,6 +164,46 @@ pub enum WriteError {
     },
     #[error(transparent)]
     History(#[from] HistoryError),
+}
+
+/// The words of [`WriteError::MigrationStopped`].
+fn stopped_words(file: &str, migrated: &[String], written: bool, cause: &WriteError) -> String {
+    let mut all = migrated.to_vec();
+    if written {
+        all.push(file.to_string());
+    }
+    let note = match (written, migrated.is_empty()) {
+        (true, true) => format!("{file}'s History entry is recorded at the next start"),
+        (true, false) => format!(
+            "{file}'s History entry is recorded at the next start; each other file has its entry"
+        ),
+        (false, _) => "each has its History entry".to_string(),
+    };
+    format!(
+        "stopped at {file}: {cause}; already migrated: {} ({note}); ask for the migration offers again for the rest",
+        all.join(", ")
+    )
+}
+
+/// The refusal of an accept that would leave older files behind.
+fn left_behind(why: &[String]) -> WriteError {
+    WriteError::BadEdit(format!(
+        "the accept would leave config files at an older schema_version, so nothing was migrated:\n- {}",
+        why.join("\n- ")
+    ))
+}
+
+/// The words of [`WriteError::ChangedSince`].
+fn changed_since(file: &str, entry: &str) -> String {
+    if entry.is_empty() {
+        format!(
+            "refused: {file} changed on disk since the migration was offered, so it was not overwritten; ask for the migration offers again and review the new diff"
+        )
+    } else {
+        format!(
+            "refused: {file} changed since this entry ({entry}), so undoing it would lose the later change; restore an entry instead"
+        )
+    }
 }
 
 /// Findings, one per line block.
@@ -408,6 +476,143 @@ impl ConfigWriter {
         )
     }
 
+    /// Story 1.10 (AD-7): writes every offered file's migrated bytes as one
+    /// `migration` entry each, in the offers' order, or none. Only an
+    /// `Actor::Human` (the owner) is accepted. Before any write: each file
+    /// must still hold the bytes it held when offered and no key, each offer
+    /// must be exactly the app's migration of those bytes, the offers must cover every older file
+    /// with a step path (offered or not), and the whole migrated project must
+    /// add no error (only added errors refuse, as for an edit). Each file
+    /// then goes through the intent, write and commit sequence, after its
+    /// bytes are checked once more (an edit saved during the accept stops it
+    /// with `ChangedSince`); the per-file validity check is not repeated,
+    /// because the set was checked as a whole. An empty accept is
+    /// `NothingToMigrate` only when no file is older.
+    pub(crate) fn migrate(
+        &self,
+        actor: Actor,
+        offers: Vec<MigrationOffer>,
+    ) -> Result<Vec<HistoryEntry>, WriteError> {
+        if !matches!(actor, Actor::Human { .. }) {
+            return Err(WriteError::NotOwner {
+                actor: actor.describe(),
+            });
+        }
+        let _one = self.serial()?;
+        // The files as the loader reads them: a link it skips is not one.
+        let on_disk = migrate::migration_files(&self.root);
+        if offers.is_empty() {
+            let mut why = migrate::left_behind(&self.root, &on_disk, &BTreeMap::new());
+            why.extend(migrate::unmigratable(&self.root, &on_disk));
+            if why.is_empty() {
+                return Err(WriteError::NothingToMigrate {});
+            }
+            return Err(left_behind(&why));
+        }
+        let mut overrides = BTreeMap::new();
+        let mut befores = Vec::with_capacity(offers.len());
+        for offer in &offers {
+            if overrides.contains_key(&offer.file) {
+                return Err(WriteError::BadEdit(format!(
+                    "{} is offered twice; ask for the migration offers again",
+                    offer.file
+                )));
+            }
+            self.resolve(&offer.file)?;
+            let before = self.read(&offer.file)?;
+            if sha256_hex(&before) != offer.before_sha256 {
+                return Err(WriteError::ChangedSince {
+                    file: offer.file.clone(),
+                    entry: String::new(),
+                });
+            }
+            let lines = secret_lines(&offer.file, &before);
+            if !lines.is_empty() {
+                return Err(WriteError::Secret {
+                    file: offer.file.clone(),
+                    lines,
+                });
+            }
+            migrate::check_offer(&self.root, offer, &before)?;
+            overrides.insert(offer.file.clone(), offer.after.clone());
+            befores.push(before);
+        }
+        // All or nothing: a project half on the old version cannot load, so
+        // every older file with a step path must be in the accept, whatever
+        // kept it from being offered.
+        let why = migrate::left_behind(&self.root, &on_disk, &overrides);
+        if !why.is_empty() {
+            return Err(left_behind(&why));
+        }
+        let errors_now = self.errors(BTreeMap::new())?;
+        let errors_after = self.errors(overrides)?;
+        let new_errors = added_errors(errors_now, errors_after);
+        if let Some(first) = new_errors.first() {
+            return Err(WriteError::Invalid {
+                file: first.file.clone(),
+                findings: new_errors,
+            });
+        }
+        // Once more after the validation, before the first write: an edit
+        // made meanwhile refuses the accept with nothing written.
+        for (offer, before) in offers.iter().zip(&befores) {
+            self.unchanged(&offer.file, before)?;
+        }
+        let mut entries: Vec<HistoryEntry> = Vec::with_capacity(offers.len());
+        for (offer, before) in offers.into_iter().zip(befores) {
+            let stop = |cause: WriteError, written: bool, entries: Vec<HistoryEntry>| {
+                // Nothing reached any file: the refusal stands as it is.
+                if entries.is_empty() && !written {
+                    return cause;
+                }
+                WriteError::MigrationStopped {
+                    file: offer.file.clone(),
+                    migrated: entries.into_iter().map(|e| e.file).collect(),
+                    written,
+                    cause: Box::new(cause),
+                }
+            };
+            // An owner's save while earlier files were written is never
+            // overwritten: the accept stops here, before this file's intent.
+            if let Err(e) = self.unchanged(&offer.file, &before) {
+                return Err(stop(e, false, entries));
+            }
+            let after_sha256 = sha256_hex(&offer.after);
+            match self.write_step(
+                actor.clone(),
+                &offer.file,
+                HistoryKind::Migration,
+                None,
+                before,
+                offer.after.clone(),
+            ) {
+                Ok(entry) => entries.push(entry),
+                Err(e) => {
+                    // A failure after the rename (the folder sync, a crash
+                    // point, the History commit) leaves the file migrated
+                    // with its intent pending; `reconcile` records the entry
+                    // at the next start.
+                    let written = std::fs::read(self.root.join(&offer.file))
+                        .is_ok_and(|b| sha256_hex(&b) == after_sha256);
+                    return Err(stop(e, written, entries));
+                }
+            }
+        }
+        Ok(entries)
+    }
+
+    /// `ChangedSince` (for a migration) unless `file` still holds `before`.
+    fn unchanged(&self, file: &str, before: &[u8]) -> Result<(), WriteError> {
+        if self.read(file)? == before {
+            Ok(())
+        } else {
+            Err(WriteError::ChangedSince {
+                file: file.to_string(),
+                entry: String::new(),
+            })
+        }
+    }
+
     /// AD-16's startup rule: completes each pending intent whose file holds
     /// its new bytes (audited as reconciled by `actor`) and drops the rest.
     pub fn reconcile(&self, actor: Actor) -> Result<ReconcileReport, WriteError> {
@@ -587,6 +792,27 @@ impl ConfigWriter {
             return Err(WriteError::Invalid {
                 file: file.to_string(),
                 findings: new_errors,
+            });
+        }
+        self.write_step(actor, file, kind, ref_entry, before, after)
+    }
+
+    /// The intent, write and commit sequence of a change already checked
+    /// (the secret check of the current bytes runs again).
+    fn write_step(
+        &self,
+        actor: Actor,
+        file: &str,
+        kind: HistoryKind,
+        ref_entry: Option<String>,
+        before: Vec<u8>,
+        after: Vec<u8>,
+    ) -> Result<HistoryEntry, WriteError> {
+        let lines = secret_lines(file, &before);
+        if !lines.is_empty() {
+            return Err(WriteError::Secret {
+                file: file.to_string(),
+                lines,
             });
         }
         let after_sha256 = sha256_hex(&after);

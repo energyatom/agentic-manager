@@ -21,7 +21,9 @@ pub(crate) fn comments(rep: &mut Report, lines: &[u32]) {
     }
 }
 
-/// The top-level `schema_version` must be present and be 1.
+/// The top-level `schema_version` must be present and be 1. An older file
+/// is still an error until its migration is accepted (story 1.10): the fix
+/// names the offer when the app can step it, and says it cannot otherwise.
 pub(crate) fn schema_version(rep: &mut Report, root: &[(Key, Node)]) {
     match root.iter().find(|(k, _)| k.name == "schema_version") {
         None => rep.error(
@@ -31,6 +33,22 @@ pub(crate) fn schema_version(rep: &mut Report, root: &[(Key, Node)]) {
         ),
         Some((_, v)) => match v.kind {
             Kind::Int(SCHEMA_VERSION) => {}
+            Kind::Int(n) if n < SCHEMA_VERSION && crate::migrate::has_path(n) => rep.error(
+                v.line,
+                format!(
+                    "schema_version {n} is older than this app's schema_version {SCHEMA_VERSION}; the file waits for its migration"
+                ),
+                migration_fix(),
+            ),
+            Kind::Int(n) if n < SCHEMA_VERSION => rep.error(
+                v.line,
+                format!(
+                    "schema_version {n} is older than this app's schema_version {SCHEMA_VERSION}"
+                ),
+                format!(
+                    "this app cannot migrate a file from schema_version {n}; rewrite the file in the schema_version {SCHEMA_VERSION} format by hand"
+                ),
+            ),
             Kind::Int(n) => rep.error(
                 v.line,
                 format!(
@@ -48,6 +66,43 @@ pub(crate) fn schema_version(rep: &mut Report, root: &[(Key, Node)]) {
             ),
         },
     }
+}
+
+/// The fix of an older file the app offers to migrate.
+pub(crate) fn migration_fix() -> String {
+    format!(
+        "review and accept the migration the app offers for this file (it steps the file to schema_version {SCHEMA_VERSION} and keeps a History entry); do not change the number by hand"
+    )
+}
+
+/// The fix of an older file that is not offered because it holds a
+/// secret-looking value (the value would reach the offer's diff).
+pub(crate) fn migration_blocked_fix() -> String {
+    format!(
+        "the file holds a secret-looking value, so its migration is not offered; remove the value by hand first (keys live in the Keychain; reference an Account instead), then the app offers the migration to schema_version {SCHEMA_VERSION}"
+    )
+}
+
+/// The fix of an older file that is not offered because it, or the folder
+/// `link` on its way, is a link.
+pub(crate) fn migration_link_fix(file: &str, link: &str) -> String {
+    if link == file {
+        format!(
+            "this file is a link; the app does not write through links. Replace it with the file itself, then the migration to schema_version {SCHEMA_VERSION} is offered"
+        )
+    } else {
+        format!(
+            "{link}/ is a link; the app does not write through links. Replace the link with the folder itself, then the migration to schema_version {SCHEMA_VERSION} is offered"
+        )
+    }
+}
+
+/// The fix of an older file that a migration step refuses (`why` is the
+/// step's reason, never the file's content).
+pub(crate) fn migration_failed_fix(why: &str) -> String {
+    format!(
+        "the app cannot migrate this file: {why}; fix it by hand, then the migration to schema_version {SCHEMA_VERSION} is offered"
+    )
 }
 
 /// A config id: kebab-case, lowercase letters and digits in hyphen-separated

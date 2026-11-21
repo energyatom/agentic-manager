@@ -18,7 +18,12 @@
 //! order, Markdown bodies kept byte for byte, atomic replace, History through
 //! the `am_domain::ConfigHistory` port, Undo and Restore (story 1.8), and the
 //! targeted `project_id` insert of [`ConfigIdentityAssign`] (story 1.13).
-//! Config migrations come in a later story.
+//!
+//! Story 1.10 (R4, AD-7): [`migration_offers`] offers every config file at an
+//! older `schema_version` as a diff and writes nothing; a project with an
+//! offer builds no session ([`SessionError::MigrationPending`]); only
+//! [`accept_migrations`] writes them, through the writer, as `migration`
+//! History entries. The shipped registry has no step yet.
 //!
 //! Story 1.13 (AD-32): [`load_in`] names where reference files are checked
 //! ([`LoadOptions`]: the project's runtime folder, a template's
@@ -42,6 +47,7 @@ mod fields;
 mod finding;
 mod kinds;
 mod linediff;
+mod migrate;
 mod node;
 mod refs;
 mod schema_check;
@@ -55,6 +61,7 @@ use std::path::{Path, PathBuf};
 
 pub use entities::*;
 pub use finding::{Finding, Severity};
+pub use migrate::{MigrationOffer, accept_migrations, migration_offers};
 pub use session::{ConfigEvent, ConfigSession, ReloadError, SessionError};
 pub use snapshot::ConfigSnapshot;
 #[cfg(feature = "test-support")]
@@ -589,6 +596,7 @@ impl Loader {
         known.builtin_tools = am_domain::tool_manifest::builtin_tool_ids();
         known.egress_hosts = self.tools.egress_hosts.clone();
         refs::resolve(&self.refs, &known, &mut self.reports);
+        migrate::word_blocked(&self.places.project, &mut self.reports, &self.files);
         let mut findings: Vec<Finding> = self
             .reports
             .into_values()
