@@ -116,9 +116,12 @@ pub enum WriteError {
     NoChange(String),
     /// Story 1.9: the session refuses the app's own write while a config
     /// file on disk differs from the accepted bytes (an outside change not
-    /// yet reloaded), so the write never takes that change in silently.
+    /// yet reloaded), so the write never takes that change in silently. The
+    /// writer gives the same refusal when a file changed on disk after a
+    /// write (edit, Undo, Restore or identity) read it and before it is
+    /// written; a migration accept reports it as `ChangedSince`.
     #[error(
-        "refused: {} changed on disk outside the app; Reload (or undo that change) first, then make the edit",
+        "refused: {} changed on disk outside the app; Reload (or undo that change) first, then try again",
         .files.join(", ")
     )]
     ChangedOnDisk { files: Vec<String> },
@@ -616,6 +619,14 @@ impl ConfigWriter {
             ) {
                 Ok(entry) => entries.push(entry),
                 Err(e) => {
+                    // A save during the write is a change since the offer.
+                    let e = match e {
+                        WriteError::ChangedOnDisk { .. } => WriteError::ChangedSince {
+                            file: offer.file.clone(),
+                            entry: String::new(),
+                        },
+                        other => other,
+                    };
                     // A failure after the rename (the folder sync, a crash
                     // point, the History commit) leaves the file migrated
                     // with its intent pending; `reconcile` records the entry
@@ -826,7 +837,9 @@ impl ConfigWriter {
     }
 
     /// The intent, write and commit sequence of a change already checked
-    /// (the secret check of the current bytes runs again).
+    /// (the secret check of the current bytes runs again). Refused with
+    /// `ChangedOnDisk`, writing nothing, when the file no longer holds
+    /// `before` once the intent is recorded.
     fn write_step(
         &self,
         actor: Actor,
@@ -862,7 +875,18 @@ impl ConfigWriter {
                 self.settle(p)?;
             }
         }
+        let before_now = intent.before.clone();
         let id = self.history.begin_intent(actor.clone(), intent)?;
+        // The file is read again here, after the (slow) validation and the
+        // durable intent: a save made outside the app since the change was
+        // built is never overwritten or left out of History, and the intent
+        // goes (refactor sweep, deferred from story 1.10's review).
+        if self.read(file)? != before_now {
+            let _ = self.history.drop_intent(actor, id);
+            return Err(WriteError::ChangedOnDisk {
+                files: vec![file.to_string()],
+            });
+        }
         // Remembered before the rename, so the watcher never sees it as outside.
         self.remember(file, &after_sha256);
         match self.replace(file, &bytes) {

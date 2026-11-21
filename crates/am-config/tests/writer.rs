@@ -878,3 +878,186 @@ fn writer_settles_a_pending_intent_of_the_file_before_the_next_write() {
         .unwrap();
     assert!(report.completed.is_empty() && report.dropped.is_empty());
 }
+
+/// Refactor sweep (deferred from 1.10's review): a `ConfigHistory` that
+/// saves a file on disk the first time the writer asks for pending
+/// intents, which `write_step` does after the whole-project validation and
+/// right before the intent: an owner saving in an editor while an edit,
+/// Undo or Restore runs.
+struct SaveDuringWrite {
+    inner: Arc<InMemoryConfigHistory>,
+    root: PathBuf,
+    file: &'static str,
+    bytes: Vec<u8>,
+    armed: std::sync::atomic::AtomicBool,
+}
+
+impl SaveDuringWrite {
+    fn arm(&self) {
+        self.armed.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+impl ConfigHistory for SaveDuringWrite {
+    fn begin_intent(
+        &self,
+        actor: Actor,
+        intent: am_domain::NewIntent,
+    ) -> Result<String, am_domain::HistoryError> {
+        self.inner.begin_intent(actor, intent)
+    }
+    fn commit_entry(
+        &self,
+        actor: Actor,
+        intent_id: String,
+    ) -> Result<am_domain::HistoryEntry, am_domain::HistoryError> {
+        self.inner.commit_entry(actor, intent_id)
+    }
+    fn drop_intent(&self, actor: Actor, intent_id: String) -> Result<(), am_domain::HistoryError> {
+        self.inner.drop_intent(actor, intent_id)
+    }
+    fn reconcile_intent(
+        &self,
+        actor: Actor,
+        intent_id: String,
+    ) -> Result<am_domain::HistoryEntry, am_domain::HistoryError> {
+        self.inner.reconcile_intent(actor, intent_id)
+    }
+    fn pending_intents(&self) -> Result<Vec<am_domain::PendingIntent>, am_domain::HistoryError> {
+        if self.armed.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            std::fs::write(self.root.join(self.file), &self.bytes).unwrap();
+        }
+        self.inner.pending_intents()
+    }
+    fn entries(
+        &self,
+        file: Option<String>,
+    ) -> Result<Vec<am_domain::HistoryEntry>, am_domain::HistoryError> {
+        self.inner.entries(file)
+    }
+    fn entry(
+        &self,
+        id: String,
+    ) -> Result<Option<am_domain::HistoryEntry>, am_domain::HistoryError> {
+        self.inner.entry(id)
+    }
+}
+
+fn saving_writer(root: &Path, outside: &[u8]) -> (ConfigWriter, Arc<SaveDuringWrite>) {
+    let history = Arc::new(SaveDuringWrite {
+        inner: Arc::new(InMemoryConfigHistory::default()),
+        root: root.to_path_buf(),
+        file: SEAT,
+        bytes: outside.to_vec(),
+        armed: std::sync::atomic::AtomicBool::new(false),
+    });
+    let w = ConfigWriter::open(root, history.clone()).unwrap();
+    (w, history)
+}
+
+/// An outside save that lands after the edit read the file and before it
+/// is written is never overwritten: the edit is refused as changed on disk,
+/// the save stays, and no entry or intent is left.
+#[test]
+fn writer_edit_refuses_a_file_saved_outside_while_it_runs_and_keeps_the_save() {
+    let dir = copy_of("valid");
+    let root = dir.path();
+    let outside = format!("{}\n", String::from_utf8(read(root, SEAT)).unwrap());
+    let (w, history) = saving_writer(root, outside.as_bytes());
+    history.arm();
+    let err = w
+        .apply(
+            reviewer(),
+            edit(SEAT, vec![set(&["budget", "per_run"], json!(2))]),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(&err, WriteError::ChangedOnDisk { files } if files == &vec![SEAT.to_string()]),
+        "{err:?}"
+    );
+    assert!(err.to_string().contains("changed on disk"), "{err}");
+    assert_eq!(
+        read(root, SEAT),
+        outside.as_bytes(),
+        "the outside save stays"
+    );
+    assert!(history.entries(None).unwrap().is_empty());
+    assert!(history.pending_intents().unwrap().is_empty());
+}
+
+/// The same window in Undo: the outside save stays and the Undo is
+/// refused, leaving only the edit's entry.
+#[test]
+fn writer_undo_refuses_a_file_saved_outside_while_it_runs_and_keeps_the_save() {
+    let dir = copy_of("valid");
+    let root = dir.path();
+    let (w, history) = saving_writer(root, b"");
+    let e1 = w
+        .apply(
+            reviewer(),
+            edit(SEAT, vec![set(&["budget", "per_run"], json!(2))]),
+        )
+        .unwrap();
+    let outside = format!("{}\n", String::from_utf8(read(root, SEAT)).unwrap());
+    let history = {
+        // Re-open with the save armed for the Undo.
+        let h = Arc::new(SaveDuringWrite {
+            inner: history.inner.clone(),
+            root: root.to_path_buf(),
+            file: SEAT,
+            bytes: outside.clone().into_bytes(),
+            armed: std::sync::atomic::AtomicBool::new(true),
+        });
+        let w2 = ConfigWriter::open(root, h.clone()).unwrap();
+        drop(w);
+        let err = w2.undo(reviewer(), &e1.id).unwrap_err();
+        assert!(matches!(err, WriteError::ChangedOnDisk { .. }), "{err:?}");
+        h
+    };
+    assert_eq!(
+        read(root, SEAT),
+        outside.as_bytes(),
+        "the outside save stays"
+    );
+    assert_eq!(history.entries(None).unwrap().len(), 1);
+    assert!(history.pending_intents().unwrap().is_empty());
+}
+
+/// The same window in Restore (review of the sweep): the outside save
+/// stays and the Restore is refused, leaving the two edits' entries.
+#[test]
+fn writer_restore_refuses_a_file_saved_outside_while_it_runs_and_keeps_the_save() {
+    let dir = copy_of("valid");
+    let root = dir.path();
+    let (w, history) = saving_writer(root, b"");
+    let e1 = w
+        .apply(
+            reviewer(),
+            edit(SEAT, vec![set(&["budget", "per_run"], json!(2))]),
+        )
+        .unwrap();
+    w.apply(
+        reviewer(),
+        edit(SEAT, vec![set(&["budget", "per_run"], json!(3))]),
+    )
+    .unwrap();
+    drop(w);
+    let outside = format!("{}\n", String::from_utf8(read(root, SEAT)).unwrap());
+    let h = Arc::new(SaveDuringWrite {
+        inner: history.inner.clone(),
+        root: root.to_path_buf(),
+        file: SEAT,
+        bytes: outside.clone().into_bytes(),
+        armed: std::sync::atomic::AtomicBool::new(true),
+    });
+    let w2 = ConfigWriter::open(root, h.clone()).unwrap();
+    let err = w2.restore(reviewer(), &e1.id).unwrap_err();
+    assert!(matches!(err, WriteError::ChangedOnDisk { .. }), "{err:?}");
+    assert_eq!(
+        read(root, SEAT),
+        outside.as_bytes(),
+        "the outside save stays"
+    );
+    assert_eq!(h.entries(None).unwrap().len(), 2);
+    assert!(h.pending_intents().unwrap().is_empty());
+}
