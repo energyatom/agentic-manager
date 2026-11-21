@@ -40,6 +40,13 @@ tokio-util.workspace = true
 jiff.workspace = true
 tracing.workspace = true
 
+# Story 2.1 (AD-15, Stack): termios through nix's `term` feature, to read
+# the Account key with echo off (`terminal.rs`, Unix only); the `^C` test
+# also drives the binary on a pseudo-terminal with it (openpty, tcgetattr).
+# See docs/crate-notes/nix.md.
+[target.'cfg(unix)'.dependencies]
+nix.workspace = true
+
 [dev-dependencies]
 am-app = { path = ".", features = ["test-support"] }
 am-store = { workspace = true, features = ["test-support"] }

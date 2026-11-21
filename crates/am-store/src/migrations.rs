@@ -30,6 +30,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0002_migration_reports.sql"),
     include_str!("../migrations/0003_audit_args.sql"),
     include_str!("../migrations/0004_config_history.sql"),
+    include_str!("../migrations/0005_config_intent_audit.sql"),
 ];
 
 /// The schema version this binary knows.

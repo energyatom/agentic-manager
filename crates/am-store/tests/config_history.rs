@@ -4,7 +4,7 @@
 //! before the tables exist.
 #![forbid(unsafe_code)]
 
-use am_domain::{Actor, ConfigHistory, HistoryError, HistoryKind, NewIntent};
+use am_domain::{Actor, AuditNote, ConfigHistory, HistoryError, HistoryKind, NewIntent};
 use am_store::{Store, StoreConfigHistory, WriteCommand, verify_jsonl};
 use rusqlite::Connection;
 use serde_json::{Value, json};
@@ -44,6 +44,7 @@ fn intent(file: &str, kind: HistoryKind, ref_entry: Option<String>, n: u32) -> N
         ),
         before,
         after,
+        audit: Vec::new(),
     }
 }
 
@@ -326,6 +327,7 @@ fn outside(file: &str, before: &[u8], after: &[u8]) -> NewIntent {
         before: before.to_vec(),
         after: after.to_vec(),
         diff: format!("--- a/{file}\n+++ b/{file}\n@@ -1 +1 @@\n{CANARY}\n"),
+        audit: Vec::new(),
     }
 }
 
@@ -502,4 +504,251 @@ fn config_history_migration_takes_no_ref_and_is_audited_as_config_migrated() {
     let last = config_entries(&store).pop().unwrap();
     assert_eq!(last["action"], "config.reconciled");
     assert_eq!(last["args"]["kind"], "migration");
+}
+
+// ---------------------------------------------------------------- story 2.1
+
+/// A create intent (story 2.1, AD-16 `ConfigCreate`): no before-bytes, no
+/// ref, the new bytes after.
+fn created(file: &str, after: &[u8], audit: Vec<AuditNote>) -> NewIntent {
+    NewIntent {
+        file: file.into(),
+        kind: HistoryKind::Create,
+        ref_entry: None,
+        before_sha256: sha(b""),
+        after_sha256: sha(after),
+        before: Vec::new(),
+        after: after.to_vec(),
+        diff: format!("--- /dev/null\n+++ b/{file}\n@@ -0,0 +1 @@\n{CANARY}\n"),
+        audit,
+    }
+}
+
+/// The widening record an interim CLI Account add carries (AD-15): kind
+/// `account_added`, the file, the Account, its pinned scheme, host and port,
+/// the references it brings into force and how it was confirmed.
+fn account_added(id: &str) -> AuditNote {
+    AuditNote {
+        action: "config.widened".into(),
+        target: id.into(),
+        args: std::collections::BTreeMap::from([
+            ("kind".to_string(), "account_added".to_string()),
+            ("file".to_string(), "models/accounts.yaml".to_string()),
+            ("account".to_string(), id.to_string()),
+            ("scheme".to_string(), "https".to_string()),
+            ("host".to_string(), "api.anthropic.com".to_string()),
+            ("port".to_string(), "443".to_string()),
+            ("references".to_string(), "seats/alpha.md".to_string()),
+            ("confirmation".to_string(), "typed_id".to_string()),
+        ]),
+    }
+}
+
+const ACCOUNTS: &[u8] =
+    b"schema_version: 2\naccounts:\n- id: cloud2\n  provider: anthropic\n  secret_ref: cloud2\n";
+
+/// Story 2.1: `Create` is stored as `create`, takes no ref, reads back from
+/// the table with empty before-bytes and is audited as `config.created`
+/// with the create's Actor; a crash after the file was placed is settled by
+/// `config.reconciled`.
+#[test]
+fn config_history_create_takes_no_ref_and_is_audited_as_config_created() {
+    assert_eq!(HistoryKind::Create.as_str(), "create");
+    assert_eq!(HistoryKind::parse("create"), Some(HistoryKind::Create));
+    assert_eq!(
+        serde_json::to_value(HistoryKind::Create).unwrap(),
+        json!("create")
+    );
+
+    let (_dir, store, history) = open();
+    let i = created("models/accounts.yaml", ACCOUNTS, Vec::new());
+    let id = history.begin_intent(reviewer(), i.clone()).unwrap();
+    assert_eq!(history.pending_intents().unwrap()[0].intent, i);
+    let entry = history.commit_entry(reviewer(), id.clone()).unwrap();
+    assert_eq!(entry.kind, HistoryKind::Create);
+    assert_eq!(entry.ref_entry, None);
+    assert!(entry.before.is_empty());
+    assert_eq!(entry.before_sha256, sha(b""));
+    assert_eq!(entry.after, ACCOUNTS);
+    assert_eq!(entry.who(), "You (Reviewer)");
+    assert_eq!(history.entry(id.clone()).unwrap(), Some(entry.clone()));
+
+    let log = config_entries(&store);
+    let actions: Vec<&str> = log.iter().map(|e| e["action"].as_str().unwrap()).collect();
+    assert_eq!(actions, ["config.intent_opened", "config.created"]);
+    for e in &log {
+        assert_eq!(e["target"], id.as_str());
+        assert_eq!(e["args"]["file"], "models/accounts.yaml");
+        assert_eq!(e["args"]["kind"], "create");
+        assert_args_redacted(e);
+    }
+
+    // A create names no earlier entry.
+    let before = audit(&store).len();
+    let mut with_ref = created("models/other.yaml", ACCOUNTS, Vec::new());
+    with_ref.ref_entry = Some(entry.id.clone());
+    assert!(history.begin_intent(reviewer(), with_ref).is_err());
+    assert!(history.pending_intents().unwrap().is_empty());
+    assert_eq!(audit(&store).len(), before);
+
+    // A create always starts from no bytes.
+    let mut from_bytes = created("models/other.yaml", ACCOUNTS, Vec::new());
+    from_bytes.before = b"schema_version: 2\n".to_vec();
+    from_bytes.before_sha256 = sha(&from_bytes.before);
+    assert!(history.begin_intent(reviewer(), from_bytes).is_err());
+    assert_eq!(audit(&store).len(), before);
+
+    // A create intent left by a crash after the file was placed is
+    // reconciled.
+    let left = history
+        .begin_intent(
+            reviewer(),
+            created(
+                "models/capabilities.yaml",
+                b"schema_version: 2\n",
+                Vec::new(),
+            ),
+        )
+        .unwrap();
+    let done = history.reconcile_intent(sys(), left).unwrap();
+    assert_eq!(done.kind, HistoryKind::Create);
+    assert_eq!(done.actor, reviewer(), "the entry keeps the create's Actor");
+    let last = config_entries(&store).pop().unwrap();
+    assert_eq!(last["action"], "config.reconciled");
+    assert_eq!(last["args"]["kind"], "create");
+}
+
+/// Story 2.1 (AD-15, AD-25): an intent may carry audit notes, which are
+/// kept with the pending intent and written only when it commits, in the
+/// commit's transaction, right after its `config.*` entry, with the
+/// intent's own Actor (who asked for the change), whoever commits it; a
+/// dropped intent writes none.
+#[test]
+fn config_history_commit_writes_the_intents_audit_notes_with_the_entry() {
+    let (_dir, store, history) = open();
+    let note = account_added("cloud2");
+    let i = created("models/accounts.yaml", ACCOUNTS, vec![note.clone()]);
+    let id = history.begin_intent(reviewer(), i.clone()).unwrap();
+    let pending = history.pending_intents().unwrap();
+    assert_eq!(pending[0].intent.audit, vec![note.clone()]);
+    assert!(
+        audit(&store)
+            .iter()
+            .all(|e| e["action"] != "config.widened"),
+        "no note is written before the commit"
+    );
+
+    // Committed by another Actor than the one who opened the intent, so
+    // the two can be told apart.
+    let committer = Actor::Human {
+        person: "owner".into(),
+        hat: "Owner".into(),
+    };
+    let entry = history.commit_entry(committer, id.clone()).unwrap();
+    let log = audit(&store);
+    let at = log
+        .iter()
+        .position(|e| e["action"] == "config.created")
+        .expect("the create's entry");
+    assert_eq!(
+        log[at]["actor"],
+        json!({"kind": "human", "person": "owner", "hat": "Owner"}),
+        "the commit's own entry names the commit's Actor"
+    );
+    let widened = &log[at + 1];
+    assert_eq!(widened["action"], "config.widened");
+    assert_eq!(widened["target"], "cloud2");
+    assert_eq!(
+        widened["actor"],
+        json!({"kind": "human", "person": "owner", "hat": "Reviewer"}),
+        "the note carries the intent's Actor, not the commit's"
+    );
+    for (k, v) in &note.args {
+        assert_eq!(widened["args"][k], v.as_str(), "{k} in {widened}");
+    }
+    assert_eq!(
+        log.iter()
+            .filter(|e| e["action"] == "config.widened")
+            .count(),
+        1
+    );
+    assert_eq!(entry.id, id);
+
+    // A dropped intent writes no note.
+    let dropped = history
+        .begin_intent(
+            reviewer(),
+            created(
+                "models/prices.yaml",
+                b"schema_version: 2\n",
+                vec![account_added("cloud3")],
+            ),
+        )
+        .unwrap();
+    history.drop_intent(sys(), dropped).unwrap();
+    assert!(
+        audit(&store).iter().all(|e| e["target"] != "cloud3"),
+        "a dropped intent's notes are never written"
+    );
+}
+
+/// Story 2.1: a crash after the file was written still records the
+/// intent's notes when the intent is reconciled at the next start.
+#[test]
+fn config_history_reconcile_writes_the_intents_audit_notes() {
+    let (_dir, store, history) = open();
+    let left = history
+        .begin_intent(
+            reviewer(),
+            created(
+                "models/accounts.yaml",
+                ACCOUNTS,
+                vec![account_added("cloud2")],
+            ),
+        )
+        .unwrap();
+    history.reconcile_intent(sys(), left).unwrap();
+    let log = audit(&store);
+    let at = log
+        .iter()
+        .position(|e| e["action"] == "config.reconciled")
+        .expect("the reconcile's entry");
+    assert_eq!(log[at + 1]["action"], "config.widened");
+    assert_eq!(log[at + 1]["args"]["kind"], "account_added");
+    assert_eq!(log[at + 1]["args"]["host"], "api.anthropic.com");
+    // The reconcile is the system's, but the note records who confirmed the
+    // add: it is audited with the intent's own Actor.
+    assert_eq!(
+        log[at]["actor"],
+        json!({"kind": "system", "component": "config-writer"})
+    );
+    assert_eq!(
+        log[at + 1]["actor"],
+        json!({"kind": "human", "person": "owner", "hat": "Reviewer"}),
+        "the note keeps the Actor of the intent"
+    );
+}
+
+/// Story 2.1 (AD-25): a note holds ids, hosts and paths in plain words; a
+/// note whose action is empty or that names no target is refused with the
+/// intent, writing nothing.
+#[test]
+fn config_history_refuses_an_empty_audit_note() {
+    let (_dir, store, history) = open();
+    let before = audit(&store).len();
+    for note in [
+        AuditNote {
+            action: String::new(),
+            ..account_added("cloud2")
+        },
+        AuditNote {
+            target: String::new(),
+            ..account_added("cloud2")
+        },
+    ] {
+        let i = created("models/accounts.yaml", ACCOUNTS, vec![note]);
+        assert!(history.begin_intent(reviewer(), i).is_err());
+    }
+    assert!(history.pending_intents().unwrap().is_empty());
+    assert_eq!(audit(&store).len(), before);
 }

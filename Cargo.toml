@@ -127,3 +127,6 @@ unicode-normalization = "=0.1.26"
 # AD-3's per-crate exception in deny.toml; see docs/crate-notes/notify.md.
 notify = "=8.2.2"
 apple-native-keyring-store = { version = "=1.0.2", features = ["keychain"] }
+# Terminal echo off for the interim CLI Account edit's key prompt (story 2.1,
+# AD-15, Stack); feature `term` only (termios and pty).
+nix = { version = "=0.31.4", default-features = false, features = ["term"] }

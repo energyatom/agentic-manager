@@ -13,6 +13,8 @@
 //! not. Every call names its [`Actor`]; there is no default. The port is
 //! synchronous and owned-typed; am-store implements it, am-testkit fakes it.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::Actor;
@@ -35,11 +37,15 @@ pub enum HistoryKind {
     /// accept of a migration offer (story 1.10, AD-7); names no earlier
     /// entry.
     Migration,
+    /// A new config file written by a `ConfigCreate` (story 2.1, AD-16):
+    /// `before` is empty and it names no earlier entry. The writer never
+    /// deletes a file, so a create has no Undo.
+    Create,
 }
 
 impl HistoryKind {
-    /// The stored name: `edit`, `undo`, `restore`, `outside_edit` or
-    /// `migration`.
+    /// The stored name: `edit`, `undo`, `restore`, `outside_edit`,
+    /// `migration` or `create`.
     pub fn as_str(self) -> &'static str {
         match self {
             HistoryKind::Edit => "edit",
@@ -47,6 +53,7 @@ impl HistoryKind {
             HistoryKind::Restore => "restore",
             HistoryKind::OutsideEdit => "outside_edit",
             HistoryKind::Migration => "migration",
+            HistoryKind::Create => "create",
         }
     }
 
@@ -57,9 +64,26 @@ impl HistoryKind {
             "restore" => Some(HistoryKind::Restore),
             "outside_edit" => Some(HistoryKind::OutsideEdit),
             "migration" => Some(HistoryKind::Migration),
+            "create" => Some(HistoryKind::Create),
             _ => None,
         }
     }
+}
+
+/// An extra audit entry carried by a config write (AD-15, AD-25): written
+/// in the transaction that commits (or reconciles) the write's History
+/// entry, right after its `config.*` entry, with the intent's own Actor
+/// (who asked for the write), also when the system reconciles it. It
+/// holds ids, hosts, ports and paths in plain words; never file content and
+/// never a secret.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuditNote {
+    /// Dotted action, e.g. `config.widened`. Never empty.
+    pub action: String,
+    /// What was acted on (an id). Never empty.
+    pub target: String,
+    /// The entry's redacted args, e.g. `kind: account_added`, `host`.
+    pub args: BTreeMap<String, String>,
 }
 
 /// One write the config writer is about to make. Config files hold no
@@ -78,6 +102,9 @@ pub struct NewIntent {
     pub after: Vec<u8>,
     /// Unified line diff from `before` to `after`.
     pub diff: String,
+    /// Audit entries written with the commit (or reconcile) of this intent,
+    /// and only then; empty for an ordinary write.
+    pub audit: Vec<AuditNote>,
 }
 
 /// An intent committed but not yet completed or dropped.
@@ -134,12 +161,14 @@ pub trait ConfigHistory: Send + Sync {
     fn begin_intent(&self, actor: Actor, intent: NewIntent) -> Result<String, HistoryError>;
     /// Deletes the intent and inserts its History entry (with the audit
     /// entry `config.edited`, `config.undone`, `config.restored`,
-    /// `config.outside_edit` or `config.migrated`) in one transaction.
+    /// `config.outside_edit`, `config.migrated` or `config.created`, then
+    /// the intent's [`AuditNote`]s) in one transaction.
     fn commit_entry(&self, actor: Actor, intent_id: String) -> Result<HistoryEntry, HistoryError>;
     /// Removes an intent whose file was never written (`config.intent_dropped`).
     fn drop_intent(&self, actor: Actor, intent_id: String) -> Result<(), HistoryError>;
     /// Completes an intent whose file already holds its new bytes
-    /// (`config.reconciled`); the entry keeps the intent's Actor.
+    /// (`config.reconciled`, then the intent's [`AuditNote`]s); the entry
+    /// keeps the intent's Actor.
     fn reconcile_intent(
         &self,
         actor: Actor,

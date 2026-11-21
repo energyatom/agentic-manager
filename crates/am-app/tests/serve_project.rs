@@ -699,6 +699,7 @@ fn serve_reconciles_interrupted_config_writes_at_start() {
             before: before.to_vec(),
             after: after.to_vec(),
             diff: String::new(),
+            audit: Vec::new(),
         };
         let owner = Actor::Human {
             person: "owner".into(),

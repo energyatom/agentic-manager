@@ -4,6 +4,9 @@
 //! - `agentic validate [--template] [<folder>]` (exit 0 no errors, 1 errors, 2 usage or no folder)
 //! - `agentic audit export <project> [--out <file>]`, `agentic audit verify <file>`
 //!   (exit 0 OK, 1 failure or a broken chain, 2 usage)
+//! - `agentic accounts add <id> --provider anthropic [--name <text>]`, `remove <id>`,
+//!   `list`, `test <id> [--model M]`, each with `[--project <folder>]` (story
+//!   2.1, AD-15's interim CLI Account edit; add and remove only in a terminal)
 //! - `agentic spike c1 [--provider anthropic|lmstudio|ollama] [--model M]`
 //! - `agentic spike c3 --db PATH [--cron EXPR] [--tz ZONE]` (sleep/wake demo)
 //! - `agentic spike c4 [--dir PATH] [--anthropic-model M] [--local-model M] [--no-anthropic] [--no-local] [--out FILE]`
@@ -61,6 +64,12 @@ async fn main() {
                 am_app::cli::audit(&argv[1..], &mut std::io::stdout(), &mut std::io::stderr());
             std::process::exit(code);
         }
+        Some("accounts") => {
+            // The code is returned after the command dropped the store (and
+            // its lock): no `process::exit` in between.
+            let code = accounts(&argv[1..]).await;
+            std::process::exit(code);
+        }
         Some("__spike-run") => spike_run(&args).await,
         Some("spike") => match argv.get(1).map(String::as_str) {
             Some("c1") => c1(&args).await,
@@ -73,11 +82,38 @@ async fn main() {
         Some("--version") => println!("agentic {}", env!("CARGO_PKG_VERSION")),
         _ => {
             eprintln!(
-                "usage: agentic serve [--project <path>] | agentic validate [<project>] | agentic audit export|verify | agentic spike c1|c3|c4|c7|local-context"
+                "usage: agentic serve [--project <path>] | agentic validate [<project>] | agentic audit export|verify | agentic accounts add|remove|list|test | agentic spike c1|c3|c4|c7|local-context"
             );
             std::process::exit(2);
         }
     }
+}
+
+/// `agentic accounts add|remove|list|test` (story 2.1, AD-15): the command
+/// with the owner's real terminal, the Keychain, the OS identity adapter
+/// and `am-net`'s client. Nothing here can swap the terminal for another.
+async fn accounts(args: &[String]) -> i32 {
+    use am_app::cli::AccountsContext;
+    let places = match am_app::runtime::Places::from_env() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("agentic: {e}");
+            return 1;
+        }
+    };
+    let secrets = am_app::keychain();
+    let for_egress = secrets.clone();
+    let ctx = AccountsContext {
+        places,
+        identity: am_app::identity::system(),
+        terminal: Box::new(am_app::terminal::OwnerTerminal::new()),
+        secrets,
+        egress: Arc::new(move |policy| {
+            Arc::new(am_net::NetEgress::new(policy, for_egress.clone(), None))
+                as Arc<dyn am_domain::EgressClient>
+        }),
+    };
+    am_app::cli::accounts(args, ctx, &mut std::io::stdout(), &mut std::io::stderr()).await
 }
 
 const SERVE_USAGE: &str = "usage: agentic serve [--project <path> [--confirm-move] [--take-over]] [--port N] [--no-browser]";
@@ -219,7 +255,7 @@ fn anthropic_model(args: &Args) -> String {
     args.value("--anthropic-model")
         .or_else(|| args.value("--model"))
         .or_else(|| std::env::var("AM_SPIKE_ANTHROPIC_MODEL").ok())
-        .unwrap_or_else(|| "claude-opus-5-5".into())
+        .unwrap_or_else(|| am_app::DEFAULT_ANTHROPIC_MODEL.into())
 }
 
 /// The LM Studio model to use: named with the flag or `AM_SPIKE_LOCAL_MODEL`.

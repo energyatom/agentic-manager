@@ -1,0 +1,386 @@
+//! Story 2.1: the rows of `agentic accounts` that need the real binary
+//! (`CARGO_BIN_EXE_agentic`) and a real terminal, with HOME and
+//! XDG_DATA_HOME in a temporary folder as in `audit_cli.rs`:
+//!
+//! - Not a terminal: `add` and `remove` with piped or redirected stdin exit
+//!   non-zero with a worded refusal naming the terminal rule, and nothing is
+//!   read, written or stored.
+//! - Interrupt: on a pseudo-terminal (`nix::pty::openpty`), a typed `^C` at
+//!   the key prompt, and a SIGINT sent there, end the command non-zero; the
+//!   pty's `ECHO` flag (read with `tcgetattr`) is set again; nothing is
+//!   written or stored. These reach the key prompt only where the Keychain
+//!   exists (macOS, AD-47), so they run there. With HOME in a temporary
+//!   folder macOS finds no default keychain, so the setup gives that HOME
+//!   its own (`/usr/bin/security`: create, make default, unlock), apart from
+//!   the login keychain; the id is unique and is checked absent from that
+//!   keychain afterwards.
+//!
+//! Written before the command exists.
+#![forbid(unsafe_code)]
+#![cfg(unix)]
+
+use std::io::Write;
+use std::path::PathBuf;
+use std::process::{Command, Stdio};
+
+use am_app::runtime::{OpenRequest, Places, Prompt, open_project};
+
+const COMPANY: &str = "schema_version: 2\nname: Example\ntimezone: UTC\ncurrency: EUR\n";
+const ACCOUNTS_FILE: &str = "models/accounts.yaml";
+const CANARY: &str = "sk-ant-canary-tty-0a1b2c3d4e5f-WXYZ";
+
+struct NoPrompt;
+
+impl Prompt for NoPrompt {
+    fn interactive(&self) -> bool {
+        false
+    }
+    fn ask(&mut self, _question: &str) -> bool {
+        false
+    }
+}
+
+/// A temporary HOME (and XDG_DATA_HOME) with one project opened once on
+/// this Mac through the system identity adapter, as the binary resolves it.
+struct Env {
+    dir: tempfile::TempDir,
+    root: PathBuf,
+}
+
+fn env() -> Env {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    std::fs::create_dir(&home).unwrap();
+    let support = if cfg!(target_os = "macos") {
+        home.join("Library/Application Support")
+    } else {
+        dir.path().join("xdg")
+    };
+    let places = Places::under(&support, &home);
+    let root = dir.path().join("project");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(root.join("company.yaml"), COMPANY).unwrap();
+    let root = root.canonicalize().unwrap();
+    let identity = am_app::identity::system();
+    let req = OpenRequest {
+        root: root.clone(),
+        confirm_move: false,
+        take_over: false,
+    };
+    drop(open_project(&places, identity.as_ref(), &req, &mut NoPrompt).unwrap());
+    Env { dir, root }
+}
+
+impl Env {
+    fn command(&self, args: &[&str]) -> Command {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_agentic"));
+        cmd.arg("accounts")
+            .args(args)
+            .arg("--project")
+            .arg(&self.root)
+            .env("HOME", self.dir.path().join("home"))
+            .env("XDG_DATA_HOME", self.dir.path().join("xdg"));
+        cmd
+    }
+
+    fn accounts_file(&self) -> PathBuf {
+        self.root.join(ACCOUNTS_FILE)
+    }
+}
+
+fn unique_id() -> String {
+    format!(
+        "tty-test-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis()
+    )
+}
+
+/// Not a terminal: piped stdin (the typed id and a key ready on it) and a
+/// stdin redirected from a file are both refused in words naming the
+/// terminal rule; no file is written.
+#[test]
+fn add_and_remove_with_stdin_that_is_not_a_terminal_are_refused() {
+    let e = env();
+    let id = unique_id();
+    let input = format!("{id}\n{CANARY}\n");
+
+    for args in [
+        vec!["add", id.as_str(), "--provider", "anthropic"],
+        vec!["remove", id.as_str()],
+    ] {
+        let mut child = e
+            .command(&args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        // The command may refuse before reading: a closed pipe is fine.
+        let _ = child.stdin.take().unwrap().write_all(input.as_bytes());
+        let out = child.wait_with_output().unwrap();
+        let all = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(!out.status.success(), "{args:?}: {all}");
+        assert!(all.contains("terminal"), "{args:?}: {all}");
+        assert!(!all.contains(CANARY), "{args:?}: {all}");
+        assert!(!e.accounts_file().exists(), "{args:?}: nothing written");
+
+        let file = e.dir.path().join("typed.txt");
+        std::fs::write(&file, &input).unwrap();
+        let out = e
+            .command(&args)
+            .stdin(Stdio::from(std::fs::File::open(&file).unwrap()))
+            .output()
+            .unwrap();
+        let all = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(!out.status.success(), "{args:?} < file: {all}");
+        assert!(all.contains("terminal"), "{args:?} < file: {all}");
+        assert!(!e.accounts_file().exists());
+    }
+}
+
+#[cfg(target_os = "macos")]
+mod pty {
+    use std::io::{Read, Write};
+    use std::os::fd::OwnedFd;
+    use std::path::PathBuf;
+    use std::process::{Child, Command, Output, Stdio};
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+
+    use nix::sys::termios::{LocalFlags, tcgetattr};
+
+    use super::{CANARY, env, unique_id};
+
+    /// The Keychain service the app stores keys under (AD-17).
+    const SERVICE: &str = "agentic-manager";
+
+    fn home(e: &super::Env) -> PathBuf {
+        e.dir.path().join("home")
+    }
+
+    /// `/usr/bin/security <args>` with HOME in the test's temporary home, so
+    /// it reads and writes that home's keychain and never the login one.
+    fn security(e: &super::Env, args: &[&str]) -> Output {
+        Command::new("/usr/bin/security")
+            .args(args)
+            .env("HOME", home(e))
+            .stdin(Stdio::null())
+            .output()
+            .unwrap_or_else(|err| panic!("/usr/bin/security {args:?} did not run: {err}"))
+    }
+
+    /// Gives the temporary HOME its own default keychain, unlocked: with
+    /// HOME redirected macOS finds no default keychain, and the binary
+    /// (rightly) refuses before the key prompt when it cannot read one. A
+    /// failing step fails the test with `security`'s output.
+    fn temp_keychain(e: &super::Env) {
+        let home = home(e);
+        std::fs::create_dir_all(home.join("Library/Keychains")).unwrap();
+        std::fs::create_dir_all(home.join("Library/Preferences")).unwrap();
+        let keychain = home.join("Library/Keychains/test.keychain-db");
+        let keychain = keychain.to_str().unwrap();
+        for args in [
+            vec!["create-keychain", "-p", "", keychain],
+            vec!["default-keychain", "-s", keychain],
+            vec!["unlock-keychain", "-p", "", keychain],
+        ] {
+            let out = security(e, &args);
+            assert!(
+                out.status.success(),
+                "security {args:?} failed ({}): {}{}",
+                out.status,
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+    }
+
+    /// The command on a pseudo-terminal: its stdin and stdout are the pty's
+    /// slave; the test keeps the master (to type) and a slave handle (to
+    /// read the terminal's flags).
+    struct OnPty {
+        child: Child,
+        master: std::fs::File,
+        slave: OwnedFd,
+        seen: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl OnPty {
+        fn echo(&self) -> bool {
+            tcgetattr(&self.slave)
+                .unwrap()
+                .local_flags
+                .contains(LocalFlags::ECHO)
+        }
+
+        fn seen(&self) -> String {
+            String::from_utf8_lossy(&self.seen.lock().unwrap()).into_owned()
+        }
+
+        fn wait_until(&mut self, what: &str, done: impl Fn(&OnPty) -> bool) {
+            let start = Instant::now();
+            while !done(self) {
+                if let Ok(Some(status)) = self.child.try_wait() {
+                    panic!("exited ({status}) before {what}; terminal: {}", self.seen());
+                }
+                assert!(
+                    start.elapsed() < Duration::from_secs(30),
+                    "timed out waiting for {what}; terminal: {}",
+                    self.seen()
+                );
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+
+        fn exit_code(&mut self) -> Option<i32> {
+            let start = Instant::now();
+            loop {
+                if let Some(status) = self.child.try_wait().unwrap() {
+                    return status.code();
+                }
+                if start.elapsed() > Duration::from_secs(30) {
+                    let _ = self.child.kill();
+                    panic!("the command did not end; terminal: {}", self.seen());
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+    }
+
+    fn start(e: &super::Env, id: &str) -> OnPty {
+        let pty = nix::pty::openpty(None, None).unwrap();
+        let slave = pty.slave;
+        let master = std::fs::File::from(pty.master);
+        let child = e
+            .command(&["add", id, "--provider", "anthropic"])
+            .stdin(Stdio::from(slave.try_clone().unwrap()))
+            .stdout(Stdio::from(slave.try_clone().unwrap()))
+            .stderr(Stdio::from(slave.try_clone().unwrap()))
+            .spawn()
+            .unwrap();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut reader = master.try_clone().unwrap();
+        let sink = seen.clone();
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 1024];
+            while let Ok(n) = reader.read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+                sink.lock().unwrap().extend_from_slice(&buf[..n]);
+            }
+        });
+        let on = OnPty {
+            child,
+            master,
+            slave,
+            seen,
+        };
+        assert!(on.echo(), "a new terminal echoes");
+        on
+    }
+
+    /// Types the id at the name prompt and waits for the key prompt (echo
+    /// turned off).
+    fn to_the_key_prompt(on: &mut OnPty, id: &str) {
+        on.wait_until("the name prompt", |p| p.seen().contains(id));
+        on.master.write_all(format!("{id}\n").as_bytes()).unwrap();
+        on.wait_until("echo off at the key prompt", |p| !p.echo());
+    }
+
+    fn assert_nothing_stored(e: &super::Env, id: &str, on: &OnPty) {
+        assert!(!e.accounts_file().exists(), "nothing written");
+        // The temporary HOME's keychain (the one the binary used) must hold
+        // no item for the id: the lookup fails saying it was not found.
+        let found = security(e, &["find-generic-password", "-s", SERVICE, "-a", id]);
+        let words = format!(
+            "{}{}",
+            String::from_utf8_lossy(&found.stdout),
+            String::from_utf8_lossy(&found.stderr)
+        );
+        assert!(
+            !found.status.success(),
+            "the key was stored for {id}: {words}"
+        );
+        assert!(
+            words.contains("could not be found"),
+            "the keychain lookup for {id} failed another way: {words}"
+        );
+        assert!(!on.seen().contains(CANARY));
+    }
+
+    /// Interrupt: `^C` typed at the key prompt (read as a byte, ISIG off)
+    /// ends the command non-zero and the terminal echoes again.
+    #[test]
+    fn typed_ctrl_c_at_the_key_prompt_restores_echo_and_stores_nothing() {
+        let e = env();
+        temp_keychain(&e);
+        let id = unique_id();
+        let mut on = start(&e, &id);
+        to_the_key_prompt(&mut on, &id);
+        on.master.write_all(&[0x03]).unwrap();
+        let code = on.exit_code();
+        assert_ne!(code, Some(0), "terminal: {}", on.seen());
+        assert!(on.echo(), "ECHO is set again; terminal: {}", on.seen());
+        let flags = tcgetattr(&on.slave).unwrap().local_flags;
+        assert!(flags.contains(LocalFlags::ICANON), "canonical mode is back");
+        assert!(flags.contains(LocalFlags::ISIG), "signals are back");
+        assert_nothing_stored(&e, &id, &on);
+    }
+
+    /// Interrupt: SIGINT (`kill -INT`) at the key prompt also ends the
+    /// command non-zero with echo restored.
+    #[test]
+    fn sigint_at_the_key_prompt_restores_echo_and_stores_nothing() {
+        let e = env();
+        temp_keychain(&e);
+        let id = unique_id();
+        let mut on = start(&e, &id);
+        to_the_key_prompt(&mut on, &id);
+        let status = std::process::Command::new("/bin/kill")
+            .args(["-INT", &on.child.id().to_string()])
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let code = on.exit_code();
+        assert_ne!(code, Some(0), "terminal: {}", on.seen());
+        assert!(on.echo(), "ECHO is set again; terminal: {}", on.seen());
+        assert_nothing_stored(&e, &id, &on);
+    }
+
+    /// Echo is restored on every exit path: SIGTERM (`kill -TERM`) at the
+    /// key prompt ends the command non-zero with the terminal's settings
+    /// back, instead of killing it with echo off.
+    #[test]
+    fn sigterm_at_the_key_prompt_restores_echo_and_stores_nothing() {
+        let e = env();
+        temp_keychain(&e);
+        let id = unique_id();
+        let mut on = start(&e, &id);
+        to_the_key_prompt(&mut on, &id);
+        let status = std::process::Command::new("/bin/kill")
+            .args(["-TERM", &on.child.id().to_string()])
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let code = on.exit_code();
+        assert_ne!(code, Some(0), "terminal: {}", on.seen());
+        assert!(on.echo(), "ECHO is set again; terminal: {}", on.seen());
+        let flags = tcgetattr(&on.slave).unwrap().local_flags;
+        assert!(flags.contains(LocalFlags::ICANON), "canonical mode is back");
+        assert!(flags.contains(LocalFlags::ISIG), "signals are back");
+        assert_nothing_stored(&e, &id, &on);
+    }
+}

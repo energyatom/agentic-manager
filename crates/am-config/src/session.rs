@@ -435,6 +435,7 @@ impl ConfigSession {
                 before,
                 after,
                 diff: p.diff.clone(),
+                audit: Vec::new(),
             };
             match inner.history.begin_intent(actor.clone(), intent) {
                 Ok(id) => ids.push(id),

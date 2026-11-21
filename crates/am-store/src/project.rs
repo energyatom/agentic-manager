@@ -132,6 +132,46 @@ pub fn open_runtime(
     )
 }
 
+/// Opens the runtime folder `layout` as the one writer without changing
+/// what it holds (story 2.1, AD-15: the interim CLI Account edit resolves
+/// the project read-only). The folder and its `state.db` must exist and the
+/// database must already be at this binary's version: nothing is created,
+/// backed up or migrated, and each of those is refused in words instead.
+/// The lock is taken first (refused naming its holder), so the version is
+/// read while no other process can change it, through a read-only
+/// connection; it then lives as long as the store's read-write connection.
+pub fn open_runtime_unchanged(layout: &RuntimeLayout, host: String) -> Result<Store, StoreError> {
+    if !cfg!(unix) {
+        return Err(StoreError::Unsupported);
+    }
+    let dir = layout.dir();
+    if !dir.is_dir() {
+        return Err(StoreError::Invalid(format!(
+            "there is no runtime folder at {}; open the project once with `agentic serve --project <folder>`",
+            dir.display()
+        )));
+    }
+    prepare_dir(layout)?;
+    let lock = acquire(layout, host)?;
+    let db = layout.state_db();
+    if !db.is_file() {
+        return Err(StoreError::NoDatabase { path: db });
+    }
+    let found = {
+        let conn = crate::open_read_only(&db)?;
+        crate::migrations::user_version(&conn)?
+    };
+    crate::migrations::refuse_newer(found)?;
+    if found != crate::SCHEMA_VERSION {
+        return Err(StoreError::NeedsMigration {
+            found,
+            known: crate::SCHEMA_VERSION,
+        });
+    }
+    let (store, _report) = Store::open_reporting(&db, &layout.backups_pre_migration(), Some(lock))?;
+    Ok(store)
+}
+
 /// The runtime folder exists (0700) or is created; it, and every kept
 /// legacy folder in it, has no group or other permission bit.
 fn prepare_dir(layout: &RuntimeLayout) -> Result<(), StoreError> {

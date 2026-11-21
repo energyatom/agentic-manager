@@ -16,6 +16,10 @@
 //!   with scripted tool failures, unmounted volumes and a network share.
 //! - [`copy_tree`]: a stream copy of a folder (never `std::fs::copy`, whose
 //!   `clonefile(2)` step fails with EPERM under `~/Library/CloudStorage/`).
+//! - [`FakeTerminal`]: the only fake of the `Terminal` port (story 2.1,
+//!   AD-15): scripted typed lines, an interrupt, a timeout, and a record of
+//!   the echo state at each read. It lives here, in a dev-dependency, so
+//!   the `agentic` binary can never be given one (`xtask/tests/release_deps.rs`).
 #![forbid(unsafe_code)]
 
 use std::collections::HashMap;
@@ -27,8 +31,8 @@ use std::time::Duration;
 use am_domain::{
     AuditEvent, AuditSink, BoxFuture, CancelSignal, ChatOutcome, ChatRequest, Clock, EgressClient,
     EgressError, EventSink, HttpRequest, HttpResponse, LlmProvider, ModelCapabilities,
-    ProviderError, SecretError, SecretStore, SecretString, StopReason, StreamEvent, ToolCall,
-    Usage,
+    ProviderError, SecretError, SecretStore, SecretString, StopReason, StreamEvent, Terminal,
+    TerminalError, ToolCall, Usage,
 };
 use tokio::sync::mpsc;
 
@@ -943,5 +947,192 @@ impl am_domain::ProjectIdentity for FakeProjectIdentity {
         let mut st = self.state();
         st.calls += 1;
         st.mac_name.clone()
+    }
+}
+
+// ---------------------------------------------------------------- terminal
+
+/// What the owner does at one prompt of a [`FakeTerminal`].
+enum Typed {
+    Line(String),
+    /// A line, with something that happens while the prompt waits for it.
+    LineAfter(String, Box<dyn FnOnce() + Send>),
+    Interrupt,
+    TimeOut,
+}
+
+struct TerminalState {
+    interactive: bool,
+    script: std::collections::VecDeque<Typed>,
+    echo: bool,
+    echo_reads: Vec<bool>,
+    timeouts: Vec<Option<Duration>>,
+    shown: String,
+    /// How many times `interrupted()` was asked.
+    checks: usize,
+    /// The `interrupted()` calls (1-based) that report a Ctrl-C.
+    interrupt_checks: Vec<usize>,
+}
+
+/// A scripted `Terminal` (story 2.1): what is typed at each prompt is
+/// queued with [`FakeTerminal::line`], [`FakeTerminal::interrupt`] and
+/// [`FakeTerminal::time_out`]; an exhausted script reads as the end of
+/// input. Clones share one state, so a test keeps a handle to the terminal
+/// it gave the command and reads back what was shown, how many reads were
+/// made, the echo state at each read and the time limit each was given.
+#[derive(Clone)]
+pub struct FakeTerminal {
+    state: Arc<Mutex<TerminalState>>,
+}
+
+impl Default for FakeTerminal {
+    fn default() -> Self {
+        FakeTerminal::new()
+    }
+}
+
+impl FakeTerminal {
+    fn with(interactive: bool) -> FakeTerminal {
+        FakeTerminal {
+            state: Arc::new(Mutex::new(TerminalState {
+                interactive,
+                script: std::collections::VecDeque::new(),
+                echo: true,
+                echo_reads: Vec::new(),
+                timeouts: Vec::new(),
+                shown: String::new(),
+                checks: 0,
+                interrupt_checks: Vec::new(),
+            })),
+        }
+    }
+
+    /// A real interactive terminal: stdin and stdout are terminals, echo on.
+    pub fn new() -> FakeTerminal {
+        FakeTerminal::with(true)
+    }
+
+    /// Stdin is a pipe or a file: not interactive.
+    pub fn piped() -> FakeTerminal {
+        FakeTerminal::with(false)
+    }
+
+    fn state(&self) -> std::sync::MutexGuard<'_, TerminalState> {
+        self.state.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// The owner types `text` and Return at the next prompt.
+    pub fn line(&self, text: &str) {
+        self.state().script.push_back(Typed::Line(text.to_string()));
+    }
+
+    /// The owner types `text` and Return at the next prompt, and `meanwhile`
+    /// runs while that prompt waits (another program changing a file, say),
+    /// before the read returns.
+    pub fn line_and(&self, text: &str, meanwhile: impl FnOnce() + Send + 'static) {
+        self.state()
+            .script
+            .push_back(Typed::LineAfter(text.to_string(), Box::new(meanwhile)));
+    }
+
+    /// The owner presses Ctrl-C at the next prompt.
+    pub fn interrupt(&self) {
+        self.state().script.push_back(Typed::Interrupt);
+    }
+
+    /// The owner presses Ctrl-C between prompts, so that the `n`-th time
+    /// the command asks `interrupted()` (counting from 1) it is reported.
+    pub fn interrupt_on_check(&self, n: usize) {
+        self.state().interrupt_checks.push(n);
+    }
+
+    /// The owner types nothing at the next prompt until its time is up.
+    pub fn time_out(&self) {
+        self.state().script.push_back(Typed::TimeOut);
+    }
+
+    /// Whether the terminal echoes now.
+    pub fn echo(&self) -> bool {
+        self.state().echo
+    }
+
+    /// The echo state during each read, in order.
+    pub fn echo_reads(&self) -> Vec<bool> {
+        self.state().echo_reads.clone()
+    }
+
+    /// The time limit each read was given, in order.
+    pub fn timeouts(&self) -> Vec<Option<Duration>> {
+        self.state().timeouts.clone()
+    }
+
+    /// How many reads were made.
+    pub fn reads(&self) -> usize {
+        self.state().echo_reads.len()
+    }
+
+    /// Everything written to the terminal itself (prompts).
+    pub fn shown(&self) -> String {
+        self.state().shown.clone()
+    }
+
+    fn next(&self, echo: bool, timeout: Option<Duration>) -> Result<String, TerminalError> {
+        let typed = {
+            let mut st = self.state();
+            st.echo = echo;
+            st.echo_reads.push(echo);
+            st.timeouts.push(timeout);
+            let typed = st.script.pop_front();
+            // Echo is on again whenever a read returns, however it returns.
+            st.echo = true;
+            typed
+        };
+        match typed {
+            Some(Typed::Line(text)) => Ok(text),
+            Some(Typed::LineAfter(text, meanwhile)) => {
+                // Outside the lock: what happens meanwhile may look at the
+                // terminal too.
+                meanwhile();
+                Ok(text)
+            }
+            Some(Typed::Interrupt) => Err(TerminalError::Interrupted),
+            Some(Typed::TimeOut) => Err(TerminalError::TimedOut),
+            None => Err(TerminalError::Closed),
+        }
+    }
+}
+
+impl Terminal for FakeTerminal {
+    fn interactive(&self) -> bool {
+        self.state().interactive
+    }
+
+    fn show(&mut self, text: &str) {
+        self.state().shown.push_str(text);
+    }
+
+    fn read_line(&mut self, timeout: Option<Duration>) -> Result<String, TerminalError> {
+        self.next(true, timeout)
+    }
+
+    fn read_secret(&mut self) -> Result<SecretString, TerminalError> {
+        self.next(false, None).map(SecretString::new)
+    }
+
+    /// A scripted Ctrl-C that is next in the script was pressed between
+    /// prompts: it is consumed and reported; so is one scripted for this
+    /// call by [`FakeTerminal::interrupt_on_check`]. It is not a read.
+    fn interrupted(&mut self) -> bool {
+        let mut st = self.state();
+        st.checks += 1;
+        let now = st.checks;
+        if st.interrupt_checks.contains(&now) {
+            return true;
+        }
+        if matches!(st.script.front(), Some(Typed::Interrupt)) {
+            st.script.pop_front();
+            return true;
+        }
+        false
     }
 }

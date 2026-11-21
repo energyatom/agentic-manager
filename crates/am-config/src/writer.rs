@@ -24,7 +24,20 @@
 //! whose file holds its new bytes is completed, any other is dropped; stale
 //! temp files are removed when a writer opens. One edit runs at a time. The
 //! writer remembers the (file, sha256) of its own writes for the watcher.
-//! It never creates, deletes or renames a config file.
+//! It never deletes or renames a config file, and it makes a new one only
+//! through a [`ConfigCreate`].
+//!
+//! [`ConfigWriter::create`] (a [`ConfigCreate`], story 2.1, AD-16) writes a
+//! new config file through the same intent and commit, under
+//! `HistoryKind::Create`, placed without replacing anything: the temp file
+//! is fsynced, hard-linked to the final name (`std::fs::hard_link` fails
+//! when the name exists, so a file that appeared meanwhile refuses the
+//! create and stays as it is), removed, and the folder is fsynced. Missing
+//! parent folders inside the project are created. A volume that refuses
+//! hard links refuses the create in words, and Undo of a create is refused
+//! in words, because the writer never deletes a file. A write may carry
+//! [`AuditNote`]s ([`ConfigWriter::apply_with_audit`], `ConfigCreate.audit`):
+//! the History port writes them with the commit (AD-15, AD-25).
 //!
 //! [`ConfigWriter::assign_identity`] (a [`ConfigIdentityAssign`], story 1.13,
 //! AD-32) is the one write that does not emit canonically: it inserts a
@@ -46,14 +59,18 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use am_domain::{
-    Actor, ConfigHistory, HistoryEntry, HistoryError, HistoryKind, NewIntent, PendingIntent,
+    Actor, AuditNote, ConfigHistory, HistoryEntry, HistoryError, HistoryKind, NewIntent,
+    PendingIntent,
 };
 use sha2::{Digest, Sha256};
 
 use crate::canon::{self, FileKind};
 use crate::finding::Report;
 use crate::migrate::{self, MigrationOffer};
-use crate::{FOLDERS, Finding, LoadError, MODEL_FILES, Severity, checks, linediff, load_with};
+use crate::{
+    FOLDERS, Finding, LoadError, LoadOptions, MODEL_FILES, Severity, checks, linediff, load_exact,
+    load_with,
+};
 
 /// One change to a file's tree. A path names mapping keys, and list items by
 /// their number from 0 (`["teams", "1", "name"]`).
@@ -80,6 +97,19 @@ pub struct ConfigEdit {
     pub body: Option<String>,
 }
 
+/// One new config file (story 2.1, AD-16): placed only when nothing stands
+/// at its name, never over a file. It carries the same intent, History and
+/// audit as a [`ConfigEdit`], as a `create` entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigCreate {
+    /// Project-relative path with forward slashes, e.g. `models/accounts.yaml`.
+    pub file: String,
+    /// The file's content; it is written canonically.
+    pub bytes: Vec<u8>,
+    /// Audit entries written with the commit of the create (AD-15, AD-25).
+    pub audit: Vec<AuditNote>,
+}
+
 /// The System mint of a missing `project_id` (AD-32): one line inserted in
 /// `company.yaml` after `schema_version`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -92,10 +122,14 @@ pub struct ConfigIdentityAssign {
 #[cfg(feature = "test-support")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FailPoint {
-    /// After the intent and the temp file, before the rename.
+    /// After the intent and the temp file, before the rename (for a
+    /// create: before the file is placed).
     BeforeRename,
-    /// After the rename, before History is committed.
+    /// After the rename (for a create: after the file is placed), before
+    /// History is committed.
     AfterRename,
+    /// A create's hard link is refused, as on a volume without hard links.
+    NoHardLinks,
 }
 
 /// Why a write was refused or did not finish.
@@ -342,10 +376,41 @@ impl ConfigWriter {
 
     /// Applies `edit` by `actor` and returns its History entry.
     pub fn apply(&self, actor: Actor, edit: ConfigEdit) -> Result<HistoryEntry, WriteError> {
+        self.apply_checked(actor, edit, None, Vec::new())
+    }
+
+    /// [`ConfigWriter::apply`] for an edit built from an earlier read of the
+    /// file (story 2.1, the interim CLI Account edit): it is applied only
+    /// while the file still holds the bytes it was built on, whose sha256
+    /// is `before_sha256`, and refused as `ChangedOnDisk` with nothing
+    /// written otherwise (its ops name list items by number, so on other
+    /// bytes they would change another item). `audit` are entries the
+    /// History port writes in the transaction that commits the edit
+    /// (AD-15's widening record of an Account added from the CLI).
+    pub fn apply_with_audit(
+        &self,
+        actor: Actor,
+        edit: ConfigEdit,
+        before_sha256: &str,
+        audit: Vec<AuditNote>,
+    ) -> Result<HistoryEntry, WriteError> {
+        self.apply_checked(actor, edit, Some(before_sha256), audit)
+    }
+
+    fn apply_checked(
+        &self,
+        actor: Actor,
+        edit: ConfigEdit,
+        before_sha256: Option<&str>,
+        audit: Vec<AuditNote>,
+    ) -> Result<HistoryEntry, WriteError> {
         let _one = self.serial()?;
         let kind = self.resolve(&edit.file)?;
         let file = edit.file;
         let before = self.read(&file)?;
+        if before_sha256.is_some_and(|expected| sha256_hex(&before) != expected) {
+            return Err(WriteError::ChangedOnDisk { files: vec![file] });
+        }
         let text = String::from_utf8(before.clone()).map_err(|_| WriteError::NotEditable {
             file: file.clone(),
             reason: "it is not UTF-8 text".into(),
@@ -378,7 +443,110 @@ impl ConfigWriter {
                 "the edit changes nothing in {file}"
             )));
         }
-        self.step(actor, &file, HistoryKind::Edit, None, before, after)
+        self.step(
+            actor,
+            &file,
+            Change {
+                kind: HistoryKind::Edit,
+                ref_entry: None,
+                before,
+                after,
+                audit,
+            },
+        )
+    }
+
+    /// Creates the config file `create.file` holding `create.bytes` (written
+    /// canonically) and returns its `create` History entry. Refused, with
+    /// nothing written, when anything already stands at that name (also one
+    /// that appears while the create runs: it stays as it is), when the path
+    /// is not a config file inside the project or a parent is a link, when
+    /// the content holds a secret-looking value, when the project with the
+    /// new file has an error it does not have now, and when the volume
+    /// refuses hard links. Missing parent folders are created.
+    pub fn create(&self, actor: Actor, create: ConfigCreate) -> Result<HistoryEntry, WriteError> {
+        let _one = self.serial()?;
+        let file = create.file;
+        let kind = self.plain_config_path(&file)?;
+        // An intent of this file left pending is settled first, as at the
+        // next start: a create interrupted after placing is then an entry,
+        // and this create finds its file.
+        for p in self.history.pending_intents()? {
+            if p.intent.file == file {
+                self.settle(p)?;
+            }
+        }
+        self.resolve_absent(&file)?;
+        // No key may reach a config file, an intent or a diff.
+        let secret = |bytes: &[u8]| {
+            let lines = secret_lines(&file, bytes);
+            if lines.is_empty() {
+                return Ok(());
+            }
+            Err(WriteError::BadEdit(format!(
+                "the new {file} would hold a secret-looking value (line {}); keys live in the Keychain: reference an Account's key with `secret_ref` instead. Nothing was written",
+                Joined(&lines)
+            )))
+        };
+        secret(&create.bytes)?;
+        let text = String::from_utf8(create.bytes).map_err(|_| WriteError::NotEditable {
+            file: file.clone(),
+            reason: "the new content is not UTF-8 text".into(),
+        })?;
+        let doc = canon::parse(kind, &text).map_err(|reason| WriteError::NotEditable {
+            file: file.clone(),
+            reason,
+        })?;
+        let after = canon::emit(&doc)
+            .map_err(|e| WriteError::BadEdit(format!("{file}: {e}")))?
+            .into_bytes();
+        secret(&after)?;
+        if after.is_empty() {
+            return Err(WriteError::NoChange(format!(
+                "the new {file} would be empty"
+            )));
+        }
+        // As for an edit: refused only when the new file adds an error. The
+        // project is read from an exact map of its tracked files, with and
+        // without the new one (a missing file cannot be overridden).
+        let now = crate::session::scan(&self.root);
+        let mut with = now.clone();
+        with.insert(file.clone(), after.clone());
+        let new_errors = added_errors(self.errors_exact(now)?, self.errors_exact(with)?);
+        if !new_errors.is_empty() {
+            return Err(WriteError::Invalid {
+                file,
+                findings: new_errors,
+            });
+        }
+        let after_sha256 = sha256_hex(&after);
+        let intent = NewIntent {
+            file: file.clone(),
+            kind: HistoryKind::Create,
+            ref_entry: None,
+            before_sha256: sha256_hex(b""),
+            after_sha256: after_sha256.clone(),
+            diff: linediff::unified(&file, b"", &after),
+            before: Vec::new(),
+            after: after.clone(),
+            audit: create.audit,
+        };
+        let id = self.history.begin_intent(actor.clone(), intent)?;
+        // Remembered before the file is placed, so the watcher never sees
+        // it as an outside change.
+        self.remember(&file, &after_sha256);
+        match self.place(&file, &after) {
+            Ok(()) => {}
+            Err(Written::No(e)) => {
+                // Nothing of ours stands at the name: the intent goes (best
+                // effort; a left intent is dropped by the next reconcile).
+                let _ = self.history.drop_intent(actor, id);
+                self.forget_own_writes(&file);
+                return Err(e);
+            }
+            Err(Written::Maybe(e)) => return Err(e),
+        }
+        Ok(self.history.commit_entry(actor, id)?)
     }
 
     /// Inserts `project_id: <id>` directly after `company.yaml`'s
@@ -425,10 +593,13 @@ impl ConfigWriter {
         self.step(
             actor,
             file,
-            HistoryKind::Edit,
-            None,
-            before,
-            after.into_bytes(),
+            Change {
+                kind: HistoryKind::Edit,
+                ref_entry: None,
+                before,
+                after: after.into_bytes(),
+                audit: Vec::new(),
+            },
         )
     }
 
@@ -438,6 +609,12 @@ impl ConfigWriter {
         let _one = self.serial()?;
         let entry = self.entry(id)?;
         refuse_absent(&entry, true)?;
+        if entry.kind == HistoryKind::Create {
+            return Err(WriteError::BadEdit(format!(
+                "{}: entry {} created the file, and to undo it would delete the file; the app never deletes a config file, so delete it by hand (and remove what names it first)",
+                entry.file, entry.id
+            )));
+        }
         self.resolve(&entry.file)?;
         let current = self.read(&entry.file)?;
         if sha256_hex(&current) != entry.after_sha256 {
@@ -449,10 +626,13 @@ impl ConfigWriter {
         self.step(
             actor,
             &entry.file,
-            HistoryKind::Undo,
-            Some(entry.id.clone()),
-            current,
-            entry.before,
+            Change {
+                kind: HistoryKind::Undo,
+                ref_entry: Some(entry.id.clone()),
+                before: current,
+                after: entry.before,
+                audit: Vec::new(),
+            },
         )
     }
 
@@ -472,10 +652,13 @@ impl ConfigWriter {
         self.step(
             actor,
             &entry.file,
-            HistoryKind::Restore,
-            Some(entry.id.clone()),
-            current,
-            entry.after,
+            Change {
+                kind: HistoryKind::Restore,
+                ref_entry: Some(entry.id.clone()),
+                before: current,
+                after: entry.after,
+                audit: Vec::new(),
+            },
         )
     }
 
@@ -612,10 +795,13 @@ impl ConfigWriter {
             match self.write_step(
                 actor.clone(),
                 &offer.file,
-                HistoryKind::Migration,
-                None,
-                before,
-                offer.after.clone(),
+                Change {
+                    kind: HistoryKind::Migration,
+                    ref_entry: None,
+                    before,
+                    after: offer.after.clone(),
+                    audit: Vec::new(),
+                },
             ) {
                 Ok(entry) => entries.push(entry),
                 Err(e) => {
@@ -738,6 +924,95 @@ impl ConfigWriter {
             .ok_or_else(|| WriteError::UnknownEntry(id.to_string()))
     }
 
+    /// The kind of the config file `file` names, by its plain path inside
+    /// the project (not absolute, no `..`), whether or not it exists.
+    fn plain_config_path(&self, file: &str) -> Result<FileKind, WriteError> {
+        let refuse = |reason: &str| WriteError::BadPath {
+            file: file.to_string(),
+            reason: reason.to_string(),
+        };
+        if file.is_empty() {
+            return Err(refuse("no file was named"));
+        }
+        if file.starts_with('/') || Path::new(file).is_absolute() {
+            return Err(refuse(
+                "an absolute path; name a config file by its path inside the project",
+            ));
+        }
+        if file.split(['/', '\\']).any(|c| c == "..") {
+            return Err(refuse("a path with `..`; name a file inside the project"));
+        }
+        canon::kind_of(file).ok_or_else(|| {
+            refuse(
+                "not a config file the app writes (company.yaml, tools.yaml, models/, seats/, \
+                 skills/<id>/SKILL.md, workflows/, tables/, dashboards/, sources/ or schemas/)",
+            )
+        })
+    }
+
+    /// Checks that a create may place `file` (already a plain config path):
+    /// nothing stands at its name (by any spelling of it, so a
+    /// case-insensitive volume does not open another file), each parent
+    /// folder that exists is a real folder with that exact name and no link,
+    /// and the rest can be made.
+    fn resolve_absent(&self, file: &str) -> Result<(), WriteError> {
+        let refuse = |reason: String| WriteError::BadPath {
+            file: file.to_string(),
+            reason,
+        };
+        let parts: Vec<&str> = file.split('/').collect();
+        let mut path = self.root.clone();
+        for (i, c) in parts.iter().enumerate() {
+            let last = i + 1 == parts.len();
+            let listed: Vec<String> = std::fs::read_dir(&path)
+                .map(|rd| {
+                    rd.flatten()
+                        .map(|e| e.file_name().to_string_lossy().into_owned())
+                        .collect()
+                })
+                .unwrap_or_default();
+            let lower = c.to_lowercase();
+            let on_disk = listed
+                .iter()
+                .find(|n| n.as_str() == *c)
+                .or_else(|| listed.iter().find(|n| n.to_lowercase() == lower));
+            path.push(c);
+            let Some(on_disk) = on_disk else {
+                // Neither this component nor anything below it exists.
+                return Ok(());
+            };
+            if last {
+                return Err(refuse(if on_disk == c {
+                    "the file already exists; a create never replaces a file (edit it instead)"
+                        .into()
+                } else {
+                    format!(
+                        "the file already exists as '{on_disk}'; a create never replaces a file"
+                    )
+                }));
+            }
+            if on_disk != c {
+                return Err(refuse(format!(
+                    "the folder's name on disk is '{on_disk}'; name it with its exact spelling"
+                )));
+            }
+            match std::fs::symlink_metadata(&path) {
+                Ok(m) if m.file_type().is_symlink() => {
+                    return Err(refuse(
+                        "a parent folder is a link; the writer writes inside the project only"
+                            .into(),
+                    ));
+                }
+                Ok(m) if !m.is_dir() => {
+                    return Err(refuse(format!("'{c}' is not a folder")));
+                }
+                Ok(_) => {}
+                Err(_) => return Ok(()),
+            }
+        }
+        Ok(())
+    }
+
     /// The kind of an existing config file named by `file`, or a refusal.
     fn resolve(&self, file: &str) -> Result<FileKind, WriteError> {
         let refuse = |reason: &str| WriteError::BadPath {
@@ -801,18 +1076,10 @@ impl ConfigWriter {
 
     /// Checks the project with `after` in place of `file`, then runs the
     /// intent, write and commit sequence.
-    fn step(
-        &self,
-        actor: Actor,
-        file: &str,
-        kind: HistoryKind,
-        ref_entry: Option<String>,
-        before: Vec<u8>,
-        after: Vec<u8>,
-    ) -> Result<HistoryEntry, WriteError> {
+    fn step(&self, actor: Actor, file: &str, change: Change) -> Result<HistoryEntry, WriteError> {
         // No key may reach History, an intent or a diff through the bytes
         // the file holds now: the owner removes it by hand first.
-        let lines = secret_lines(file, &before);
+        let lines = secret_lines(file, &change.before);
         if !lines.is_empty() {
             return Err(WriteError::Secret {
                 file: file.to_string(),
@@ -825,7 +1092,8 @@ impl ConfigWriter {
         // at a time. Errors are compared without their line, which an edit
         // may shift.
         let errors_now = self.errors(BTreeMap::new())?;
-        let errors_after = self.errors(BTreeMap::from([(file.to_string(), after.clone())]))?;
+        let errors_after =
+            self.errors(BTreeMap::from([(file.to_string(), change.after.clone())]))?;
         let new_errors = added_errors(errors_now, errors_after);
         if !new_errors.is_empty() {
             return Err(WriteError::Invalid {
@@ -833,7 +1101,7 @@ impl ConfigWriter {
                 findings: new_errors,
             });
         }
-        self.write_step(actor, file, kind, ref_entry, before, after)
+        self.write_step(actor, file, change)
     }
 
     /// The intent, write and commit sequence of a change already checked
@@ -844,11 +1112,15 @@ impl ConfigWriter {
         &self,
         actor: Actor,
         file: &str,
-        kind: HistoryKind,
-        ref_entry: Option<String>,
-        before: Vec<u8>,
-        after: Vec<u8>,
+        change: Change,
     ) -> Result<HistoryEntry, WriteError> {
+        let Change {
+            kind,
+            ref_entry,
+            before,
+            after,
+            audit,
+        } = change;
         let lines = secret_lines(file, &before);
         if !lines.is_empty() {
             return Err(WriteError::Secret {
@@ -866,6 +1138,7 @@ impl ConfigWriter {
             diff: linediff::unified(file, &before, &after),
             before,
             after,
+            audit,
         };
         let bytes = intent.after.clone();
         // An intent of this file left pending while the writer ran is settled
@@ -915,6 +1188,135 @@ impl ConfigWriter {
             .into_iter()
             .filter(|f| f.severity == Severity::Error)
             .collect())
+    }
+
+    /// The project's error findings when its tracked files are exactly
+    /// `files` (see [`load_exact`]).
+    fn errors_exact(&self, files: BTreeMap<String, Vec<u8>>) -> Result<Vec<Finding>, WriteError> {
+        let loaded =
+            load_exact(&self.root, files, LoadOptions::default()).map_err(|e| match e {
+                LoadError::NotFound(p) | LoadError::NotADirectory(p) => WriteError::BadPath {
+                    file: p.display().to_string(),
+                    reason: "the project folder is gone".into(),
+                },
+            })?;
+        Ok(loaded
+            .findings
+            .into_iter()
+            .filter(|f| f.severity == Severity::Error)
+            .collect())
+    }
+
+    /// A create's placement (AD-16): missing parent folders, a new temp
+    /// file, fsync, a hard link to the final name (which fails when the name
+    /// exists), removal of the temp file, fsync of the folder.
+    fn place(&self, file: &str, bytes: &[u8]) -> Result<(), Written> {
+        let path = self.root.join(file);
+        let dir = path.parent().unwrap_or(&self.root).to_path_buf();
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let tmp = dir.join(format!(".{name}{TMP_SUFFIX}"));
+        let written = (|| -> Result<(), WriteError> {
+            // Each missing parent is made one folder at a time, so a link
+            // that appeared meanwhile is not followed without being seen.
+            let mut at = self.root.clone();
+            let parents: Vec<&str> = file.split('/').collect();
+            for c in &parents[..parents.len().saturating_sub(1)] {
+                at.push(c);
+                match std::fs::symlink_metadata(&at) {
+                    Ok(m) if m.is_dir() && !m.file_type().is_symlink() => {}
+                    Ok(_) => {
+                        return Err(WriteError::BadPath {
+                            file: file.to_string(),
+                            reason: format!(
+                                "'{c}' is not a folder (a file or a link); the writer writes inside the project only"
+                            ),
+                        });
+                    }
+                    Err(_) => {
+                        std::fs::create_dir(&at)
+                            .map_err(io(format!("cannot create the folder {}", at.display())))?;
+                        // The new folder's entry is made durable in its
+                        // parent, as the file's is in its folder below.
+                        let parent = at.parent().unwrap_or(&self.root);
+                        std::fs::File::open(parent)
+                            .and_then(|d| d.sync_all())
+                            .map_err(io(format!("cannot sync the folder of {}", at.display())))?;
+                    }
+                }
+            }
+            match std::fs::symlink_metadata(&tmp) {
+                Ok(m) if m.is_dir() => std::fs::remove_dir_all(&tmp),
+                Ok(_) => std::fs::remove_file(&tmp),
+                Err(_) => Ok(()),
+            }
+            .map_err(io(format!("cannot remove {}", tmp.display())))?;
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&tmp)
+                .map_err(io(format!("cannot create {}", tmp.display())))?;
+            f.write_all(bytes)
+                .map_err(io(format!("cannot write {}", tmp.display())))?;
+            f.sync_all()
+                .map_err(io(format!("cannot sync {}", tmp.display())))?;
+            Ok(())
+        })();
+        if let Err(e) = written {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(Written::No(e));
+        }
+        #[cfg(feature = "test-support")]
+        if self.failpoint(FailPoint::BeforeRename) {
+            return Err(Written::Maybe(WriteError::Interrupted(
+                "simulated crash before the file was placed".into(),
+            )));
+        }
+        let linked = std::fs::hard_link(&tmp, &path);
+        #[cfg(feature = "test-support")]
+        let linked = if self.failpoint(FailPoint::NoHardLinks) {
+            // Undo the link the test volume allowed, then refuse as a
+            // volume without hard links does.
+            if linked.is_ok() {
+                let _ = std::fs::remove_file(&path);
+            }
+            Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
+        } else {
+            linked
+        };
+        if let Err(e) = linked {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(Written::No(
+                if e.kind() == std::io::ErrorKind::AlreadyExists {
+                    WriteError::BadPath {
+                    file: file.to_string(),
+                    reason: "the file already exists (it appeared while the create ran); a create never replaces a file, so it was left as it is".into(),
+                }
+                } else {
+                    WriteError::BadEdit(format!(
+                        "{file} cannot be placed by a hard link ({e}); a new config file is only ever placed that way, so that it can never replace a file, and this volume refuses hard links. Nothing was written: create the file by hand, or keep the project on a volume that supports hard links"
+                    ))
+                },
+            ));
+        }
+        // The file stands under its name from here on: a failure leaves the
+        // intent for the next reconcile.
+        std::fs::remove_file(&tmp)
+            .map_err(io(format!("cannot remove {}", tmp.display())))
+            .map_err(Written::Maybe)?;
+        std::fs::File::open(&dir)
+            .and_then(|d| d.sync_all())
+            .map_err(io(format!("cannot sync the folder of {file}")))
+            .map_err(Written::Maybe)?;
+        #[cfg(feature = "test-support")]
+        if self.failpoint(FailPoint::AfterRename) {
+            return Err(Written::Maybe(WriteError::Interrupted(
+                "simulated crash after the file was placed".into(),
+            )));
+        }
+        Ok(())
     }
 
     #[cfg(feature = "test-support")]
@@ -1042,6 +1444,18 @@ fn refuse_absent(entry: &HistoryEntry, undo: bool) -> Result<(), WriteError> {
         "{}: entry {} recorded a change made outside the app, and to {action} it {words}",
         entry.file, entry.id
     )))
+}
+
+/// One change to an existing file, on its way through the intent, write and
+/// commit sequence.
+struct Change {
+    kind: HistoryKind,
+    /// The entry an Undo or Restore acts on.
+    ref_entry: Option<String>,
+    before: Vec<u8>,
+    after: Vec<u8>,
+    /// Audit entries the History port writes with the commit (story 2.1).
+    audit: Vec<AuditNote>,
 }
 
 /// A failed replace: `No` when the file kept its bytes for certain, `Maybe`

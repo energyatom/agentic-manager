@@ -8,8 +8,9 @@
 //!   can only ever hold hashes.
 //! - `CommitConfigEntry` deletes the intent and inserts the History entry in
 //!   one transaction, audited `config.edited`, `config.undone`,
-//!   `config.restored`, `config.outside_edit` (story 1.9) or
-//!   `config.migrated` (story 1.10) by its kind;
+//!   `config.restored`, `config.outside_edit` (story 1.9),
+//!   `config.migrated` (story 1.10) or `config.created` (story 2.1) by its
+//!   kind;
 //!   `ReconcileConfigIntent` does the same at
 //!   startup, audited `config.reconciled`; `DropConfigIntent` deletes an
 //!   intent whose file was never written, audited `config.intent_dropped`.
@@ -18,11 +19,19 @@
 //!   reconcile). `config_history` is append-only (triggers).
 //! - Audit `args` hold only the entry id, the file path, the sha256 values,
 //!   the kind and the entry acted on; never file content (AD-25).
+//! - Story 2.1 (AD-15, AD-25): an intent may carry `AuditNote`s (a widening
+//!   record such as `account_added`). They are kept on the intent row and
+//!   appended to the audit log right after the `config.*` entry of the
+//!   commit or reconcile, in its transaction, with the intent's own Actor
+//!   (who asked for and confirmed the change; a reconcile is the system's,
+//!   the note is not); never at `begin`, never for a dropped intent. A note with an empty action or
+//!   target refuses the intent.
 
 use std::sync::Mutex;
 
 use am_domain::{
-    Actor, ConfigHistory, HistoryEntry, HistoryError, HistoryKind, NewIntent, PendingIntent,
+    Actor, AuditNote, ConfigHistory, HistoryEntry, HistoryError, HistoryKind, NewIntent,
+    PendingIntent,
 };
 use rusqlite::{OptionalExtension, Row, Transaction, params};
 use serde_json::{Map, Value};
@@ -32,6 +41,24 @@ use crate::{Reader, Store, StoreError, WriteCommand, Writer, is_sha256_hex, new_
 
 /// What a config command's audit entry holds: action, target, args.
 pub(crate) type AuditTriple = (String, String, Option<Value>);
+
+/// A config command's audit entries: its own, then one per note the intent
+/// carried (commit and reconcile only), each with the intent's Actor.
+pub(crate) type ConfigAudit = (AuditTriple, Vec<(Actor, AuditTriple)>);
+
+/// A note as an audit entry: its args as a JSON object of strings.
+fn note_entry(note: &AuditNote) -> AuditTriple {
+    let args: Map<String, Value> = note
+        .args
+        .iter()
+        .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+        .collect();
+    (
+        note.action.clone(),
+        note.target.clone(),
+        Some(Value::Object(args)),
+    )
+}
 
 fn sha256_bytes(b: &[u8]) -> String {
     hex::encode(Sha256::digest(b))
@@ -107,8 +134,26 @@ pub(crate) fn begin(
     if i.before_sha256 == i.after_sha256 {
         return Err(invalid("the file would not change"));
     }
+    if i.kind == HistoryKind::Create && !i.before.is_empty() {
+        return Err(invalid("a create starts from no bytes"));
+    }
+    for note in &i.audit {
+        if note.action.trim().is_empty() || note.target.trim().is_empty() {
+            return Err(invalid("an audit note needs an action and a target"));
+        }
+    }
+    let notes = serde_json::to_string(&i.audit).map_err(|e| StoreError::Invalid(e.to_string()))?;
     match (i.kind, &i.ref_entry) {
-        (HistoryKind::Edit | HistoryKind::OutsideEdit | HistoryKind::Migration, None) => {}
+        (
+            HistoryKind::Edit
+            | HistoryKind::OutsideEdit
+            | HistoryKind::Migration
+            | HistoryKind::Create,
+            None,
+        ) => {}
+        (HistoryKind::Create, Some(_)) => {
+            return Err(invalid("a create names no earlier entry"));
+        }
         (HistoryKind::Edit, Some(_)) => {
             return Err(invalid("an edit names no earlier entry"));
         }
@@ -133,8 +178,8 @@ pub(crate) fn begin(
     let actor_json =
         serde_json::to_string(actor).map_err(|e| StoreError::Invalid(e.to_string()))?;
     tx.execute(
-        "INSERT INTO config_intents (id, opened_at, actor, file, kind, ref_entry, before_sha256, after_sha256, before_bytes, after_bytes, diff)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        "INSERT INTO config_intents (id, opened_at, actor, file, kind, ref_entry, before_sha256, after_sha256, before_bytes, after_bytes, diff, audit_notes)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
         params![
             id,
             now,
@@ -146,7 +191,8 @@ pub(crate) fn begin(
             i.after_sha256,
             i.before,
             i.after,
-            i.diff
+            i.diff,
+            notes
         ],
     )?;
     Ok((
@@ -170,11 +216,15 @@ struct Summary {
     ref_entry: Option<String>,
     before: String,
     after: String,
+    /// The intent's audit notes, as stored (a JSON list).
+    notes: String,
+    /// The intent's Actor, as stored (JSON).
+    actor: String,
 }
 
 fn summary(tx: &Transaction, id: &str) -> Result<Summary, StoreError> {
     tx.query_row(
-        "SELECT file, kind, ref_entry, before_sha256, after_sha256 FROM config_intents WHERE id = ?1",
+        "SELECT file, kind, ref_entry, before_sha256, after_sha256, audit_notes, actor FROM config_intents WHERE id = ?1",
         params![id],
         |r| {
             Ok(Summary {
@@ -183,6 +233,8 @@ fn summary(tx: &Transaction, id: &str) -> Result<Summary, StoreError> {
                 ref_entry: r.get(2)?,
                 before: r.get(3)?,
                 after: r.get(4)?,
+                notes: r.get(5)?,
+                actor: r.get(6)?,
             })
         },
     )
@@ -190,14 +242,32 @@ fn summary(tx: &Transaction, id: &str) -> Result<Summary, StoreError> {
     .ok_or_else(|| StoreError::NoConfigIntent(id.to_string()))
 }
 
-/// Moves the intent into History (`reconciled`: at startup).
+fn notes_of(text: &str) -> Result<Vec<AuditNote>, serde_json::Error> {
+    serde_json::from_str(text)
+}
+
+/// Moves the intent into History (`reconciled`: at startup); the notes the
+/// intent carried come back as the audit entries to write after its own.
 pub(crate) fn complete(
     tx: &Transaction,
     id: &str,
     reconciled: bool,
     now: &str,
-) -> Result<AuditTriple, StoreError> {
+) -> Result<ConfigAudit, StoreError> {
     let s = summary(tx, id)?;
+    let notes = notes_of(&s.notes)
+        .map_err(|e| invalid(format!("the intent's audit notes cannot be read: {e}")))?;
+    let notes: Vec<(Actor, AuditTriple)> = if notes.is_empty() {
+        Vec::new()
+    } else {
+        // A note records who confirmed the change: the intent's Actor.
+        let asked: Actor = serde_json::from_str(&s.actor)
+            .map_err(|e| invalid(format!("the intent's actor cannot be read: {e}")))?;
+        notes
+            .iter()
+            .map(|note| (asked.clone(), note_entry(note)))
+            .collect()
+    };
     tx.execute(
         "INSERT INTO config_history (id, at, actor, file, kind, ref_entry, before_sha256, after_sha256, before_bytes, after_bytes, diff)
          SELECT id, ?2, actor, file, kind, ref_entry, before_sha256, after_sha256, before_bytes, after_bytes, diff
@@ -214,20 +284,24 @@ pub(crate) fn complete(
             Some(HistoryKind::Restore) => "config.restored",
             Some(HistoryKind::OutsideEdit) => "config.outside_edit",
             Some(HistoryKind::Migration) => "config.migrated",
+            Some(HistoryKind::Create) => "config.created",
             None => return Err(invalid(format!("unknown kind '{}'", s.kind))),
         }
     };
     Ok((
-        action.into(),
-        id.to_string(),
-        Some(args(
-            Some(id),
-            &s.file,
-            &s.kind,
-            s.ref_entry.as_deref(),
-            &s.before,
-            &s.after,
-        )),
+        (
+            action.into(),
+            id.to_string(),
+            Some(args(
+                Some(id),
+                &s.file,
+                &s.kind,
+                s.ref_entry.as_deref(),
+                &s.before,
+                &s.after,
+            )),
+        ),
+        notes,
     ))
 }
 
@@ -289,7 +363,7 @@ impl Reader {
     /// Intents committed but neither completed nor dropped, oldest first.
     pub fn config_intents(&self) -> Result<Vec<PendingIntent>, StoreError> {
         let mut st = self.conn.prepare(
-            "SELECT id, opened_at, actor, file, kind, ref_entry, before_sha256, after_sha256, before_bytes, after_bytes, diff
+            "SELECT id, opened_at, actor, file, kind, ref_entry, before_sha256, after_sha256, before_bytes, after_bytes, diff, audit_notes
              FROM config_intents ORDER BY opened_at, rowid",
         )?;
         let rows = st.query_map([], |r| {
@@ -306,6 +380,13 @@ impl Reader {
                     before: r.get(8)?,
                     after: r.get(9)?,
                     diff: r.get(10)?,
+                    audit: notes_of(&r.get::<_, String>(11)?).map_err(|e| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            11,
+                            rusqlite::types::Type::Text,
+                            Box::new(e),
+                        )
+                    })?,
                 },
             })
         })?;

@@ -14,6 +14,10 @@
 use std::io::Write;
 use std::path::Path;
 
+/// `agentic accounts add|remove|list|test` (story 2.1, AD-15's interim CLI
+/// Account edit); see [`crate::accounts`].
+pub use crate::accounts::{AccountsContext, accounts};
+
 /// Exit codes of `agentic validate`.
 pub const EXIT_OK: i32 = 0;
 pub const EXIT_ERRORS: i32 = 1;

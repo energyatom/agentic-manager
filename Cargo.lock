@@ -59,6 +59,7 @@ dependencies = [
  "am-tools",
  "hex",
  "jiff 1.0.0",
+ "nix",
  "sha2 0.11.1",
  "tempfile",
  "tokio",

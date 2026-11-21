@@ -19,6 +19,7 @@ pub mod mcp;
 pub mod net;
 pub mod runtime;
 pub mod secrets;
+pub mod terminal;
 pub mod tool_manifest;
 pub mod workspace;
 
@@ -41,7 +42,7 @@ pub use actor::Actor;
 pub use audit::{AuditEvent, AuditSink};
 pub use clock::Clock;
 pub use config_history::{
-    ConfigHistory, HistoryEntry, HistoryError, HistoryKind, NewIntent, PendingIntent,
+    AuditNote, ConfigHistory, HistoryEntry, HistoryError, HistoryKind, NewIntent, PendingIntent,
 };
 pub use config_names::{CONFIG_NAMES, config_name_in, config_name_of, is_config_bearing};
 pub use content::{FileKind, FilePart, Instruction, UntrustedContent, UntrustedData};
@@ -60,4 +61,5 @@ pub use runtime::{
     VolumeState,
 };
 pub use secrets::{SecretError, SecretStore, SecretString};
+pub use terminal::{Terminal, TerminalError};
 pub use workspace::{Access, GrantRoot, PathError, WorkspacePath};

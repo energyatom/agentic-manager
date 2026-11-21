@@ -488,8 +488,7 @@ pub struct TerminalPrompt;
 
 impl Prompt for TerminalPrompt {
     fn interactive(&self) -> bool {
-        use std::io::IsTerminal;
-        std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
+        crate::terminal::interactive()
     }
 
     fn ask(&mut self, question: &str) -> bool {
@@ -1018,6 +1017,172 @@ pub fn find_runtime(places: &Places, root: &Path) -> Result<RuntimeLayout, Refus
     Ok(layout)
 }
 
+/// A project opened for the interim CLI Account edit (story 2.1, AD-15):
+/// the store under its lock and the config writer, with nothing about the
+/// project or its runtime folder changed to get there. Fields drop in
+/// order: the writer, then the store (whose writer thread holds the lock).
+pub struct OpenedUnchanged {
+    pub writer: ConfigWriter,
+    pub store: Store,
+    pub layout: RuntimeLayout,
+    pub project_id: ProjectId,
+    /// The project root, canonicalised.
+    pub root: PathBuf,
+    /// What settling interrupted config writes did, as printed.
+    pub lines: Vec<String>,
+}
+
+/// Opens the project at `root` as the one writer for the interim CLI
+/// Account edit (story 2.1, AD-15), by AD-32's checks in their order and
+/// read-only: it mints no `project_id`, creates no runtime folder, records
+/// no root, moves no legacy folder, creates, backs up or migrates no
+/// database and writes no marker; whatever would need one of those is
+/// refused in words naming `agentic serve`, which does them. The store's
+/// lock is then held for as long as the result lives (a holder is named in
+/// the refusal). The only writes are the lock files and, like every open of
+/// the writer, the settling of a config write a crash interrupted (History
+/// and audit in the store; stale temp files removed).
+pub fn open_project_unchanged(
+    places: &Places,
+    identity: &dyn ProjectIdentity,
+    root: &Path,
+) -> Result<OpenedUnchanged, Refusal> {
+    let root = match root.canonicalize() {
+        Ok(r) if r.is_dir() => r,
+        Ok(r) => {
+            return refuse(format!(
+                "{} is not a folder; give the project folder",
+                r.display()
+            ));
+        }
+        Err(_) => {
+            return refuse(format!(
+                "the project folder {} does not exist",
+                root.display()
+            ));
+        }
+    };
+    let serve = format!("`agentic serve --project {}`", root.display());
+    // 1. The identity tools.
+    let id_root = identity.root(&root).map_err(identity_words)?;
+    let mac_name = identity.mac_name().map_err(identity_words)?;
+    // 2. company.yaml and its id (never minted here).
+    let head = am_config::read_company(&root).map_err(words)?;
+    let Some(id) = head.project_id else {
+        return refuse(format!(
+            "{} has no project_id in company.yaml yet, and this command never gives a project its id; open the project once with {serve}, then run this command again",
+            root.display()
+        ));
+    };
+    // 3. The base lock, only where a runtime base already is.
+    let layout = places.base.project(&id);
+    let not_here = || {
+        Refusal(format!(
+            "project {id} has no runtime folder on this Mac ({}), and this command never creates one; open the project here once with {serve}, then run this command again",
+            layout.dir().display()
+        ))
+    };
+    if !places.base.dir().is_dir() {
+        return Err(not_here());
+    }
+    let _base_lock = take_base_lock(&places.base)?;
+    let again = identity.root(&root).map_err(identity_words)?;
+    if !again.same_root(&id_root) {
+        return refuse(format!(
+            "the project folder {} changed while it was being opened; run the command again",
+            root.display()
+        ));
+    }
+    // 4. Root and id: only a root this Mac records under this id.
+    let all = records(&places.base);
+    match all.iter().find(|r| r.root.same_root(&id_root)) {
+        Some(rec) if rec.project_id == id => {}
+        Some(rec) => {
+            return refuse(format!(
+                "this folder's project id changed: its runtime folder {} belongs to project id '{}', but company.yaml now has '{id}'; nothing is opened. Settle it by opening the project with {serve}",
+                places.base.project(&rec.project_id).dir().display(),
+                rec.project_id
+            ));
+        }
+        None if layout.dir().is_dir() => {
+            return refuse(format!(
+                "this folder is not the one this Mac records for project {id} (it moved, or it is a copy), and this command never records a root; open the project once with {serve} to settle it, then run this command again"
+            ));
+        }
+        None => return Err(not_here()),
+    }
+    // 5. The legacy folder (never moved here).
+    let old = legacy_dir(&root);
+    let unfinished = legacy::read_journal(&layout)
+        .map_err(store_words)?
+        .is_some_and(|j| j.unfinished());
+    if old.is_dir() || unfinished {
+        return refuse(format!(
+            "{} still holds the old runtime folder {} (or its move out of the project is unfinished), and this command never moves it; open the project once with {serve} to move it, then run this command again",
+            root.display(),
+            old.display()
+        ));
+    }
+    // 6. The database version (a newer one; an older one is refused below,
+    // under the lock, without being migrated).
+    am_store::check_database(&layout.state_db()).map_err(store_words)?;
+    // 7. The marker: another Mac's refuses; this command writes none.
+    let marker_path = open_marker(&root);
+    if marker_path.exists() {
+        let mac_id = read_mac_id(&places.app_data)?;
+        let found = std::fs::read_to_string(&marker_path)
+            .ok()
+            .and_then(|t| Marker::parse(&t));
+        let ours = found
+            .as_ref()
+            .is_some_and(|m| mac_id.is_some_and(|me| m.mac_id == me.to_string()));
+        if !ours {
+            let (name, since) = match &found {
+                Some(m) => (m.mac_name.as_str(), m.opened_at.as_str()),
+                None => (
+                    "an unknown Mac (the marker cannot be read)",
+                    "an unknown time",
+                ),
+            };
+            return refuse(format!(
+                "the project is open on another Mac, {name} (since {since}); close it there first. This command never takes a project over: if that Mac is off or the marker is left over, settle it with `agentic serve --project {} --take-over` in a terminal",
+                root.display()
+            ));
+        }
+        // This Mac's marker: a live holder is refused by the store's lock,
+        // naming it; a left-over one is the next `serve`'s to replace.
+    }
+    let store = am_store::open_runtime_unchanged(&layout, mac_name).map_err(store_words)?;
+    let history = StoreConfigHistory::new(&store).map_err(store_words)?;
+    let writer = ConfigWriter::open(&root, std::sync::Arc::new(history)).map_err(words)?;
+    let reconciled = writer
+        .reconcile(Actor::System {
+            component: "config-writer".into(),
+        })
+        .map_err(words)?;
+    let mut lines = Vec::new();
+    for entry in &reconciled.completed {
+        lines.push(format!(
+            "completed the interrupted write of {} (History entry {})",
+            entry.file, entry.id
+        ));
+    }
+    for dropped in &reconciled.dropped {
+        lines.push(format!("dropped the unwritten config change {dropped}"));
+    }
+    // Tests only: stop this writer's writes as a crash would.
+    #[cfg(feature = "test-support")]
+    writer.fail_at(testing::writer_fail_point(&root));
+    Ok(OpenedUnchanged {
+        writer,
+        store,
+        layout,
+        project_id: id,
+        root,
+        lines,
+    })
+}
+
 /// The runtime folder's `knowledge/` for `agentic validate` on a project,
 /// when it has one on this Mac (no lock, no write, no identity tool).
 pub fn knowledge_root(places: &Places, root: &Path) -> Option<PathBuf> {
@@ -1051,5 +1216,33 @@ pub mod testing {
 
     pub(crate) fn failing(point: FailPoint) -> bool {
         FAIL.lock().is_ok_and(|f| *f == Some(point))
+    }
+
+    /// Where the config writer of the project at each root stops its
+    /// writes, for [`super::open_project_unchanged`] (keyed by the root, so
+    /// tests in one process do not reach each other's projects).
+    static WRITER_FAIL: Mutex<Vec<(std::path::PathBuf, am_config::FailPoint)>> =
+        Mutex::new(Vec::new());
+
+    /// Stops the writes of the writer that `open_project_unchanged` builds
+    /// for the project at `root` at `point`, as a crash would (story 2.1);
+    /// `None` clears it.
+    pub fn fail_writer_at(root: &std::path::Path, point: Option<am_config::FailPoint>) {
+        let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+        if let Ok(mut all) = WRITER_FAIL.lock() {
+            all.retain(|(r, _)| *r != root);
+            if let Some(point) = point {
+                all.push((root, point));
+            }
+        }
+    }
+
+    pub(crate) fn writer_fail_point(root: &std::path::Path) -> Option<am_config::FailPoint> {
+        WRITER_FAIL
+            .lock()
+            .ok()?
+            .iter()
+            .find(|(r, _)| r == root)
+            .map(|(_, point)| *point)
     }
 }

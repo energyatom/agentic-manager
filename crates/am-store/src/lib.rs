@@ -13,7 +13,10 @@
 //!   binary is refused.
 //! - [`open_runtime`] opens a project's runtime folder (owner-only, outside
 //!   the project; am-app resolves it, AD-32) under an exclusive lock that
-//!   names its holder. [`legacy::move_legacy`] moves an older binary's
+//!   names its holder. [`open_runtime_unchanged`] (story 2.1, AD-15) does
+//!   the same for a command that must never create, back up or migrate the
+//!   database: it is refused in words unless the database is already at
+//!   this binary's version. [`legacy::move_legacy`] moves an older binary's
 //!   in-project folder there first (story 1.13). [`Store::open`] on a bare
 //!   path remains for the spike's callers.
 //!
@@ -43,7 +46,7 @@ pub use config_history::StoreConfigHistory;
 pub use fsx::stream_copy;
 pub use migrations::{AppliedMigration, OpenReport, PRE_MIGRATION_KEPT, SCHEMA_VERSION};
 use project::ProjectLock;
-pub use project::{LockHolder, lock_holder, lock_is_held, open_runtime};
+pub use project::{LockHolder, lock_holder, lock_is_held, open_runtime, open_runtime_unchanged};
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -99,6 +102,17 @@ pub enum StoreError {
         context: String,
         source: std::io::Error,
     },
+    /// Story 2.1 (AD-15): [`open_runtime_unchanged`] never migrates.
+    #[error(
+        "the project's database is at version {found} and this app would migrate it to version {known}, which this command never does; open the project once with `agentic serve --project <folder>` (it backs the database up and migrates it), then run this command again"
+    )]
+    NeedsMigration { found: i64, known: i64 },
+    /// Story 2.1 (AD-15): [`open_runtime_unchanged`] never creates.
+    #[error(
+        "the project has no database at {} yet, and this command never creates one; open the project once with `agentic serve --project <folder>`, then run this command again",
+        .path.display()
+    )]
+    NoDatabase { path: PathBuf },
     #[error("opening a project is not supported on this platform yet")]
     Unsupported,
     #[error("the writer stopped")]
@@ -204,7 +218,8 @@ pub enum WriteCommand {
     },
     /// Deletes the intent and inserts its History entry in one transaction,
     /// audited `config.edited`, `config.undone`, `config.restored`,
-    /// `config.outside_edit` or `config.migrated`.
+    /// `config.outside_edit`, `config.migrated` or `config.created`, then
+    /// one entry per audit note the intent carried (story 2.1).
     CommitConfigEntry {
         intent_id: String,
     },
@@ -577,6 +592,10 @@ fn apply(conn: &mut Connection, actor: &Actor, cmd: &WriteCommand) -> Result<(),
     let tx = conn.transaction()?;
     let now = now_ts();
     let mut config_entry = None;
+    // The audit notes a committed or reconciled config intent carried
+    // (story 2.1): written right after its own entry, in this transaction,
+    // each with the intent's own Actor.
+    let mut config_notes = Vec::new();
     match cmd {
         WriteCommand::CreateRun {
             run_id,
@@ -689,10 +708,14 @@ fn apply(conn: &mut Connection, actor: &Actor, cmd: &WriteCommand) -> Result<(),
             config_entry = Some(config_history::begin(&tx, actor, id, intent, &now)?);
         }
         WriteCommand::CommitConfigEntry { intent_id } => {
-            config_entry = Some(config_history::complete(&tx, intent_id, false, &now)?);
+            let (entry, notes) = config_history::complete(&tx, intent_id, false, &now)?;
+            config_entry = Some(entry);
+            config_notes = notes;
         }
         WriteCommand::ReconcileConfigIntent { intent_id } => {
-            config_entry = Some(config_history::complete(&tx, intent_id, true, &now)?);
+            let (entry, notes) = config_history::complete(&tx, intent_id, true, &now)?;
+            config_entry = Some(entry);
+            config_notes = notes;
         }
         WriteCommand::DropConfigIntent { intent_id } => {
             config_entry = Some(config_history::drop_intent(&tx, intent_id)?);
@@ -706,6 +729,9 @@ fn apply(conn: &mut Connection, actor: &Actor, cmd: &WriteCommand) -> Result<(),
         _ => "ok".to_string(),
     };
     audit::append(&tx, actor, &action, &target, &outcome, args.as_ref(), &now)?;
+    for (asked, (action, target, args)) in &config_notes {
+        audit::append(&tx, asked, action, target, "ok", args.as_ref(), &now)?;
+    }
     tx.commit()?;
     Ok(())
 }

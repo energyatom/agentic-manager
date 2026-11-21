@@ -38,6 +38,12 @@
 //! carries no `project_id`); [`read_company`] and [`decisions_locked`] are the
 //! resolver's reads before a project opens.
 //!
+//! Story 2.1 (AD-15, AD-16): [`ConfigWriter::create`] writes a new config
+//! file (a [`ConfigCreate`]) without ever replacing one, and the reads and
+//! patches of the interim CLI Account edit are here too ([`accounts_file`],
+//! [`account_uses`], [`add_account_edit`], [`remove_account_edit`],
+//! [`new_accounts_file`], [`outside_changes`]).
+//!
 //! Story 1.9 (R2, AD-16): [`ConfigSession`] holds the accepted bytes of every
 //! file the snapshot is read from and builds the snapshot only from them (an
 //! exact-map load, no disk read of those files); a `notify` watcher announces
@@ -46,6 +52,7 @@
 //! recording each file in History as an `outside_edit`.
 #![forbid(unsafe_code)]
 
+mod account_edit;
 mod canon;
 mod checks;
 mod cron;
@@ -66,6 +73,10 @@ mod writer;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+pub use account_edit::{
+    ACCOUNTS_FILE, AccountUse, AccountsFile, account_uses, accounts_file, add_account_edit,
+    is_config_id, new_accounts_file, outside_changes, remove_account_edit, reserved_account_ids,
+};
 pub use entities::*;
 pub use finding::{Finding, Severity};
 pub use migrate::{MigrationOffer, accept_migrations, migration_offers};
@@ -74,8 +85,8 @@ pub use snapshot::ConfigSnapshot;
 #[cfg(feature = "test-support")]
 pub use writer::FailPoint;
 pub use writer::{
-    ConfigEdit, ConfigIdentityAssign, ConfigWriter, EditOp, ReconcileReport, WriteError,
-    canonical_bytes, config_files,
+    ConfigCreate, ConfigEdit, ConfigIdentityAssign, ConfigWriter, EditOp, ReconcileReport,
+    WriteError, canonical_bytes, config_files,
 };
 
 use finding::Report;
