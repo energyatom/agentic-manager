@@ -46,8 +46,14 @@ pub(crate) fn fields<'n>(
 impl<'n> Fields<'n> {
     /// Reports every key not in `allowed`, suggesting the nearest one.
     pub fn allow(&self, rep: &mut Report, allowed: &[&str]) {
+        self.allow_except(rep, allowed, &[]);
+    }
+
+    /// [`Fields::allow`], leaving out the keys in `reported` (the caller
+    /// reports those with its own words).
+    pub fn allow_except(&self, rep: &mut Report, allowed: &[&str], reported: &[&str]) {
         for (key, _) in self.entries {
-            if allowed.contains(&key.name.as_str()) {
+            if allowed.contains(&key.name.as_str()) || reported.contains(&key.name.as_str()) {
                 continue;
             }
             let fix = match did_you_mean(&key.name, allowed) {

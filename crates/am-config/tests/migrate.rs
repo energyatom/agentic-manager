@@ -3,10 +3,12 @@
 //! accept, through the writer, as one `migration` History entry each. Written
 //! before the migration registry exists.
 //!
-//! The shipped registry is empty (`SCHEMA_VERSION` stays 1); this crate's
-//! tests build with `test-support`, which registers a step from 0 to 1 that
-//! renames a seat's v0-only `group:` key to `team:` and bumps the version
-//! (files without that key get only the bump). Every v0 project is a temporary copy of
+//! Story 1.14 moves `SCHEMA_VERSION` to 2 and ships the first step (1→2,
+//! the whole-project `egress_hosts` move, tested in `migrate_hosts.rs`);
+//! this crate's tests build with `test-support`, which also registers a step
+//! from 0 to 1 that renames a seat's v0-only `group:` key to `team:` and
+//! bumps the version (files without that key get only the bump), so a v0
+//! file is offered from 0 to 2. Every v0 project is a temporary copy of
 //! `fixtures/projects/valid` with files edited to `schema_version: 0`.
 //!
 //! The API these tests expect (plan Code Map):
@@ -40,6 +42,8 @@ use sha2::{Digest, Sha256};
 
 const SEAT: &str = "seats/alpha.md";
 const WORKFLOW: &str = "workflows/digest.yaml";
+/// This app's `schema_version` (story 1.14).
+const CURRENT: i64 = 2;
 /// A body whose bytes (trailing spaces, a tab, a `---` line, no final
 /// newline) must survive the migration.
 const BODY: &str =
@@ -71,12 +75,21 @@ fn all_bytes(root: &Path) -> BTreeMap<String, Vec<u8>> {
         .collect()
 }
 
-/// Sets `rel`'s `schema_version: 1` to `version`.
+/// The first `schema_version:` line of `text`.
+fn version_line(text: &str) -> String {
+    text.lines()
+        .find(|l| l.trim_start().starts_with("schema_version:"))
+        .expect("a schema_version line")
+        .to_string()
+}
+
+/// Sets `rel`'s `schema_version` line, whatever it holds now, to `version`.
 fn at_version(root: &Path, rel: &str, version: i64) {
+    let text = String::from_utf8(read(root, rel)).unwrap();
     edit(
         root,
         rel,
-        "schema_version: 1",
+        &version_line(&text),
         &format!("schema_version: {version}"),
     );
 }
@@ -107,13 +120,19 @@ fn open_session(
     ConfigSession::open(root, history, on_event)
 }
 
-/// The bytes the canonical emitter gives `rel` with its version set to 1:
-/// what the 0→1 test step must produce for a file with no v0-only `group:`
-/// key (the step renames only that key, which these files do not hold).
+/// The bytes the canonical emitter gives `rel` with its version set to 2:
+/// what the 0→1 test step and the 1→2 step must produce for a file with no
+/// v0-only `group:` key (the first renames only that key, which these files
+/// do not hold; the second moves `tools.yaml` `egress_hosts`, which the
+/// current `tools.yaml` no longer holds).
 fn stepped(root: &Path, rel: &str) -> Vec<u8> {
     let text = String::from_utf8(read(root, rel)).unwrap();
     assert!(text.contains("schema_version: 0"), "{rel} is not at v0");
-    let bumped = text.replacen("schema_version: 0", "schema_version: 1", 1);
+    let bumped = text.replacen(
+        "schema_version: 0",
+        &format!("schema_version: {CURRENT}"),
+        1,
+    );
     canonical_bytes(rel, bumped.as_bytes()).unwrap()
 }
 
@@ -126,7 +145,7 @@ fn body_of(text: &str) -> &str {
 
 // ------------------------------------------------------------- matrix rows
 
-/// Row "Offer": both older files are offered from 0 to 1 with a unified diff
+/// Row "Offer": both older files are offered from 0 to 2 with a unified diff
 /// and the canonical stepped bytes; nothing on disk changes.
 #[test]
 fn migrate_offer_lists_every_older_file_with_its_diff_and_writes_nothing() {
@@ -139,7 +158,7 @@ fn migrate_offer_lists_every_older_file_with_its_diff_and_writes_nothing() {
     let files: Vec<&str> = offers.iter().map(|o| o.file.as_str()).collect();
     assert_eq!(files, [SEAT, WORKFLOW], "one offer per older file, sorted");
     for o in &offers {
-        assert_eq!((o.from, o.to), (0, 1), "{o:?}");
+        assert_eq!((o.from, o.to), (0, CURRENT), "{o:?}");
         assert_eq!(o.before_sha256, sha(&before[&o.file]), "{o:?}");
         assert_eq!(o.after, stepped(root, &o.file), "{}", o.file);
         assert!(
@@ -149,7 +168,7 @@ fn migrate_offer_lists_every_older_file_with_its_diff_and_writes_nothing() {
             o.diff
         );
         assert!(o.diff.contains("\n-schema_version: 0\n"), "{}", o.diff);
-        assert!(o.diff.contains("\n+schema_version: 1\n"), "{}", o.diff);
+        assert!(o.diff.contains("\n+schema_version: 2\n"), "{}", o.diff);
     }
     assert_eq!(all_bytes(root), before, "offering writes nothing");
     // Offering again gives the same offers.
@@ -183,7 +202,7 @@ fn migrate_session_open_refuses_with_migration_pending() {
         SessionError::MigrationPending { offers, .. } => {
             let files: Vec<&str> = offers.iter().map(|o| o.file.as_str()).collect();
             assert_eq!(files, [SEAT, WORKFLOW]);
-            assert!(offers.iter().all(|o| (o.from, o.to) == (0, 1)));
+            assert!(offers.iter().all(|o| (o.from, o.to) == (0, CURRENT)));
         }
         other => panic!("expected MigrationPending, got {other:?}"),
     }
@@ -193,7 +212,7 @@ fn migrate_session_open_refuses_with_migration_pending() {
     assert!(history.pending_intents().unwrap().is_empty());
 }
 
-/// Row "Accept": each file is written at schema_version 1 as one `migration`
+/// Row "Accept": each file is written at schema_version 2 as one `migration`
 /// entry; the project then loads with no errors and a session opens.
 #[test]
 fn migrate_accept_writes_every_file_with_one_migration_entry_each() {
@@ -221,7 +240,7 @@ fn migrate_accept_writes_every_file_with_one_migration_entry_each() {
         assert_eq!(entry.diff, offer.diff);
         assert_eq!(read(root, &offer.file), offer.after, "{}", offer.file);
         let text = String::from_utf8(read(root, &offer.file)).unwrap();
-        assert!(text.contains("schema_version: 1\n"), "{text}");
+        assert!(text.contains("schema_version: 2\n"), "{text}");
         assert!(!text.contains("schema_version: 0"), "{text}");
     }
     assert_eq!(history.entries(None).unwrap(), entries);
@@ -256,7 +275,7 @@ fn migrate_keeps_a_seat_body_byte_for_byte() {
     let head = &text[..text.len() - body_of(&text).len()];
     let seat = format!(
         "{}{BODY}",
-        head.replacen("schema_version: 1", "schema_version: 0", 1)
+        head.replacen(&version_line(head), "schema_version: 0", 1)
     );
     std::fs::write(root.join(SEAT), &seat).unwrap();
     let offers = offers(root);
@@ -268,7 +287,7 @@ fn migrate_keeps_a_seat_body_byte_for_byte() {
     let after = String::from_utf8(read(root, SEAT)).unwrap();
     assert_eq!(body_of(&after), BODY, "the body is kept byte for byte");
     assert!(after.ends_with("no final newline"), "{after:?}");
-    assert!(after.contains("schema_version: 1\n"), "{after}");
+    assert!(after.contains("schema_version: 2\n"), "{after}");
 }
 
 /// Row "Invalid after migrate": the `test-support` step renames a v0 seat's
@@ -358,10 +377,10 @@ fn migrate_accept_refuses_an_offer_whose_diff_was_altered() {
     let before = all_bytes(root);
     let mut offers = offers(root);
     let seat = offers.iter_mut().find(|o| o.file == SEAT).unwrap();
-    assert!(seat.diff.contains("+schema_version: 1\n"), "{}", seat.diff);
+    assert!(seat.diff.contains("+schema_version: 2\n"), "{}", seat.diff);
     seat.diff = seat.diff.replacen(
-        "+schema_version: 1\n",
-        "+schema_version: 1\n+note: none\n",
+        "+schema_version: 2\n",
+        "+schema_version: 2\n+note: none\n",
         1,
     );
     let (w, history) = writer(root);
@@ -415,19 +434,19 @@ fn migrate_older_file_with_a_path_is_a_load_error_worded_as_offered() {
     }
 }
 
-/// Row "Newer": a file at `SCHEMA_VERSION + 1` is not offered and is
-/// refused as today.
+/// Row "Newer": a file at `SCHEMA_VERSION + 1` (3 since story 1.14) is not
+/// offered and is refused as today.
 #[test]
 fn migrate_newer_file_is_not_offered_and_still_refused() {
     let dir = copy_of("valid");
     let root = dir.path();
-    at_version(root, SEAT, 2);
+    at_version(root, SEAT, CURRENT + 1);
 
     assert!(offers(root).is_empty(), "a newer file is never offered");
     let found = load(root).unwrap().findings;
     let seat = errors(&found)
         .into_iter()
-        .find(|f| f.file == SEAT && f.message.contains("schema_version 2"))
+        .find(|f| f.file == SEAT && f.message.contains("schema_version 3"))
         .unwrap_or_else(|| panic!("no schema_version error in {found:#?}"));
     assert!(
         format!("{} {}", seat.message, seat.fix).contains("update the app"),
@@ -437,11 +456,11 @@ fn migrate_newer_file_is_not_offered_and_still_refused() {
 
     // A newer company.yaml is refused before the project opens.
     let company = copy_of("valid");
-    at_version(company.path(), "company.yaml", 2);
+    at_version(company.path(), "company.yaml", CURRENT + 1);
     assert!(
         matches!(
             read_company(company.path()),
-            Err(CompanyRefusal::TooNew { found: 2, known: 1 })
+            Err(CompanyRefusal::TooNew { found: 3, known: 2 })
         ),
         "{:?}",
         read_company(company.path())
@@ -750,7 +769,7 @@ fn migrate_accept_renames_a_v0_group_to_team() {
     let text = String::from_utf8(read(root, SEAT)).unwrap();
     assert!(text.contains("\nteam: core\n"), "{text}");
     assert!(!text.contains("group:"), "{text}");
-    assert!(text.contains("schema_version: 1\n"), "{text}");
+    assert!(text.contains("schema_version: 2\n"), "{text}");
     let loaded = load(root).unwrap();
     assert!(
         errors(&loaded.findings).is_empty(),
@@ -811,7 +830,7 @@ fn migrate_linked_company_yaml_is_not_offered_and_an_accept_names_it() {
     let root = dir.path();
     at_version(root, WORKFLOW, 0);
     let company = String::from_utf8(read(root, "company.yaml")).unwrap();
-    let company_v0 = company.replacen("schema_version: 1", "schema_version: 0", 1);
+    let company_v0 = company.replacen(&version_line(&company), "schema_version: 0", 1);
     let (_outside, target) = link_outside(root, "company.yaml", company_v0.as_bytes());
     let before = all_bytes(root);
 
@@ -1182,11 +1201,21 @@ fn files_under(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// Acceptance 2: the shipped templates and fixtures offer nothing, and every
-/// `schema_version` in them is 1.
+/// The fixture kept at schema_version 1 for the 1→2 step's tests
+/// (`migrate_hosts.rs`); every other shipped project is current.
+const OLD_FIXTURE: &str = "hosts-v1";
+
+/// Acceptance 2 (story 1.14: version 2): the shipped templates and fixtures
+/// offer nothing, and every `schema_version` in them is 2, except the one
+/// fixture kept at version 1 on purpose.
 #[test]
 fn migrate_shipped_templates_and_fixtures_offer_nothing() {
-    let mut roots = folders(&repo().join("fixtures/projects"));
+    let old = repo().join("fixtures/projects").join(OLD_FIXTURE);
+    assert!(old.is_dir(), "{}", old.display());
+    let mut roots: Vec<PathBuf> = folders(&repo().join("fixtures/projects"))
+        .into_iter()
+        .filter(|p| *p != old)
+        .collect();
     for group in folders(&repo().join("templates")) {
         roots.extend(folders(&group));
     }
@@ -1199,7 +1228,7 @@ fn migrate_shipped_templates_and_fixtures_offer_nothing() {
     let mut files = Vec::new();
     files_under(&repo().join("templates"), &mut files);
     files_under(&repo().join("fixtures/projects"), &mut files);
-    for path in files {
+    for path in files.into_iter().filter(|p| !p.starts_with(&old)) {
         let Ok(text) = std::fs::read_to_string(&path) else {
             continue;
         };
@@ -1210,7 +1239,7 @@ fn migrate_shipped_templates_and_fixtures_offer_nothing() {
                     .trim_start_matches('"')
                     .trim_start_matches([':', ' '])
                     .trim_end_matches(',');
-                assert_eq!(value.trim(), "1", "{}: {line}", path.display());
+                assert_eq!(value.trim(), "2", "{}: {line}", path.display());
             }
         }
     }

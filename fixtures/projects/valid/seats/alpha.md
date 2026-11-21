@@ -1,5 +1,5 @@
 ---
-schema_version: 1
+schema_version: 2
 name: Alpha
 role: Analyst
 team: core
@@ -22,5 +22,7 @@ tools:
 budget:
   per_run: 1.5
   per_week: 10
+allowed_hosts:
+  - example.org
 ---
 Read the items added since the last run and list them with their status.

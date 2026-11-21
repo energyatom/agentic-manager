@@ -72,9 +72,9 @@ version = "0.0.1"
 dependencies = [
  "am-config",
  "am-domain",
+ "am-glob",
  "am-testkit",
  "croner",
- "globset",
  "hex",
  "jiff 1.0.0",
  "notify",
@@ -157,6 +157,14 @@ dependencies = [
 [[package]]
 name = "am-extract"
 version = "0.0.1"
+
+[[package]]
+name = "am-glob"
+version = "0.0.1"
+dependencies = [
+ "globset",
+ "unicode-normalization",
+]
 
 [[package]]
 name = "am-mcp"

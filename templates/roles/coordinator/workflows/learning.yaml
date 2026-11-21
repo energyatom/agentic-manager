@@ -1,4 +1,4 @@
-schema_version: 1
+schema_version: 2
 name: Learning loop
 team: team
 description: The Coordinator's learning loop. It reads the review notes, returns and status reasons of recent runs and proposes changes to the seats' instructions, which a person approves. It ships with no trigger, so it runs only when started by hand until the owner adds a schedule.

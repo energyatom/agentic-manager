@@ -1,6 +1,7 @@
 //! Story 1.10 acceptance test (R4, AD-7, AD-16): a project whose runtime
 //! database is one version back and whose config is one `schema_version`
-//! back (the `test-support` step from 0 to 1) opens on a real store: the
+//! back from the oldest the test registry knows (the `test-support` step
+//! from 0 to 1, then story 1.14's step from 1 to 2) opens on a real store: the
 //! database migrates after a `VACUUM INTO` backup and the migration is
 //! reported; the config migration is offered as a diff and no config file
 //! changes until accept; the session refuses while it is pending; after the
@@ -50,15 +51,19 @@ fn all_bytes(root: &Path) -> BTreeMap<String, Vec<u8>> {
         .collect()
 }
 
+/// The `schema_version` config files carry since story 1.14.
+const CURRENT: i64 = 2;
+
+/// Sets `rel`'s `schema_version` line, whatever it holds now, to 0.
 fn to_v0(root: &Path, rel: &str) {
     let path = root.join(rel);
     let text = std::fs::read_to_string(&path).unwrap();
-    assert!(text.contains("schema_version: 1"), "{rel}");
-    std::fs::write(
-        &path,
-        text.replacen("schema_version: 1", "schema_version: 0", 1),
-    )
-    .unwrap();
+    let line = text
+        .lines()
+        .find(|l| l.starts_with("schema_version:"))
+        .unwrap_or_else(|| panic!("{rel} has no schema_version line"))
+        .to_string();
+    std::fs::write(&path, text.replacen(&line, "schema_version: 0", 1)).unwrap();
 }
 
 /// The exported audit log (checked), and its `config.*` entries.
@@ -135,10 +140,14 @@ fn config_migrate_database_and_config_one_version_back_on_a_real_store() {
     let files: Vec<&str> = offers.iter().map(|o| o.file.as_str()).collect();
     assert_eq!(files, [SEAT, WORKFLOW]);
     for o in &offers {
-        assert_eq!((o.from, o.to), (0, 1));
+        assert_eq!((o.from, o.to), (0, CURRENT));
         assert_eq!(o.before_sha256, sha(&before[&o.file]));
         assert!(o.diff.contains("\n-schema_version: 0\n"), "{}", o.diff);
-        assert!(o.diff.contains("\n+schema_version: 1\n"), "{}", o.diff);
+        assert!(
+            o.diff.contains(&format!("\n+schema_version: {CURRENT}\n")),
+            "{}",
+            o.diff
+        );
     }
     assert_eq!(all_bytes(root), before, "offering writes nothing");
 

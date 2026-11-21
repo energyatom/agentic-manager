@@ -299,11 +299,17 @@ fn serve_on_a_new_project_gives_it_an_id_and_a_runtime_folder_outside_it() {
     );
 
     let id = id_of(&root).expect("an id was written");
+    // After the schema_version line, whatever version the fixture is at.
+    let version = before
+        .lines()
+        .find(|l| l.starts_with("schema_version:"))
+        .unwrap()
+        .to_string();
     assert_eq!(
         std::fs::read_to_string(root.join("company.yaml")).unwrap(),
         before.replacen(
-            "schema_version: 1\n",
-            &format!("schema_version: 1\nproject_id: {id}\n"),
+            &format!("{version}\n"),
+            &format!("{version}\nproject_id: {id}\n"),
             1
         ),
         "one line inserted, every other byte unchanged"

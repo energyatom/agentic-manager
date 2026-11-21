@@ -1,4 +1,4 @@
-schema_version: 1
+schema_version: 2
 name: Researcher role template
 description: The wrapper that lets agentic validate check the Researcher role template. Installing the template copies only seats/researcher.md into the chosen team. Its budget is in the installing company's currency.
 timezone: UTC

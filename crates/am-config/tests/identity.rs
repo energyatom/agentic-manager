@@ -35,7 +35,7 @@ fn writer(root: &Path) -> (ConfigWriter, Arc<InMemoryConfigHistory>) {
 
 /// A company.yaml with comments, blank lines, an unusual key order and a
 /// trailing comment; the writer must keep every byte of it.
-const COMMENTED: &str = "# The company file, written by hand.\nschema_version: 1  # keep this first\n\nname: Example Project   \ncurrency: EUR\n# the zone\ntimezone: UTC\nteams:\n  - id: core\n    name: Core team\n# end\n";
+const COMMENTED: &str = "# The company file, written by hand.\nschema_version: 2  # keep this first\n\nname: Example Project   \ncurrency: EUR\n# the zone\ntimezone: UTC\nteams:\n  - id: core\n    name: Core team\n# end\n";
 
 #[test]
 fn assigning_an_id_inserts_one_line_and_keeps_every_other_byte() {
@@ -55,8 +55,8 @@ fn assigning_an_id_inserts_one_line_and_keeps_every_other_byte() {
         .unwrap();
 
     let want = COMMENTED.replacen(
-        "schema_version: 1  # keep this first\n",
-        &format!("schema_version: 1  # keep this first\nproject_id: {id}\n"),
+        "schema_version: 2  # keep this first\n",
+        &format!("schema_version: 2  # keep this first\nproject_id: {id}\n"),
         1,
     );
     assert_eq!(
@@ -143,11 +143,18 @@ fn validate_accepts_an_id_in_a_project_and_refuses_one_in_a_template() {
     let dir = copy_of("valid");
     let root = dir.path();
     let id = ProjectId::mint();
+    // After the schema_version line, whatever version the fixture is at.
+    let text = std::fs::read_to_string(root.join("company.yaml")).unwrap();
+    let version = text
+        .lines()
+        .find(|l| l.starts_with("schema_version:"))
+        .unwrap()
+        .to_string();
     common::edit(
         root,
         "company.yaml",
-        "schema_version: 1\n",
-        &format!("schema_version: 1\nproject_id: {id}\n"),
+        &format!("{version}\n"),
+        &format!("{version}\nproject_id: {id}\n"),
     );
     let project = load(root).unwrap();
     assert_eq!(project.error_count(), 0, "{:#?}", project.findings);
@@ -220,11 +227,12 @@ fn the_resolver_reads_company_yaml_in_words() {
     assert_eq!(err, CompanyRefusal::NoCompanyYaml);
     assert!(err.to_string().contains("no company.yaml"), "{err}");
 
+    // Story 1.14: this app reads schema_version 2, so 3 is newer.
     let newer = tempfile::tempdir().unwrap();
-    write(newer.path(), "company.yaml", "schema_version: 2\nname: X\n");
+    write(newer.path(), "company.yaml", "schema_version: 3\nname: X\n");
     let err = read_company(newer.path()).unwrap_err();
     assert!(
-        matches!(err, CompanyRefusal::TooNew { found: 2, .. }),
+        matches!(err, CompanyRefusal::TooNew { found: 3, known: 2 }),
         "{err:?}"
     );
     assert!(err.to_string().contains("update the app"), "{err}");

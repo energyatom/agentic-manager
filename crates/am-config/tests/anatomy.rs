@@ -14,6 +14,28 @@ use common::*;
 
 const FOLDER_TOOLS: &[&str] = &["list_files", "read_file", "search_knowledge"];
 
+/// keeper.md laid out as the fixture holds it, with its one folder's `path`
+/// (line 8) and `access` (line 9) given. Story 1.14: the fixture's `work`
+/// stays linked, read-only, because `read_write` is refused inside any
+/// project (AD-30 as amended 2026-11-22).
+fn keeper_text(path: &str, access: &str) -> String {
+    format!(
+        "---\nschema_version: 2\nname: Keeper\nrole: Writer\nteam: core\nfolders:\n  - id: work\n    path: \"{path}\"\n    access: {access}\n    include:\n      - \"**/*.txt\"\n    exclude:\n      - \"old/**\"\ntext_fallback: true\n---\nKeep the notes in the work folder up to date.\n"
+    )
+}
+
+fn set_keeper(root: &std::path::Path, path: &str, access: &str) {
+    write(root, "seats/keeper.md", &keeper_text(path, access));
+}
+
+/// Load options with `home` as the owner's home folder (story 1.14).
+fn with_home(home: &std::path::Path) -> am_config::LoadOptions {
+    am_config::LoadOptions {
+        home: Some(home.to_path_buf()),
+        ..am_config::LoadOptions::default()
+    }
+}
+
 // Acceptance: the valid fixture's grants are the table expansion.
 
 #[test]
@@ -73,31 +95,56 @@ fn a_seat_with_no_capabilities_gets_folder_access_only() {
 // Row: read_write folder.
 
 #[test]
-fn a_read_write_folder_adds_write_file() {
+fn the_fixture_links_its_project_subfolder_read_only_with_its_patterns() {
     let snap = snapshot(&fixture("anatomy"));
     let keeper = &snap.seats()["keeper"];
-    let mut want = set(FOLDER_TOOLS);
-    want.insert("write_file".into());
-    assert_eq!(keeper.grants, want);
+    assert_eq!(keeper.grants, set(FOLDER_TOOLS));
     assert_eq!(keeper.folders.len(), 1);
     let work = &keeper.folders[0];
     assert_eq!(work.id, "work");
     assert_eq!(work.path, "work");
-    assert_eq!(work.access, Access::ReadWrite);
+    assert_eq!(work.access, Access::Read);
     assert_eq!(work.include, ["**/*.txt"]);
     assert_eq!(work.exclude, ["old/**"]);
     assert!(keeper.text_fallback);
 }
 
 #[test]
+fn a_read_write_folder_outside_the_project_adds_write_file() {
+    let home = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(home.path().join("notes")).unwrap();
+    let copy = copy_of("anatomy");
+    set_keeper(copy.path(), "~/notes", "read_write");
+    let loaded = am_config::load_in(copy.path(), with_home(home.path())).unwrap();
+    assert!(
+        errors(&loaded.findings).is_empty(),
+        "{:#?}",
+        loaded.findings
+    );
+    let snap = loaded.snapshot.expect("no errors gives a snapshot");
+    let keeper = &snap.seats()["keeper"];
+    let mut want = set(FOLDER_TOOLS);
+    want.insert("write_file".into());
+    assert_eq!(keeper.grants, want);
+    assert_eq!(keeper.folders[0].access, Access::ReadWrite);
+    assert_eq!(keeper.folders[0].path, "~/notes");
+}
+
+#[test]
+fn a_read_write_folder_inside_the_project_is_refused_at_its_line() {
+    let copy = copy_of("anatomy");
+    set_keeper(copy.path(), "work", "read_write");
+    let found = findings(copy.path());
+    let f = at(&found, "seats/keeper.md", 8, "not allowed");
+    assert_eq!(f.severity, Severity::Error);
+    assert!(f.fix.contains("access: read"), "{}", f.fix);
+}
+
+#[test]
 fn a_folder_is_read_only_by_default() {
     let copy = copy_of("anatomy");
-    edit(
-        copy.path(),
-        "seats/keeper.md",
-        "    access: read_write\n",
-        "",
-    );
+    let text = keeper_text("work", "read").replace("    access: read\n", "");
+    write(copy.path(), "seats/keeper.md", &text);
     let snap = snapshot(copy.path());
     let keeper = &snap.seats()["keeper"];
     assert_eq!(keeper.folders[0].access, Access::Read);
@@ -114,12 +161,13 @@ fn refused_folders_are_errors_naming_the_allowed_forms() {
         let f = at(&found, "seats/refused.md", line, path);
         assert_eq!(f.severity, Severity::Error);
         assert!(f.message.contains("not allowed"), "{}", f.message);
-        assert!(
-            f.fix.contains("inside the project") && f.fix.contains("~/"),
-            "{}",
-            f.fix
-        );
+        assert!(!f.fix.is_empty(), "{f:#?}");
     }
+    // Story 1.14: the fix for a ~/Library folder names the two cloud roots
+    // that may be linked (AD-30 as amended 2026-11-20).
+    let f = at(&found, "seats/refused.md", 8, "~/Library/x");
+    assert!(f.fix.contains("~/Library/CloudStorage"), "{}", f.fix);
+    assert!(f.fix.contains("com~apple~CloudDocs"), "{}", f.fix);
     assert_eq!(in_file(&found, "seats/refused.md").len(), 2, "{found:#?}");
 }
 
@@ -139,14 +187,19 @@ fn every_refused_folder_form_is_an_error() {
         "notes/..",
         "../../../../../../../../../../../../..",
         "~/../../../../../../../..",
+        // Story 1.14: ~/Library except the two cloud roots, and project
+        // subfolders whose path bears a config name.
+        "~/Library/CloudStorage",
+        "~/Library/Mobile Documents",
+        "~/Library/Mobile Documents/com~apple~Pages/x",
+        "~/Library/Application Support/agentic-manager-projects",
+        "seats",
+        "Seats",
+        "runtime-seed",
+        "skills/brief",
     ] {
         let copy = copy_of("anatomy");
-        edit(
-            copy.path(),
-            "seats/keeper.md",
-            "    path: work\n",
-            &format!("    path: \"{path}\"\n"),
-        );
+        set_keeper(copy.path(), path, "read");
         let found = findings(copy.path());
         let refused: Vec<_> = errors(&found)
             .into_iter()
@@ -160,12 +213,7 @@ fn every_refused_folder_form_is_an_error() {
 #[test]
 fn a_path_that_is_not_a_directory_is_an_error() {
     let copy = copy_of("anatomy");
-    edit(
-        copy.path(),
-        "seats/keeper.md",
-        "    path: work\n",
-        "    path: work/notes.txt\n",
-    );
+    set_keeper(copy.path(), "work/notes.txt", "read");
     let found = findings(copy.path());
     let f = at(&found, "seats/keeper.md", 8, "not a folder");
     assert_eq!(f.severity, Severity::Error);
@@ -174,6 +222,7 @@ fn a_path_that_is_not_a_directory_is_an_error() {
 #[test]
 fn folder_ids_are_kebab_case_and_unique_and_globs_compile() {
     let copy = copy_of("anatomy");
+    set_keeper(copy.path(), "work", "read");
     edit(
         copy.path(),
         "seats/keeper.md",
@@ -473,14 +522,22 @@ fn knowledge_files_are_relative_without_parent_steps() {
     assert_eq!(f.severity, Severity::Error);
 }
 
+/// Story 1.14 (AD-48): the allow-list is the seat's own `allowed_hosts`.
+/// The fixture's former `tools.yaml` `egress_hosts` moved to `full`, its
+/// only seat that can fetch; every other seat has none.
 #[test]
-fn the_seat_allow_list_is_the_project_egress_list() {
+fn the_seat_allow_list_is_the_seats_own_allowed_hosts() {
     let snap = snapshot(&fixture("anatomy"));
-    assert_eq!(
-        snap.allowed_hosts("full"),
-        ["example.org", "docs.example.org"]
-    );
-    assert_eq!(snap.allowed_hosts("plain"), snap.allowed_hosts("full"));
+    let hosts = |seat: &str| -> std::collections::BTreeSet<String> {
+        snap.allowed_hosts(seat)
+            .iter()
+            .map(|h| h.to_string())
+            .collect()
+    };
+    assert_eq!(hosts("full"), set(&["example.org", "docs.example.org"]));
+    for seat in ["plain", "keeper", "legacy", "scout", "soft"] {
+        assert!(hosts(seat).is_empty(), "{seat}: {:?}", hosts(seat));
+    }
 }
 
 #[test]
@@ -504,14 +561,10 @@ fn the_anatomy_fixture_has_only_its_three_warnings() {
 // Review fixes: lexical resolution through `..`, the project and its
 // ancestors, and `.agentic` in any case.
 
-/// The `not allowed` errors on keeper.md's folder path after writing `path`.
+/// The `not allowed` errors on keeper.md's folder path after writing `path`
+/// (linked read-only).
 fn refused_with(root: &std::path::Path, path: &str) -> Vec<am_config::Finding> {
-    edit(
-        root,
-        "seats/keeper.md",
-        "    path: work\n",
-        &format!("    path: \"{path}\"\n"),
-    );
+    set_keeper(root, path, "read");
     findings(root)
         .into_iter()
         .filter(|f| {

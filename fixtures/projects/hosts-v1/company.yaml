@@ -1,0 +1,8 @@
+schema_version: 1
+name: Hosts Project
+description: A synthetic project kept at schema_version 1, whose tools.yaml still lists egress_hosts, for the 1 to 2 migration.
+timezone: UTC
+currency: EUR
+teams:
+  - id: core
+    name: Core team

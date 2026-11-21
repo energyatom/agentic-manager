@@ -1,5 +1,5 @@
 ---
-schema_version: 1
+schema_version: 2
 name: D1-Head
 role: Head
 team: d1

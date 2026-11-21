@@ -40,17 +40,25 @@ pub(crate) enum RefKind {
     CrawlOwner,
 }
 
+/// What a host check asks of a seat's allow-list (AD-48).
+#[derive(Debug, Clone)]
+pub(crate) enum HostTarget {
+    /// A URL's destination: some pattern must admit it.
+    Url(crate::kinds::UrlTarget),
+    /// A host pattern: some pattern must cover it.
+    Pattern(am_domain::HostPattern),
+}
+
 /// A host that should be on a seat's allow-list; a warning when it is not.
 #[derive(Debug, Clone)]
 pub(crate) struct HostCheck {
     pub file: String,
     pub line: u32,
-    pub host: String,
+    pub host: HostTarget,
     /// The seat whose allow-list applies.
     pub seat: String,
-    /// What names the host, for the message: "link", "scope".
+    /// What names the host, for the message: "scope".
     pub what: &'static str,
-    pub fix: String,
 }
 
 #[derive(Debug, Clone)]
@@ -102,18 +110,16 @@ impl Refs {
         &mut self,
         rep: &Report,
         line: u32,
-        host: &str,
+        host: HostTarget,
         seat: &str,
         what: &'static str,
-        fix: String,
     ) {
         self.hosts.push(HostCheck {
             file: rep.file.clone(),
             line,
-            host: host.to_string(),
+            host,
             seat: seat.to_string(),
             what,
-            fix,
         });
     }
 
@@ -148,8 +154,8 @@ pub(crate) struct Known {
     pub tables: BTreeMap<String, Option<BTreeSet<String>>>,
     /// Seats whose file switches `crawl` on.
     pub crawl_seats: BTreeSet<String>,
-    /// tools.yaml `egress_hosts`.
-    pub egress_hosts: Vec<String>,
+    /// Each declared seat's `allowed_hosts` (the entries that parse).
+    pub seat_hosts: BTreeMap<String, Vec<am_domain::HostPattern>>,
 }
 
 fn list<'a>(ids: impl Iterator<Item = &'a String>) -> String {
@@ -171,18 +177,36 @@ pub(crate) fn resolve(refs: &Refs, known: &Known, reports: &mut BTreeMap<String,
         check(r, known, rep);
     }
     for h in &refs.hosts {
-        let allowed = crate::snapshot::seat_allowed_hosts(&known.egress_hosts, &h.seat);
-        if !allowed.iter().any(|a| a.eq_ignore_ascii_case(&h.host)) {
+        // An unknown seat is reported as a reference; its list is not read.
+        let Some(allowed) = known.seat_hosts.get(&h.seat) else {
+            continue;
+        };
+        let (ok, message, host) = match &h.host {
+            HostTarget::Url(target) => (
+                crate::kinds::admitted(allowed, target),
+                format!(
+                    "{} host '{}' is not on the allow-list of seat '{}'",
+                    h.what, target.host, h.seat
+                ),
+                target.host.clone(),
+            ),
+            HostTarget::Pattern(p) => (
+                allowed.iter().any(|a| a.covers(p)),
+                format!(
+                    "{} host pattern '{p}' is not covered by the allow-list of seat '{}'",
+                    h.what, h.seat
+                ),
+                p.to_string(),
+            ),
+        };
+        if !ok {
             let rep = reports
                 .entry(h.file.clone())
                 .or_insert_with(|| Report::new(&h.file));
             rep.warning(
                 h.line,
-                format!(
-                    "{} host '{}' is not on the allow-list of seat '{}'",
-                    h.what, h.host, h.seat
-                ),
-                h.fix.clone(),
+                message,
+                crate::kinds::allow_host_fix(&h.seat, &host, &format!("change the {}", h.what)),
             );
         }
     }

@@ -1,4 +1,1 @@
-schema_version: 1
-egress_hosts:
-  - example.org
-  - docs.example.org
+schema_version: 2

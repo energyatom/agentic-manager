@@ -1,4 +1,4 @@
-schema_version: 1
+schema_version: 2
 name: Table T1 drop folder
 description: Loads the synthetic CSV and xlsx files dropped into this Source's drop folder into table-t1, keyed by item_id. The drop files carry the status new for each row. Each file is deleted only after its load has committed, which is the default. It loads every Monday at 08:00 company time, before f2-update at 09:00. Cleaning the text is a seat's job, not this Source's.
 type: local-repository

@@ -71,6 +71,23 @@ fn replaced(root: &Path, rel: &str, from: &str, to: &str) -> String {
     text.replacen(from, to, 1)
 }
 
+/// `company.yaml`'s text with `project_id: <id>` after its `schema_version`
+/// line, whatever version that line holds.
+fn with_project_id(root: &Path, id: &str) -> String {
+    let text = String::from_utf8(read(root, COMPANY)).unwrap();
+    let version = text
+        .lines()
+        .find(|l| l.starts_with("schema_version:"))
+        .expect("company.yaml has a schema_version line")
+        .to_string();
+    replaced(
+        root,
+        COMPANY,
+        &format!("{version}\n"),
+        &format!("{version}\nproject_id: {id}\n"),
+    )
+}
+
 /// The hash `load` gives for the files on disk now (the project must be valid).
 fn disk_hash(root: &Path) -> String {
     let loaded = load(root).unwrap();
@@ -502,8 +519,9 @@ fn session_created_and_deleted_files_raise_an_event_each_and_reload_applies_both
         created.after_sha256.as_deref(),
         Some(sha(workflow.as_bytes()).as_str())
     );
+    // Story 1.14: the copied workflow is at schema_version 2.
     assert!(
-        created.diff.contains("\n+schema_version: 1\n"),
+        created.diff.contains("\n+schema_version: 2\n"),
         "{}",
         created.diff
     );
@@ -549,12 +567,7 @@ fn session_created_and_deleted_files_raise_an_event_each_and_reload_applies_both
 fn session_identity_change_is_flagged_and_reload_refuses_it() {
     let dir = copy_of("valid");
     let root = dir.path();
-    let with_id = replaced(
-        root,
-        COMPANY,
-        "schema_version: 1\n",
-        &format!("schema_version: 1\nproject_id: {ID_1}\n"),
-    );
+    let with_id = with_project_id(root, ID_1);
     let without_id = String::from_utf8(read(root, COMPANY)).unwrap();
     write(root, COMPANY, &with_id);
     let run = Run::start(root);
@@ -756,16 +769,12 @@ fn session_reverted_outside_edit_is_withdrawn() {
 fn session_open_in_loads_with_the_given_options() {
     let dir = copy_of("valid");
     let root = dir.path();
-    let with_id = replaced(
-        root,
-        COMPANY,
-        "schema_version: 1\n",
-        &format!("schema_version: 1\nproject_id: {ID_1}\n"),
-    );
+    let with_id = with_project_id(root, ID_1);
     write(root, COMPANY, &with_id);
     let opts = am_config::LoadOptions {
         knowledge_root: None,
         template: true,
+        ..am_config::LoadOptions::default()
     };
     let expected: Vec<Finding> = am_config::load_in(root, opts.clone())
         .unwrap()

@@ -82,3 +82,27 @@ pub fn at<'a>(found: &'a [Finding], file: &str, line: u32, message: &str) -> &'a
 pub fn set(ids: &[&str]) -> std::collections::BTreeSet<String> {
     ids.iter().map(|s| s.to_string()).collect()
 }
+
+/// `company.yaml` of the small projects the story 1.14 tests write, at this
+/// app's `schema_version` (2).
+pub const COMPANY_V2: &str = "schema_version: 2\nname: Small Project\ntimezone: UTC\ncurrency: EUR\nteams:\n  - id: core\n    name: Core team\n";
+
+/// A project in a temporary folder holding `company.yaml` ([`COMPANY_V2`])
+/// and each `(path, text)` of `files`.
+pub fn project_with(files: &[(&str, &str)]) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "company.yaml", COMPANY_V2);
+    for (rel, text) in files {
+        write(dir.path(), rel, text);
+    }
+    dir
+}
+
+/// The patterns `seat` may reach, as text (`ConfigSnapshot::allowed_hosts`,
+/// story 1.14: the seat's own `allowed_hosts`).
+pub fn hosts_of(snap: &ConfigSnapshot, seat: &str) -> Vec<String> {
+    snap.allowed_hosts(seat)
+        .iter()
+        .map(|h| h.to_string())
+        .collect()
+}

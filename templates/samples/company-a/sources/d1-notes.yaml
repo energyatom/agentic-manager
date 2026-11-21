@@ -1,4 +1,4 @@
-schema_version: 1
+schema_version: 2
 name: D1 notes
 description: D1's team Knowledge, synthetic reference notes that D1's seats search with search_knowledge. It re-indexes the notes once a day.
 type: knowledge

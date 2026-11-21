@@ -24,7 +24,7 @@ const SEAT: &str = "seats/alpha.md";
 
 /// alpha.md with its frontmatter keys out of canonical order and a body whose
 /// bytes (trailing spaces, a tab, a `---` line, no final newline) must survive.
-const SHUFFLED: &str = "---\nbudget:\n  per_week: 10\n  per_run: 1.5\ntools:\n  - web_search\n  - table_read\n  - notes/list_notes\nteam: core\nskills:\n  - brief\nname: Alpha\ncapabilities:\n  web_search:\n    provider: builtin\n    on: true\n  tables:\n    on: true\nschema_version: 1\nmodel:\n  model: example-local\n  account: local-lmstudio\nrole: Analyst\ndescription: Gathers the new items.\n---\nRead the items added since the last run.  \n\tKeep the list short.\n---\nno final newline";
+const SHUFFLED: &str = "---\nbudget:\n  per_week: 10\n  per_run: 1.5\ntools:\n  - web_search\n  - table_read\n  - notes/list_notes\nteam: core\nskills:\n  - brief\nname: Alpha\ncapabilities:\n  web_search:\n    provider: builtin\n    on: true\n  tables:\n    on: true\nschema_version: 2\nmodel:\n  model: example-local\n  account: local-lmstudio\nrole: Analyst\ndescription: Gathers the new items.\n---\nRead the items added since the last run.  \n\tKeep the list short.\n---\nno final newline";
 const BODY: &str =
     "Read the items added since the last run.  \n\tKeep the list short.\n---\nno final newline";
 

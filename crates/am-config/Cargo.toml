@@ -29,7 +29,7 @@ croner.workspace = true
 jiff.workspace = true
 thiserror.workspace = true
 url.workspace = true
-globset.workspace = true
+am-glob.workspace = true
 notify.workspace = true
 
 [dev-dependencies]

@@ -12,6 +12,15 @@ use std::process::Command;
 /// What `am-domain` may use besides std (AD-4: no IO, no async runtime).
 const DOMAIN_EXTERNALS: &[&str] = &["serde", "thiserror", "jiff", "uuid"];
 
+/// The only external crates `am-glob` may use (architecture Design
+/// Paradigm table, amended 2026-11-20).
+const GLOB_EXTERNALS: &[&str] = &["globset", "unicode-normalization"];
+
+/// The only crates that may depend on `am-glob`.
+const GLOB_USERS: &[&str] = &["am-config", "am-engine", "am-tools", "am-connectors"];
+
+const GLOB: &str = "am-glob";
+
 const ADAPTERS: &[&str] = &[
     "am-net",
     "am-providers",
@@ -27,6 +36,8 @@ const ADAPTERS: &[&str] = &[
 #[derive(Clone, Copy)]
 enum Layer {
     Domain,
+    /// am-glob: the one glob matcher, a leaf.
+    Glob,
     Engine,
     /// am-store and am-config.
     Record,
@@ -42,6 +53,7 @@ enum Layer {
 fn layer(name: &str) -> Option<Layer> {
     Some(match name {
         "am-domain" => Layer::Domain,
+        GLOB => Layer::Glob,
         "am-engine" => Layer::Engine,
         "am-store" | "am-config" => Layer::Record,
         n if ADAPTERS.contains(&n) => Layer::Adapter,
@@ -53,36 +65,68 @@ fn layer(name: &str) -> Option<Layer> {
     })
 }
 
-/// The workspace crates `layer` may depend on, and the rule's wording.
-fn allowed(layer: Layer, krate: &str) -> Option<(&'static [&'static str], String)> {
-    let (list, rule): (&'static [&'static str], String) = match layer {
+/// The workspace crates `krate` (of `layer`) may depend on, and the rule's
+/// wording. `am-glob` is added for its four users only.
+fn allowed(layer: Layer, krate: &str) -> Option<(Vec<&'static str>, String)> {
+    let user = GLOB_USERS.contains(&krate);
+    let (mut list, rule): (Vec<&'static str>, String) = match layer {
         Layer::Domain => (
-            &[],
+            vec![],
             "am-domain may depend only on std, serde, thiserror, jiff and uuid (AD-4)".into(),
         ),
+        Layer::Glob => (
+            vec![],
+            "am-glob may depend on no workspace crate, and on no external crate but globset and unicode-normalization (AD-4)".into(),
+        ),
         Layer::Engine => (
-            &["am-domain", "am-store"],
-            "am-engine may depend only on am-domain and am-store (AD-4)".into(),
+            vec!["am-domain", "am-store"],
+            "am-engine may depend only on am-domain, am-store and am-glob (AD-4)".into(),
+        ),
+        Layer::Record if user => (
+            vec!["am-domain"],
+            format!("{krate} may depend only on am-domain and am-glob (AD-4)"),
         ),
         Layer::Record => (
-            &["am-domain"],
+            vec!["am-domain"],
             format!("{krate} may depend only on am-domain (AD-4)"),
         ),
+        Layer::Adapter if user => (
+            vec!["am-domain", "am-net"],
+            format!("{krate} may depend only on am-domain, am-net and am-glob (AD-4)"),
+        ),
         Layer::Adapter => (
-            &["am-domain", "am-net"],
+            vec!["am-domain", "am-net"],
             "adapters may depend only on am-domain and am-net (AD-4)".into(),
         ),
         Layer::Api => (
-            &["am-domain"],
+            vec!["am-domain"],
             "am-api may depend only on am-domain (AD-4)".into(),
         ),
         Layer::Server => (
-            &["am-domain", "am-engine", "am-api", "am-store"],
+            vec!["am-domain", "am-engine", "am-api", "am-store"],
             "am-server may depend only on am-domain, am-engine, am-api and am-store (AD-4)".into(),
         ),
         Layer::Root | Layer::Exempt => return None,
     };
+    if user {
+        list.push(GLOB);
+    }
     Some((list, rule))
+}
+
+/// The one glob library, which only am-glob may name (Consistency
+/// Conventions: Globs).
+const GLOBSET: &str = "globset";
+
+/// The rule for an edge into globset from any crate but am-glob.
+fn globset_rule() -> String {
+    "only am-glob may depend on globset, the one glob matcher's engine; match globs through am_glob::Glob (AD-4, Conventions: Globs)".into()
+}
+
+/// The rule for an edge into am-glob from a crate that is not one of its
+/// users.
+fn glob_user_rule() -> String {
+    "only am-config, am-engine, am-tools and am-connectors may depend on am-glob (AD-4)".into()
 }
 
 pub fn run(metadata: Option<&Path>, root: &Path) -> Result<String, Failure> {
@@ -143,13 +187,29 @@ fn check(doc: &Value) -> Result<String, Failure> {
             ));
             continue;
         };
-        let Some((list, rule)) = allowed(layer, name) else {
-            continue;
-        };
         let deps = pkg["dependencies"]
             .as_array()
             .map(Vec::as_slice)
             .unwrap_or(&[]);
+        let Some((list, rule)) = allowed(layer, name) else {
+            // Composition roots may use anything but am-glob, which only
+            // its four users may, and globset, which only am-glob may
+            // (exempt crates are test scaffolding).
+            if matches!(layer, Layer::Root) {
+                for dep in deps.iter().filter(|d| d["kind"].as_str() != Some("dev")) {
+                    match dep["name"].as_str() {
+                        Some(GLOB) => {
+                            findings.push(format!("{name} -> {GLOB}: {}", glob_user_rule()))
+                        }
+                        Some(GLOBSET) => {
+                            findings.push(format!("{name} -> {GLOBSET}: {}", globset_rule()))
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            continue;
+        };
         for dep in deps {
             // Normal (null) and build edges count; dev-dependencies do not.
             if dep["kind"].as_str() == Some("dev") {
@@ -160,9 +220,22 @@ fn check(doc: &Value) -> Result<String, Failure> {
             let ok = if internal {
                 list.contains(&dep_name)
             } else {
-                !matches!(layer, Layer::Domain) || DOMAIN_EXTERNALS.contains(&dep_name)
+                match layer {
+                    Layer::Domain => DOMAIN_EXTERNALS.contains(&dep_name),
+                    Layer::Glob => GLOB_EXTERNALS.contains(&dep_name),
+                    _ => true,
+                }
             };
+            if dep_name == GLOBSET && !matches!(layer, Layer::Glob) {
+                findings.push(format!("{name} -> {dep_name}: {}", globset_rule()));
+                continue;
+            }
             if !ok {
+                let rule = if dep_name == GLOB && !matches!(layer, Layer::Glob) {
+                    glob_user_rule()
+                } else {
+                    rule.clone()
+                };
                 findings.push(format!("{name} -> {dep_name}: {rule}"));
             }
         }

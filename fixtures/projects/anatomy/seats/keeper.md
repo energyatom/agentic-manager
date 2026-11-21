@@ -1,12 +1,12 @@
 ---
-schema_version: 1
+schema_version: 2
 name: Keeper
 role: Writer
 team: core
 folders:
   - id: work
     path: work
-    access: read_write
+    access: read
     include:
       - "**/*.txt"
     exclude:

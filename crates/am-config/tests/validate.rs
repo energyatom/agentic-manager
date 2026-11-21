@@ -257,20 +257,29 @@ fn missing_schema_version_is_reported_on_line_one() {
     let found = findings(&fixture("broken"));
     let f = at(&found, "tables/bare.yaml", 1, "missing schema_version");
     assert_eq!(f.severity, Severity::Error);
-    assert!(f.fix.contains("schema_version: 1"), "{}", f.fix);
+    // Story 1.14: this app's schema_version is 2.
+    assert!(f.fix.contains("schema_version: 2"), "{}", f.fix);
+}
+
+/// The first line of `text` that sets `schema_version`.
+fn version_line(text: &str) -> &str {
+    text.lines()
+        .find(|l| l.starts_with("schema_version:"))
+        .expect("a schema_version line")
 }
 
 #[test]
 fn an_unknown_schema_version_is_an_error() {
+    // Story 1.14: 2 is this app's version, so 3 is the unknown one.
     let copy = valid_copy();
     let text = std::fs::read_to_string(copy.path().join("tables/items.yaml")).unwrap();
     write(
         copy.path(),
         "tables/items.yaml",
-        &text.replace("schema_version: 1", "schema_version: 2"),
+        &text.replacen(version_line(&text), "schema_version: 3", 1),
     );
     let found = findings(copy.path());
-    at(&found, "tables/items.yaml", 1, "schema_version 2");
+    at(&found, "tables/items.yaml", 1, "schema_version 3");
 }
 
 // Row: unknown tool id.
@@ -429,10 +438,11 @@ fn ids_are_kebab_case_and_equal_the_file_stem() {
     let seat = std::fs::read_to_string(copy.path().join("seats/beta.md")).unwrap();
     write(copy.path(), "seats/Gamma_Seat.md", &seat);
     let table = std::fs::read_to_string(copy.path().join("tables/items.yaml")).unwrap();
+    let version = version_line(&table);
     write(
         copy.path(),
         "tables/items.yaml",
-        &table.replacen("schema_version: 1\n", "schema_version: 1\nid: things\n", 1),
+        &table.replacen(version, &format!("{version}\nid: things"), 1),
     );
     let found = findings(copy.path());
     at(&found, "seats/Gamma_Seat.md", 1, "kebab-case");
@@ -697,10 +707,12 @@ fn repeated_grants_tool_settings_and_view_columns_are_errors() {
         31,
         "grant 'support' appears twice",
     );
+    // Story 1.14: the fixture's tools.yaml no longer holds the two lines of
+    // `egress_hosts`, so the repeated setting sits on line 7.
     at(
         &found,
         "tools.yaml",
-        9,
+        7,
         "built-in tool setting 'web_search' appears twice",
     );
 }

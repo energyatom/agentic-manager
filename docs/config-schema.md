@@ -3,7 +3,7 @@
 What `agentic validate` reads in a project folder, and what it accepts. Every
 problem is printed as `file:line: message` with a `fix:` line; errors make the
 command exit 1, warnings never do. Every YAML file (and a seat's frontmatter)
-starts with `schema_version: 1`. Ids are kebab-case and equal the file or
+starts with `schema_version: 2`. Ids are kebab-case and equal the file or
 folder name. Unknown keys are errors with a "did you mean" suggestion. YAML
 comments are warnings, because the app does not keep them when it saves a
 file: put notes in `description:` fields instead. Secret-looking values are
@@ -38,7 +38,7 @@ files.
 ## Accounts: `models/accounts.yaml`
 
 ```yaml
-schema_version: 1
+schema_version: 2
 accounts:
   - id: search
     provider: tavily
@@ -72,7 +72,7 @@ Markdown.
 
 ```yaml
 ---
-schema_version: 1
+schema_version: 2
 name: Example
 role: Researcher
 team: core
@@ -91,8 +91,7 @@ capabilities:
     on: true
 folders:
   - id: work
-    path: work
-    access: read_write
+    path: files/work
     include: ["**/*.txt"]
 text_fallback: true
 skills: [brief]
@@ -103,6 +102,9 @@ links:
   - title: Home
     url: https://example.org/
     group: Sites
+allowed_hosts:
+  - example.org
+  - "*.docs.example.org"
 tools: [write_document]
 ---
 Find new items and add them to the list.
@@ -123,7 +125,8 @@ Find new items and add them to the list.
 | `text_fallback` | no | `true` serves text-readable files (txt, md, csv, tsv, json, a PDF's text) as text to a model that cannot read them natively; default `false` |
 | `skills` | no | ids of folders under `skills/` |
 | `knowledge` | no | `{ file, note? }`: reference files in the runtime folder's `knowledge/<seat-id>/` (a template's `runtime-seed/knowledge/<seat-id>/`); `file` is relative, without `..`; a file missing there is a warning, because the runtime folder does not travel with the project |
-| `links` | no | `{ title, url, group? }`: `url` is http or https; a host not on the seat's allow-list is a warning |
+| `links` | no | `{ title, url, group? }`: `url` is http or https; a link the seat's `allowed_hosts` does not admit is a warning |
+| `allowed_hosts` | no | host patterns this seat's tools, readers, link lists and Sources may reach, below |
 | `tools` | no | built-in tools of no capability (`write_document`, `draft_message`, `propose_change`) and MCP tools as `<server-id>/<tool-name>`; `read_skill_file` comes with an attached skill and is an error when listed without one |
 | `budget` | no | `{ per_run, per_week }` in the company currency |
 
@@ -153,24 +156,71 @@ it lists in `tools:`. Listing a built-in tool whose capability is off is an
 error ("switch on browse"), as is `write_file` without a `read_write` folder,
 and a provider Account of the wrong kind. A skill never adds a grant.
 
-The hosts a seat may reach are the project's `tools.yaml` `egress_hosts`
-(the same list for every seat, for now).
+### Allowed hosts (story 1.14, AD-48)
+
+The hosts a seat may reach are its own `allowed_hosts`; a seat without the
+key reaches none. Each entry is a host pattern:
+
+- an exact host name, such as `docs.example.org`: ASCII letters, digits and
+  hyphens in labels of 1 to 63 characters (no hyphen at either end), at
+  least two labels, 253 characters at most; an internationalised name is
+  written in its `xn--` form; uppercase is read as lowercase;
+- or `*.` and a domain of at least two labels, such as `*.example.org`,
+  which matches every subdomain at any depth (`a.example.org`,
+  `a.b.example.org`) but not `example.org` itself.
+
+A pattern admits `https` on port 443 and `http` on port 80 only. A scheme, a
+port, a path, an IP address, `localhost`, non-ASCII text and any other `*`
+are errors at their line ("write the host only, e.g. x.org"). An Account's
+endpoint is never on a seat's list: model, search and crawl-service calls go
+only to their Account's own endpoint. Adding a pattern the seat's patterns
+do not already cover asks for the app's two-step confirmation.
+
+`tools.yaml` no longer holds `egress_hosts` (the one list every seat used
+before schema_version 2); a schema_version 2 `tools.yaml` that still holds it
+is an error. Moving a schema_version 1 project forward is one migration the
+app offers as a diff and writes only when you accept it: it copies each valid
+`egress_hosts` entry into the `allowed_hosts` of every seat that can fetch
+(`web_search`, `browse` or `crawl` on, or the owner of any Source) and of no
+other seat, drops and lists each entry that is not a host pattern (an IP
+address, a port), removes the key and sets every file to schema_version 2.
 
 ### Linked folders
 
 `{ id, path, access?, include?, exclude? }`. `id` is kebab-case and unique in
 the seat. `access` is `read` (default) or `read_write`. `include` and
-`exclude` are path globs (`*` within a folder, `**` across folders) and must
+`exclude` are path globs (`*` within a folder, `**` across folders), matched
+ignoring case against the path relative to the linked folder, and must
 compile.
 
 `path` is relative to the project folder, or to your home folder when it
-starts with `~/`; it is resolved by its text, without following links.
-Refused: an absolute path, `/`, `~` itself, `~/Library` or anything under it
-(the app's data folder and the runtime folders live there), any path with a
-`.agentic` part (in any letter case: an older app's in-project runtime
-folder), the project folder itself or any folder that holds it, and a path
-whose `..` steps lead to one of these. A path that does not exist yet is a warning; one that
-names a file is an error.
+starts with `~/`. It is judged as written (its `..` steps resolved by text)
+and, when it exists, where it really lands with links followed. Refused, as
+an error at the `path` line with the fix:
+
+- an absolute path, `/`, `~` itself, and any path with a `.agentic` part (in
+  any letter case: an older app's in-project runtime folder);
+- `~/Library` and everything in it, except a folder at or below a
+  cloud-storage provider's folder (`~/Library/CloudStorage/<provider>/…`:
+  OneDrive, Google Drive, Dropbox and other File Provider apps) or below
+  iCloud Drive (`~/Library/Mobile Documents/com~apple~CloudDocs/…`);
+  `~/Library/CloudStorage` itself, every other `Mobile Documents` container
+  (Pages, Numbers, Keynote), the app's data folder and its runtime folders
+  stay refused;
+- the project folder itself and any folder that holds it; a folder that is,
+  holds or lies inside another recent project's root;
+- inside the project: a path with a config name in it (`models`, `seats`,
+  `skills`, `workflows`, `tables`, `schemas`, `dashboards`, `sources`,
+  `company.yaml`, `tools.yaml`, `.agentic`, `runtime-seed`, `.agentic-open`,
+  `.git`, in any letter case), and a folder whose contents hold an entry with
+  one of those names (the app reads names only, follows no link, and refuses
+  in words when it cannot read a folder or finds more than 100,000 entries);
+  a project subfolder is linked read-only;
+- `access: read_write` for any folder inside a project (any folder with
+  `company.yaml` in it or above it).
+
+A path that does not exist yet is a warning; one that names a file is an
+error.
 
 ## Skills: `skills/<id>/`
 
@@ -206,7 +256,7 @@ SKILL.md's frontmatter and yaml references are checked for comments.
 A configured connector instance.
 
 ```yaml
-schema_version: 1
+schema_version: 2
 name: Documentation pages
 type: crawler
 owner_seat: example
@@ -243,8 +293,8 @@ terms_checked: 2026-11-01
 | `account` | no | crawler and http-reader take a crawl-service Account, web-search a search Account, api any Account, the other types none; no type needs one |
 | `name`, `description` | no | text |
 | `scope.seeds`, `scope.url` | no | http or https URLs |
-| `scope.include`, `scope.exclude` | no | path globs that must compile |
-| `scope.allowed_hosts` | no | host names |
+| `scope.include`, `scope.exclude` | no | URL-path globs that must compile, matched keeping case |
+| `scope.allowed_hosts` | no | host patterns (as a seat's `allowed_hosts`) |
 | `scope.max_depth` | no | 0 to 10 |
 | `trigger` | no | one trigger in the workflow shape: `schedule: { cron, timezone?, catch_up? }` or `event: { on, only_if? }` |
 | `limits.max_items_per_load` | no | 1 to 10,000 |
@@ -256,8 +306,9 @@ terms_checked: 2026-11-01
 | `render` | no | `true` only on http-reader and crawler |
 | `terms_checked` | website types | the date (`YYYY-MM-DD`) you checked that the site's terms allow automated access; on http-reader, crawler and feed Sources a missing or empty one is a warning |
 
-A scope host that is not on the owner seat's allow-list is a warning: the
-app asks before it adds a host.
+A seed or `url` host the owner seat's `allowed_hosts` does not admit, and a
+scope host pattern its patterns do not cover, are warnings naming the seat
+file: the app asks before it adds a host.
 
 ## Workflow steps
 

@@ -1,4 +1,4 @@
-schema_version: 1
+schema_version: 2
 name: Table T1
 team: d2
 description: Items D2 works on. The t1-drop Source loads them and D2-E1 to D2-E4 update them; every status change carries a reason. D1 may read it through D2's grant.

@@ -1,4 +1,4 @@
-schema_version: 1
+schema_version: 2
 name: Company A
 description: "Sample company: Company A (two departments). Its names are abstract and every row and file is synthetic. The caps are placeholders until the owner sets them; the company-wide weekly cap of 600 waits for a company caps setting."
 timezone: Asia/Kolkata

@@ -18,7 +18,7 @@ use crate::entities::*;
 use crate::fields::{Fields, Text, fields, unique};
 use crate::finding::Report;
 use crate::node::{self, Kind, Node};
-use crate::refs::{RESERVED_ACCOUNTS, RefKind, Refs, Tree};
+use crate::refs::{HostTarget, RESERVED_ACCOUNTS, RefKind, Refs, Tree};
 
 const WEEKDAYS: &[&str] = &[
     "monday",
@@ -69,13 +69,7 @@ pub(crate) const CAPABILITIES_KEYS: &[&str] = &["schema_version", "models"];
 
 /// The top-level keys of `tools.yaml`, in schema order: the loader's allow-list
 /// and the writer's canonical order (story 1.8).
-pub(crate) const TOOLS_KEYS: &[&str] = &[
-    "schema_version",
-    "egress_hosts",
-    "search",
-    "builtin",
-    "mcp_servers",
-];
+pub(crate) const TOOLS_KEYS: &[&str] = &["schema_version", "search", "builtin", "mcp_servers"];
 
 /// The top-level keys of a skill's `SKILL.md` frontmatter, in schema order: the loader's allow-list
 /// and the writer's canonical order (story 1.8).
@@ -108,9 +102,14 @@ pub(crate) const SEAT_KEYS: &[&str] = &[
     "budget",
     "knowledge",
     "links",
+    "allowed_hosts",
     "folders",
     "text_fallback",
 ];
+
+/// The `tools.yaml` key retired by the schema_version 2 migration (story
+/// 1.14, AD-48): each seat carries its own `allowed_hosts`.
+pub(crate) const RETIRED_EGRESS_HOSTS: &str = "egress_hosts";
 
 /// The top-level keys of `workflows/<id>.yaml`, in schema order: the loader's allow-list
 /// and the writer's canonical order (story 1.8).
@@ -224,7 +223,10 @@ fn top(rep: &mut Report, root: Node) -> Option<Node> {
         rep.error(
             1,
             "missing schema_version (the file is empty)",
-            "add `schema_version: 1` as the first line, then the file's fields",
+            format!(
+                "add `schema_version: {}` as the first line, then the file's fields",
+                checks::SCHEMA_VERSION
+            ),
         );
         return None;
     }
@@ -232,7 +234,10 @@ fn top(rep: &mut Report, root: Node) -> Option<Node> {
         rep.error(
             1 + root.line.saturating_sub(1),
             "the file must hold key: value pairs at the top level",
-            "start the file with `schema_version: 1`, then one `key: value` per line",
+            format!(
+                "start the file with `schema_version: {}`, then one `key: value` per line",
+                checks::SCHEMA_VERSION
+            ),
         );
         return None;
     };
@@ -668,24 +673,26 @@ pub(crate) fn tools(rep: &mut Report, refs: &mut Refs, root: &Node) -> ToolsConf
     let Some(f) = fields(rep, root, "tools.yaml") else {
         return ToolsConfig::default();
     };
-    f.allow(rep, TOOLS_KEYS);
-    let mut egress_hosts = Vec::new();
-    for h in f.texts(rep, "egress_hosts") {
-        let ok = !h.value.is_empty()
-            && h.value
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
-            && h.value.contains('.');
-        if ok {
-            egress_hosts.push(h.value);
-        } else {
-            rep.error(
-                h.line,
-                format!("'{}' is not a host name", h.value),
-                "write the host only, without scheme or path, e.g. `- example.org`",
-            );
-        }
+    // A file still at an older schema_version waits for its migration,
+    // which moves the list (its version finding says so); only a file at
+    // schema_version 2 or later holding the key is an error here.
+    let older = matches!(
+        f.get("schema_version").map(|v| &v.kind),
+        Some(Kind::Int(n)) if *n < checks::SCHEMA_VERSION
+    );
+    if !older
+        && let Some((key, _)) = f
+            .entries
+            .iter()
+            .find(|(k, _)| k.name == RETIRED_EGRESS_HOSTS)
+    {
+        rep.error(
+            key.line,
+            "unknown key 'egress_hosts' in tools.yaml: the project-wide host list is retired; each seat lists the hosts it may reach",
+            "move each host into `allowed_hosts:` of every seat that fetches (seats/<seat-id>.md), then remove `egress_hosts` from tools.yaml",
+        );
     }
+    f.allow_except(rep, TOOLS_KEYS, &[RETIRED_EGRESS_HOSTS]);
     let mut search_provider = None;
     if let Some(node) = f.get("search")
         && let Some(s) = fields(rep, node, "search")
@@ -745,7 +752,6 @@ pub(crate) fn tools(rep: &mut Report, refs: &mut Refs, root: &Node) -> ToolsConf
     }
     unique(rep, "MCP server", &server_ids);
     ToolsConfig {
-        egress_hosts,
         search_provider,
         builtin,
         mcp_servers,
@@ -966,7 +972,16 @@ const SKILL_BODY_MAX_BYTES: usize = 64 * 1024;
 const TINTS: &[&str] = &["slate", "steel", "sage", "stone", "plum", "clay"];
 const GOAL_MAX_CHARS: usize = 500;
 const BACKSTORY_MAX_CHARS: usize = 2_000;
-const FOLDER_FIX: &str = "link a folder inside the project (e.g. `path: notes`) or under your home folder (e.g. `path: ~/Documents/notes`); never /, ~, ~/Library or a .agentic folder";
+const FOLDER_FIX: &str = "link a folder under your home folder outside the project (e.g. `path: ~/Documents/notes`), or a project subfolder whose path holds no config name, read-only (e.g. `path: files/in`); never /, ~, ~/Library or a runtime folder";
+const LIBRARY_FIX: &str = "in ~/Library only a folder in a cloud-storage provider's folder (`~/Library/CloudStorage/<provider>/…`) or in iCloud Drive (`~/Library/Mobile Documents/com~apple~CloudDocs/…`) may be linked; link one of those, or a folder outside ~/Library";
+const CONFIG_NAME_FIX: &str = "link a folder outside the project, or a project subfolder whose path holds none of the config names (models, seats, skills, workflows, tables, schemas, dashboards, sources, company.yaml, tools.yaml, runtime-seed, .git and the runtime names), read-only";
+const ENTRY_FIX: &str = "rename or move that entry out of the folder, or link a narrower subfolder or one outside the project";
+const WALK_FIX: &str = "link a narrower subfolder, or a folder outside the project";
+const READ_ONLY_FIX: &str = "use `access: read` (a folder inside a project is linked read-only), or link a folder outside every project for write access";
+const RECENT_FIX: &str = "link a folder outside every project the app has opened recently";
+/// At most this many entries are read when a project subfolder is checked
+/// for config names (AD-30); past it the link is refused in words.
+const WALK_CAP: usize = 100_000;
 
 /// Where a seat's relative paths resolve: the project folder and the
 /// owner's home folder (when known). Resolution is lexical: nothing follows
@@ -978,6 +993,8 @@ pub(crate) struct Places {
     pub project: PathBuf,
     pub home: Option<PathBuf>,
     pub knowledge_root: Option<PathBuf>,
+    /// Other recent projects' roots (AD-30), passed in by the caller.
+    pub recent_roots: Vec<PathBuf>,
 }
 
 /// Plain text of at most `max` characters (counted as chars).
@@ -994,17 +1011,28 @@ fn max_chars(rep: &mut Report, t: &Text, name: &str, max: usize) -> bool {
     false
 }
 
-/// Compiles a path glob (anchored, `*` stays within one path segment).
-fn glob(rep: &mut Report, t: &Text) -> bool {
-    match globset::GlobBuilder::new(&t.value)
-        .literal_separator(true)
-        .build()
-    {
+/// How a glob compares case (Consistency Conventions: Globs).
+#[derive(Clone, Copy)]
+enum GlobCase {
+    /// Linked-folder `include`/`exclude`: the path relative to the root.
+    Folder,
+    /// Source URL-path scopes.
+    UrlPath,
+}
+
+/// Compiles a path glob through am-glob, the one matcher (anchored, `*`
+/// stays within one path segment).
+fn glob(rep: &mut Report, t: &Text, case: GlobCase) -> bool {
+    let compiled = match case {
+        GlobCase::Folder => am_glob::Glob::case_insensitive(&t.value),
+        GlobCase::UrlPath => am_glob::Glob::case_sensitive(&t.value),
+    };
+    match compiled {
         Ok(_) => true,
         Err(e) => {
             rep.error(
                 t.line,
-                format!("glob '{}' does not compile: {}", t.value, e.kind()),
+                format!("glob '{}' does not compile: {e}", t.value),
                 "fix the pattern: `*` matches within a folder, `**` across folders, `[abc]` needs its closing `]`",
             );
             false
@@ -1013,10 +1041,10 @@ fn glob(rep: &mut Report, t: &Text) -> bool {
 }
 
 /// The globs listed under `name`, each checked.
-fn globs(rep: &mut Report, f: &Fields, name: &str) -> Vec<String> {
+fn globs(rep: &mut Report, f: &Fields, name: &str, case: GlobCase) -> Vec<String> {
     f.texts(rep, name)
         .into_iter()
-        .filter(|t| glob(rep, t))
+        .filter(|t| glob(rep, t, case))
         .map(|t| t.value)
         .collect()
 }
@@ -1073,122 +1101,394 @@ fn climb(base: &[String], ups: usize, rest: &[String]) -> Vec<String> {
     out
 }
 
-/// Why an absolute location may not be linked, if it may not.
-fn refused_location(
-    abs: &[String],
-    home: Option<&[String]>,
-    project: &[String],
-) -> Option<&'static str> {
+/// Why a folder may not be linked, and what to do instead.
+struct Refusal {
+    why: String,
+    fix: &'static str,
+}
+
+fn refusal(why: impl Into<String>, fix: &'static str) -> Option<Refusal> {
+    Some(Refusal {
+        why: why.into(),
+        fix,
+    })
+}
+
+/// The places a location is judged against, as absolute components (all
+/// lexical, or all canonical).
+struct Frame {
+    home: Option<Vec<String>>,
+    project: Vec<String>,
+    recent: Vec<Vec<String>>,
+}
+
+/// True when `inner` lies strictly inside `outer`.
+fn strictly_inside(inner: &[String], outer: &[String]) -> bool {
+    inner.len() > outer.len() && inner[..outer.len()] == *outer
+}
+
+fn path_of(components: &[String]) -> PathBuf {
+    PathBuf::from(format!("/{}", components.join("/")))
+}
+
+/// AD-30's rule inside `~/Library` (`rest` follows `Library`): only a folder
+/// at or below a cloud-storage provider's folder, or below iCloud Drive's
+/// own container, may be linked. Names compare ignoring case (APFS does).
+fn library_rule(rest: &[String]) -> Option<Refusal> {
+    let is = |i: usize, name: &str| rest.get(i).is_some_and(|c| c.eq_ignore_ascii_case(name));
+    let library = "~/Library holds the app data folder and system files";
+    if rest.is_empty() {
+        return refusal(library, LIBRARY_FIX);
+    }
+    if is(0, "CloudStorage") {
+        if rest.len() == 1 {
+            return refusal(
+                "~/Library/CloudStorage itself holds every cloud-storage provider's folder; link a folder in one provider's folder",
+                LIBRARY_FIX,
+            );
+        }
+        return None;
+    }
+    if is(0, "Mobile Documents") {
+        if is(1, "com~apple~CloudDocs") {
+            if rest.len() >= 3 {
+                return None;
+            }
+            return refusal(
+                "link a folder inside iCloud Drive (~/Library/Mobile Documents/com~apple~CloudDocs/), not the container itself",
+                LIBRARY_FIX,
+            );
+        }
+        return refusal(
+            "~/Library/Mobile Documents holds every iCloud app's container; only iCloud Drive's own container (com~apple~CloudDocs) may be linked",
+            LIBRARY_FIX,
+        );
+    }
+    if is(0, "Application Support") {
+        if is(1, am_domain::runtime::RUNTIME_BASE_NAME) {
+            return refusal(
+                "it holds the app's per-project runtime folders (the runtime base)",
+                LIBRARY_FIX,
+            );
+        }
+        if is(1, am_domain::runtime::APP_DATA_NAME) {
+            return refusal("it is the app's data folder", LIBRARY_FIX);
+        }
+    }
+    refusal(library, LIBRARY_FIX)
+}
+
+/// Why the absolute location `abs` may not be linked with `access`, judged
+/// in `frame`, if it may not.
+fn refused_location(abs: &[String], frame: &Frame, access: Access) -> Option<Refusal> {
     if abs.is_empty() {
-        return Some("it is the filesystem root");
+        return refusal("it is the filesystem root", FOLDER_FIX);
     }
     if abs.iter().any(|c| is_agentic(c)) {
-        return Some("a .agentic folder holds the app's runtime files");
+        return refusal(
+            "a .agentic folder holds the app's runtime files",
+            FOLDER_FIX,
+        );
     }
-    if let Some(home) = home {
-        if abs == home {
-            return Some("it is the home folder itself");
+    if let Some(home) = &frame.home {
+        if abs == home.as_slice() {
+            return refusal("it is the home folder itself", FOLDER_FIX);
         }
-        if abs.len() > home.len()
-            && abs[..home.len()] == *home
+        if strictly_inside(abs, home)
             && abs[home.len()].eq_ignore_ascii_case("library")
+            && let Some(r) = library_rule(&abs[home.len() + 1..])
         {
-            return Some("~/Library holds the app data folder and system files");
+            return Some(r);
         }
     }
+    let project = &frame.project;
     if !project.is_empty() && abs.len() <= project.len() && project[..abs.len()] == *abs {
-        return Some(if abs.len() == project.len() {
+        let why = if abs.len() == project.len() {
             PROJECT_REFUSED
         } else {
             ANCESTOR_REFUSED
-        });
+        };
+        return refusal(why, FOLDER_FIX);
+    }
+    for recent in frame.recent.iter().filter(|r| *r != project) {
+        let shown = path_of(recent).display().to_string();
+        if abs == recent.as_slice() {
+            return refusal(
+                format!("it is the root of the recent project {shown}"),
+                RECENT_FIX,
+            );
+        }
+        if strictly_inside(abs, recent) {
+            return refusal(
+                format!("it lies inside the recent project {shown}"),
+                RECENT_FIX,
+            );
+        }
+        if strictly_inside(recent, abs) {
+            return refusal(format!("it holds the recent project {shown}"), RECENT_FIX);
+        }
+    }
+    if !project.is_empty() && strictly_inside(abs, project) {
+        let rel = abs[project.len()..].join("/");
+        if let Some(name) = am_domain::config_name_in(&rel) {
+            return refusal(
+                format!(
+                    "its path in the project bears the config name '{name}'; config and runtime files are never linked"
+                ),
+                CONFIG_NAME_FIX,
+            );
+        }
+        if access == Access::ReadWrite {
+            return refusal(
+                "it lies inside the project, and a folder inside a project is linked read-only",
+                READ_ONLY_FIX,
+            );
+        }
     }
     None
 }
 
-/// Checks a linked folder's path (AD-30) and returns where it resolves to
-/// on disk when that can be known, for the existence check. `None` (with an
-/// error) when the path is refused.
-fn folder_location(rep: &mut Report, places: &Places, t: &Text) -> Option<Option<PathBuf>> {
+/// What the name-only walk of a project subfolder found (AD-30).
+enum Walk {
+    Clean,
+    /// An entry (path relative to the folder) bearing a config name.
+    Named(String, &'static str),
+    /// A folder (relative path, `""` for the folder itself) that cannot be
+    /// read, and why.
+    Unreadable(String, std::io::Error),
+    TooMany,
+}
+
+/// Reads the names in `root`'s subtree through `lstat` only: a link is never
+/// followed, and the walk stops at the first config-named entry, at a folder
+/// it cannot read, or past [`WALK_CAP`] entries.
+fn walk_names(root: &Path) -> Walk {
+    let mut stack = vec![(root.to_path_buf(), String::new())];
+    let mut count = 0usize;
+    while let Some((dir, rel)) = stack.pop() {
+        let read = match std::fs::read_dir(&dir) {
+            Ok(r) => r,
+            Err(e) => return Walk::Unreadable(rel, e),
+        };
+        for entry in read {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(e) => return Walk::Unreadable(rel, e),
+            };
+            count += 1;
+            if count > WALK_CAP {
+                return Walk::TooMany;
+            }
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let entry_rel = if rel.is_empty() {
+                name.clone()
+            } else {
+                format!("{rel}/{name}")
+            };
+            if let Some(config) = am_domain::config_name_of(&name) {
+                return Walk::Named(entry_rel, config);
+            }
+            // `DirEntry::file_type` does not follow a link.
+            match entry.file_type() {
+                Ok(t) if t.is_dir() => stack.push((entry.path(), entry_rel)),
+                Ok(_) => {}
+                Err(e) => return Walk::Unreadable(entry_rel, e),
+            }
+        }
+    }
+    Walk::Clean
+}
+
+/// The nearest folder at or above `path` that holds `company.yaml`.
+fn project_root_above(path: &Path) -> Option<PathBuf> {
+    path.ancestors()
+        .find(|a| a.join("company.yaml").is_file())
+        .map(Path::to_path_buf)
+}
+
+/// The canonical components of `path`, or its lexical ones when it cannot
+/// be canonicalised (it does not exist).
+fn canonical_components(path: &Path) -> Vec<String> {
+    match std::fs::canonicalize(path) {
+        Ok(c) => components(&c),
+        Err(_) => std::path::absolute(path)
+            .map(|p| components(&p))
+            .unwrap_or_default(),
+    }
+}
+
+/// Checks a linked folder's path (AD-30 as amended 2026-11-20 and
+/// 2026-11-22) and returns where it resolves to on disk when that can be
+/// known, for the existence check. `None` (with an error at the path's line)
+/// when the path is refused. The location is judged as written (lexically)
+/// and, when it exists, as canonicalised; a project subfolder's subtree is
+/// then read for config names.
+fn folder_location(
+    rep: &mut Report,
+    places: &Places,
+    t: &Text,
+    access: Access,
+) -> Option<Option<PathBuf>> {
     let written = t.value.as_str();
-    let refuse = |rep: &mut Report, why: &str| {
+    let refuse = |rep: &mut Report, r: Refusal| {
         rep.error(
             t.line,
-            format!("folder path '{written}' is not allowed: {why}"),
-            FOLDER_FIX,
+            format!("folder path '{written}' is not allowed: {}", r.why),
+            r.fix,
         );
     };
     if written.split('/').any(is_agentic) {
-        refuse(rep, "a .agentic folder holds the app's runtime files");
+        refuse(
+            rep,
+            Refusal {
+                why: "a .agentic folder holds the app's runtime files".into(),
+                fix: FOLDER_FIX,
+            },
+        );
         return None;
     }
     if written.starts_with('/') {
         refuse(
             rep,
-            "an absolute path; write it relative to the project or to ~/",
+            Refusal {
+                why: "an absolute path; write it relative to the project or to ~/".into(),
+                fix: FOLDER_FIX,
+            },
         );
         return None;
     }
-    let home = places.home.as_deref().map(components);
-    let project = std::path::absolute(&places.project)
-        .map(|p| components(&p))
-        .unwrap_or_default();
     let (home_relative, rest) = if written == "~" {
         (true, "")
     } else if let Some(rest) = written.strip_prefix("~/") {
         (true, rest)
     } else if written.starts_with('~') {
-        refuse(rep, "write ~/ for your own home folder");
+        refuse(
+            rep,
+            Refusal {
+                why: "write ~/ for your own home folder".into(),
+                fix: FOLDER_FIX,
+            },
+        );
         return None;
     } else {
         (false, written)
     };
+    let lexical = |p: &Path| {
+        std::path::absolute(p)
+            .map(|p| components(&p))
+            .unwrap_or_default()
+    };
+    // Without a known home folder, `~/` paths are judged against a stand-in
+    // home (`~`), which no other place can equal.
+    let home = places.home.as_deref().map(lexical);
+    let frame = Frame {
+        home: Some(home.clone().unwrap_or_else(|| vec!["~".to_string()])),
+        project: lexical(&places.project),
+        recent: places.recent_roots.iter().map(|r| lexical(r)).collect(),
+    };
     let (parts, ups) = normalise(rest);
-    if home_relative {
-        if ups == 0 {
-            if parts.is_empty() {
-                refuse(rep, "it is the home folder itself");
-                return None;
-            }
-            if parts[0].eq_ignore_ascii_case("library") {
-                refuse(rep, "~/Library holds the app data folder and system files");
-                return None;
-            }
-            let Some(home) = &home else {
-                return Some(None);
-            };
-            let abs = climb(home, 0, &parts);
-            if let Some(why) = refused_location(&abs, Some(home), &project) {
-                refuse(rep, why);
-                return None;
-            }
-            return Some(Some(PathBuf::from(format!("/{}", abs.join("/")))));
-        }
-        let Some(home) = &home else {
-            refuse(rep, "it climbs above the home folder");
-            return None;
-        };
-        let abs = climb(home, ups, &parts);
-        if let Some(why) = refused_location(&abs, Some(home), &project) {
-            refuse(rep, why);
-            return None;
-        }
-        return Some(Some(PathBuf::from(format!("/{}", abs.join("/")))));
-    }
-    if ups == 0 {
-        if parts.is_empty() {
-            refuse(rep, PROJECT_REFUSED);
-            return None;
-        }
-        return Some(Some(places.project.join(parts.join("/"))));
-    }
-    // It climbs out of the project: judge where it lands.
-    let abs = climb(&project, ups, &parts);
-    if let Some(why) = refused_location(&abs, home.as_deref(), &project) {
-        refuse(rep, why);
+    if home_relative && home.is_none() && ups > 0 {
+        refuse(
+            rep,
+            Refusal {
+                why: "it climbs above the home folder".into(),
+                fix: FOLDER_FIX,
+            },
+        );
         return None;
     }
-    Some(Some(PathBuf::from(format!("/{}", abs.join("/")))))
+    let base = if home_relative {
+        frame.home.clone().unwrap_or_default()
+    } else {
+        frame.project.clone()
+    };
+    let abs = climb(&base, ups, &parts);
+    if let Some(r) = refused_location(&abs, &frame, access) {
+        refuse(rep, r);
+        return None;
+    }
+    if home_relative && home.is_none() {
+        return Some(None);
+    }
+    let location = path_of(&abs);
+    let Ok(canonical) = std::fs::canonicalize(&location) else {
+        // Not on disk yet (the caller warns): only the lexical judgement,
+        // plus the write rule for whatever project holds where it would be.
+        if access == Access::ReadWrite
+            && let Some(root) = project_root_above(&location)
+        {
+            refuse(rep, project_write_refusal(&root));
+            return None;
+        }
+        return Some(Some(location));
+    };
+    let canon = components(&canonical);
+    let canon_frame = Frame {
+        home: places.home.as_deref().map(canonical_components),
+        project: canonical_components(&places.project),
+        recent: places
+            .recent_roots
+            .iter()
+            .map(|r| canonical_components(r))
+            .collect(),
+    };
+    if let Some(r) = refused_location(&canon, &canon_frame, access) {
+        refuse(rep, r);
+        return None;
+    }
+    if access == Access::ReadWrite
+        && let Some(root) = project_root_above(&canonical)
+    {
+        refuse(rep, project_write_refusal(&root));
+        return None;
+    }
+    if strictly_inside(&canon, &canon_frame.project) && canonical.is_dir() {
+        let shown = |rel: &str| {
+            if rel.is_empty() {
+                written.to_string()
+            } else {
+                format!("{}/{rel}", written.trim_end_matches('/'))
+            }
+        };
+        let found = match walk_names(&canonical) {
+            Walk::Clean => None,
+            Walk::Named(entry, name) => Some(Refusal {
+                why: format!(
+                    "it holds '{}', which bears the config name '{name}'; config and runtime files are never linked",
+                    shown(&entry)
+                ),
+                fix: ENTRY_FIX,
+            }),
+            Walk::Unreadable(rel, e) => Some(Refusal {
+                why: format!(
+                    "the app cannot read '{}' ({e}), so it cannot check the folder for config names",
+                    shown(&rel)
+                ),
+                fix: WALK_FIX,
+            }),
+            Walk::TooMany => Some(Refusal {
+                why: "it holds more than 100,000 entries, so the app cannot check them all for config names".into(),
+                fix: WALK_FIX,
+            }),
+        };
+        if let Some(r) = found {
+            refuse(rep, r);
+            return None;
+        }
+    }
+    Some(Some(location))
+}
+
+/// The refusal of write access to a folder inside the project at `root`
+/// (any folder holding `company.yaml`, AD-30).
+fn project_write_refusal(root: &Path) -> Refusal {
+    Refusal {
+        why: format!(
+            "it lies inside a project ({} holds company.yaml), and a folder inside a project is linked read-only",
+            root.display()
+        ),
+        fix: READ_ONLY_FIX,
+    }
 }
 
 /// A seat's `capabilities:` with the defaults filled in (AD-46).
@@ -1306,11 +1606,11 @@ fn seat_folders(rep: &mut Report, places: &Places, f: &Fields) -> Vec<Folder> {
             Some(a) if a.value == "read_write" => Access::ReadWrite,
             _ => Access::Read,
         };
-        let include = globs(rep, &fo, "include");
-        let exclude = globs(rep, &fo, "exclude");
+        let include = globs(rep, &fo, "include", GlobCase::Folder);
+        let exclude = globs(rep, &fo, "exclude", GlobCase::Folder);
         let mut path_ok = false;
         if let Some(p) = &path
-            && let Some(location) = folder_location(rep, places, p)
+            && let Some(location) = folder_location(rep, places, p, access)
         {
             path_ok = true;
             if let Some(location) = location {
@@ -1410,19 +1710,101 @@ fn seat_knowledge(
     out
 }
 
-/// The host of an http or https URL, or `None`.
-fn http_host(text: &str) -> Option<String> {
+/// Where an http or https URL goes: scheme, host (lowercase) and port.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct UrlTarget {
+    pub scheme: String,
+    pub host: String,
+    pub port: u16,
+}
+
+/// The target of an http or https URL, or `None`.
+fn http_target(text: &str) -> Option<UrlTarget> {
     let u = url::Url::parse(text).ok()?;
     if !matches!(u.scheme(), "http" | "https") {
         return None;
     }
-    u.host_str()
-        .filter(|h| !h.is_empty())
-        .map(|h| h.to_ascii_lowercase())
+    let host = u.host_str().filter(|h| !h.is_empty())?.to_ascii_lowercase();
+    Some(UrlTarget {
+        scheme: u.scheme().to_string(),
+        host,
+        port: u.port_or_known_default()?,
+    })
 }
 
-/// A seat's saved `links:`; a host off the allow-list is a warning.
-fn seat_links(rep: &mut Report, refs: &mut Refs, stem: &str, f: &Fields) -> Vec<Link> {
+/// True when one of `patterns` admits a request to `target` (AD-48:
+/// `HostPattern` is the only matcher).
+pub(crate) fn admitted(patterns: &[am_domain::HostPattern], target: &UrlTarget) -> bool {
+    patterns
+        .iter()
+        .any(|p| p.admits(&target.scheme, &target.host, target.port))
+}
+
+/// The fix for a refused host pattern.
+fn host_fix(e: &am_domain::HostPatternError) -> String {
+    match e.host_hint() {
+        Some(host) => format!("write the host only, e.g. {host}"),
+        None => "write a host name such as docs.example.org, or `*.` and a domain of at least two labels such as *.example.org".into(),
+    }
+}
+
+/// The fix of a host a seat's allow-list does not admit (AD-48).
+pub(crate) fn allow_host_fix(seat: &str, host: &str, or: &str) -> String {
+    format!(
+        "add {host} (or a pattern covering it) to `allowed_hosts:` in seats/{seat}.md (the app confirms a new host), or {or}"
+    )
+}
+
+/// A seat's `allowed_hosts:` (AD-48), each parsed by `HostPattern`.
+fn seat_hosts(rep: &mut Report, f: &Fields) -> Vec<am_domain::HostPattern> {
+    let mut out: Vec<am_domain::HostPattern> = Vec::new();
+    for t in f.texts(rep, "allowed_hosts") {
+        match am_domain::HostPattern::parse(&t.value) {
+            Ok(p) if out.contains(&p) => rep.error(
+                t.line,
+                format!("host pattern '{}' appears twice", t.value),
+                format!("remove the second '{}'", t.value),
+            ),
+            Ok(p) => out.push(p),
+            Err(e) => rep.error(
+                t.line,
+                format!("host pattern '{}' is not allowed: {e}", t.value),
+                host_fix(&e),
+            ),
+        }
+    }
+    out
+}
+
+/// A seat's `allowed_hosts`, read from the node without reporting (for the
+/// cross-file Source scope check, so a local error does not cascade).
+pub(crate) fn declared_hosts(root: &Node) -> Vec<am_domain::HostPattern> {
+    root.as_map()
+        .and_then(|m| m.iter().find(|(k, _)| k.name == "allowed_hosts"))
+        .and_then(|(_, v)| match &v.kind {
+            Kind::Seq(items) => Some(items),
+            _ => None,
+        })
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|i| match &i.kind {
+                    Kind::Str(t) => am_domain::HostPattern::parse(t).ok(),
+                    _ => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// A seat's saved `links:`; a link its own `allowed_hosts` does not admit is
+/// a warning.
+fn seat_links(
+    rep: &mut Report,
+    stem: &str,
+    f: &Fields,
+    hosts: &[am_domain::HostPattern],
+) -> Vec<Link> {
     let mut out = Vec::new();
     for item in f.list(rep, "links") {
         let Some(l) = fields(rep, item, "link") else {
@@ -1431,18 +1813,18 @@ fn seat_links(rep: &mut Report, refs: &mut Refs, stem: &str, f: &Fields) -> Vec<
         l.allow(rep, &["title", "url", "group"]);
         let title = l.req_text(rep, "title", "Link title");
         let url = l.req_text(rep, "url", "https://…");
-        let url = url.filter(|u| match http_host(&u.value) {
-            Some(host) => {
-                refs.host(
-                    rep,
-                    u.line,
-                    &host,
-                    stem,
-                    "link",
-                    format!(
-                        "allow {host} for this seat (add it to egress_hosts in tools.yaml; the app confirms a new host), or remove the link"
-                    ),
-                );
+        let url = url.filter(|u| match http_target(&u.value) {
+            Some(target) => {
+                if !admitted(hosts, &target) {
+                    rep.warning(
+                        u.line,
+                        format!(
+                            "link host '{}' is not on the allow-list of seat '{stem}'",
+                            target.host
+                        ),
+                        allow_host_fix(stem, &target.host, "remove the link"),
+                    );
+                }
                 true
             }
             None => {
@@ -1535,7 +1917,8 @@ pub(crate) fn seat(
     }
     unique(rep, "skill", &skills);
     let knowledge = seat_knowledge(rep, places, stem, &f);
-    let links = seat_links(rep, refs, stem, &f);
+    let allowed_hosts = seat_hosts(rep, &f);
+    let links = seat_links(rep, stem, &f, &allowed_hosts);
 
     // Grants: the capability expansion, read_skill_file with a skill, then
     // the listed tools that belong to no capability. Never a skill's
@@ -1616,6 +1999,7 @@ pub(crate) fn seat(
         skills: skills.into_iter().map(|s| s.value).collect(),
         knowledge,
         links,
+        allowed_hosts,
         grants,
         instructions: body.to_string(),
     })
@@ -2102,33 +2486,29 @@ const WEBSITE_TYPES: &[&str] = &["http-reader", "crawler", "feed"];
 /// Source types that may render pages built by scripts (AD-39).
 const RENDER_TYPES: &[&str] = &["http-reader", "crawler"];
 
-/// An http or https URL in a Source's scope; its host, when it is one.
-fn scope_url(rep: &mut Report, t: &Text) -> Option<String> {
-    let host = http_host(&t.value);
-    if host.is_none() {
+/// An http or https URL in a Source's scope; its target, when it is one.
+fn scope_url(rep: &mut Report, t: &Text) -> Option<UrlTarget> {
+    let target = http_target(&t.value);
+    if target.is_none() {
         rep.error(
             t.line,
             format!("'{}' is not an http or https URL", t.value),
             "use a web address starting with https:// (or http://)",
         );
     }
-    host
+    target
 }
 
-/// Records a scope host for the owner seat's allow-list warning.
-fn scope_host(rep: &mut Report, refs: &mut Refs, owner: Option<&Text>, line: u32, host: &str) {
+/// Records a scope host or pattern for the owner seat's allow-list warning.
+fn scope_host(
+    rep: &mut Report,
+    refs: &mut Refs,
+    owner: Option<&Text>,
+    line: u32,
+    host: HostTarget,
+) {
     if let Some(owner) = owner {
-        refs.host(
-            rep,
-            line,
-            host,
-            &owner.value,
-            "scope",
-            format!(
-                "allow {host} for seat '{}' (add it to egress_hosts in tools.yaml; the app confirms a new host), or change the scope",
-                owner.value
-            ),
-        );
+        refs.host(rep, line, host, &owner.value, "scope");
     }
 }
 
@@ -2162,36 +2542,32 @@ fn source_scope(
     );
     let mut seeds = Vec::new();
     for t in s.texts(rep, "seeds") {
-        if let Some(host) = scope_url(rep, &t) {
-            scope_host(rep, refs, owner, t.line, &host);
+        if let Some(target) = scope_url(rep, &t) {
+            scope_host(rep, refs, owner, t.line, HostTarget::Url(target));
             seeds.push(t.value);
         }
     }
     let url = s.text(rep, "url").filter(|t| match scope_url(rep, t) {
-        Some(host) => {
-            scope_host(rep, refs, owner, t.line, &host);
+        Some(target) => {
+            scope_host(rep, refs, owner, t.line, HostTarget::Url(target));
             true
         }
         None => false,
     });
-    let include = globs(rep, &s, "include");
-    let exclude = globs(rep, &s, "exclude");
+    let include = globs(rep, &s, "include", GlobCase::UrlPath);
+    let exclude = globs(rep, &s, "exclude", GlobCase::UrlPath);
     let mut allowed_hosts = Vec::new();
     for h in s.texts(rep, "allowed_hosts") {
-        let ok = !h.value.is_empty()
-            && h.value
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
-            && h.value.contains('.');
-        if ok {
-            scope_host(rep, refs, owner, h.line, &h.value.to_ascii_lowercase());
-            allowed_hosts.push(h.value);
-        } else {
-            rep.error(
+        match am_domain::HostPattern::parse(&h.value) {
+            Ok(p) => {
+                allowed_hosts.push(p.to_string());
+                scope_host(rep, refs, owner, h.line, HostTarget::Pattern(p));
+            }
+            Err(e) => rep.error(
                 h.line,
-                format!("'{}' is not a host name", h.value),
-                "write the host only, without scheme or path, e.g. `- example.org`",
-            );
+                format!("scope host pattern '{}' is not allowed: {e}", h.value),
+                host_fix(&e),
+            ),
         }
     }
     SourceScope {
@@ -2494,7 +2870,7 @@ pub(crate) fn source(
     })
 }
 
-/// `schemas/<id>.json`: valid JSON, a JSON Schema, `schema_version: 1`.
+/// `schemas/<id>.json`: valid JSON, a JSON Schema, `schema_version`.
 pub(crate) fn schema(rep: &mut Report, text: &str) -> Option<serde_json::Value> {
     let value: serde_json::Value = match serde_json::from_str(text) {
         Ok(v) => v,

@@ -110,10 +110,11 @@ pub struct ModelCapability {
     pub reads_audio: Option<bool>,
 }
 
-/// `tools.yaml`: built-in tool settings, search, MCP servers, egress hosts.
+/// `tools.yaml`: built-in tool settings, search and MCP servers. (Its
+/// `egress_hosts` list was retired by the schema_version 2 migration, story
+/// 1.14: each seat carries its own `allowed_hosts`, AD-48.)
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct ToolsConfig {
-    pub egress_hosts: Vec<String>,
     /// `builtin` (Local search) or a search Account id.
     pub search_provider: Option<String>,
     pub builtin: Vec<BuiltinToolSetting>,
@@ -185,6 +186,10 @@ pub struct Seat {
     pub knowledge: Vec<KnowledgeEntry>,
     /// Saved links.
     pub links: Vec<Link>,
+    /// The hosts this seat's tools, readers, link lists and Sources may
+    /// reach (AD-48), normalised; empty means none. Never an Account's
+    /// endpoint.
+    pub allowed_hosts: Vec<am_domain::HostPattern>,
     /// The seat's tool grants: the capability expansion (plus
     /// `read_skill_file` with a skill attached), the listed built-in tools of
     /// no capability and the listed MCP tools. Never read from a skill.
@@ -427,6 +432,9 @@ pub struct SourceScope {
     /// Anchored path globs.
     pub include: Vec<String>,
     pub exclude: Vec<String>,
+    /// Scope host patterns (AD-48), normalised through
+    /// `am_domain::HostPattern`; each should be covered by the owner seat's
+    /// `allowed_hosts`.
     pub allowed_hosts: Vec<String>,
     /// 0 to 10.
     pub max_depth: Option<u32>,

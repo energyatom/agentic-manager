@@ -1,4 +1,4 @@
-schema_version: 1
+schema_version: 2
 name: Folder digest
 team: d1
 description: Flow F3, many models on one folder. Each seat reads the files of d1-inputs its route matches with its own model; D1-Head gathers their outputs and the list of unrouted files into d1-folder-digest. Starts by hand.

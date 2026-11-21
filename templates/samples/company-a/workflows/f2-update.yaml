@@ -1,4 +1,4 @@
-schema_version: 1
+schema_version: 2
 name: Weekly update of Table T1
 team: d2
 description: Flow F2, first part. Every Monday at 09:00 company time, with one catch-up run after a missed start, D2-E1 to D2-E4 update table-t1 from the week's new rows that t1-drop loaded, giving a reason for each status change.

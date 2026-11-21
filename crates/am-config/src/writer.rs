@@ -533,10 +533,27 @@ impl ConfigWriter {
                     lines,
                 });
             }
-            migrate::check_offer(&self.root, offer, &before)?;
             overrides.insert(offer.file.clone(), offer.after.clone());
             befores.push(before);
         }
+        // Story 1.14: a step sees the whole project, so every file the
+        // offers were derived from must still hold the bytes it held then
+        // (a Source's owner_seat, another seat's capabilities), and every
+        // offer is re-derived from the whole project's current bytes (each
+        // offered file as just read and checked above).
+        let mut project = on_disk.clone();
+        for (offer, before) in offers.iter().zip(&befores) {
+            project.insert(offer.file.clone(), before.clone());
+        }
+        for offer in &offers {
+            if let Some(file) = migrate::changed_input(&offer.inputs, &project) {
+                return Err(WriteError::ChangedSince {
+                    file,
+                    entry: String::new(),
+                });
+            }
+        }
+        migrate::check_offers(&self.root, &project, &offers)?;
         // All or nothing: a project half on the old version cannot load, so
         // every older file with a step path must be in the accept, whatever
         // kept it from being offered.
@@ -557,6 +574,17 @@ impl ConfigWriter {
         // made meanwhile refuses the accept with nothing written.
         for (offer, before) in offers.iter().zip(&befores) {
             self.unchanged(&offer.file, before)?;
+        }
+        // And every other file the derivation read: a change to one of them
+        // changes what the steps produce.
+        let project_inputs = migrate::derivation_inputs(&project);
+        if let Some(file) =
+            migrate::changed_input(&project_inputs, &migrate::migration_files(&self.root))
+        {
+            return Err(WriteError::ChangedSince {
+                file,
+                entry: String::new(),
+            });
         }
         let mut entries: Vec<HistoryEntry> = Vec::with_capacity(offers.len());
         for (offer, before) in offers.into_iter().zip(befores) {

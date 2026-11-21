@@ -1,0 +1,529 @@
+{
+ "packages": [
+  {
+   "name": "am-domain",
+   "id": "path+file:///w/crates/am-domain#0.0.1",
+   "dependencies": [
+    {
+     "name": "serde",
+     "kind": null,
+     "rename": null,
+     "target": null,
+     "optional": false
+    },
+    {
+     "name": "thiserror",
+     "kind": null,
+     "rename": null,
+     "target": null,
+     "optional": false
+    },
+    {
+     "name": "jiff",
+     "kind": null,
+     "rename": null,
+     "target": null,
+     "optional": false
+    },
+    {
+     "name": "uuid",
+     "kind": null,
+     "rename": null,
+     "target": null,
+     "optional": false
+    }
+   ]
+  },
+  {
+   "name": "am-glob",
+   "id": "path+file:///w/crates/am-glob#0.0.1",
+   "dependencies": [
+    {
+     "name": "globset",
+     "kind": null,
+     "rename": null,
+     "target": null,
+     "optional": false
+    },
+    {
+     "name": "unicode-normalization",
+     "kind": null,
+     "rename": null,
+     "target": null,
+     "optional": false
+    }
+   ]
+  },
+  {
+   "name": "am-store",
+   "id": "path+file:///w/crates/am-store#0.0.1",
+   "dependencies": [
+    {
+     "name": "am-domain",
+     "kind": null,
+     "rename": null,
+     "target": null,
+     "optional": false
+    },
+    {
+     "name": "rusqlite",
+     "kind": null,
+     "rename": null,
+     "target": null,
+     "optional": false
+    },
+    {
+     "name": "serde_json",
+     "kind": null,
+     "rename": null,
+     "target": null,
+     "optional": false
+    }
+   ]
+  },
+  {
+   "name": "am-config",
+   "id": "path+file:///w/crates/am-config#0.0.1",
+   "dependencies": [
+    {
+     "name": "am-domain",
+     "kind": null,
+     "rename": null,
+     "target": null,
+     "optional": false
+    },
+    {
+     "name": "am-glob",
+     "kind": null,
+     "rename": null,
+     "target": null,
+     "optional": false
+    }
+   ]
+  },
+  {
+   "name": "am-engine",
+   "id": "path+file:///w/crates/am-engine#0.0.1",
+   "dependencies": [
+    {
+     "name": "am-domain",
+     "kind": null,
+     "rename": null,
+     "target": null,
+     "optional": false
+    },
+    {
+     "name": "am-store",
+     "kind": null,
+     "rename": null,
+     "target": null,
+     "optional": false
+    },
+    {
+     "name": "tokio",
+     "kind": null,
+     "rename": null,
+     "target": null,
+     "optional": false
+    },
+    {
+     "name": "jiff",
+     "kind": null,
+     "rename": "jiff-croner",
+     "target": null,
+     "optional": false
+    },
+    {
+     "name": "am-testkit",
+     "kind": "dev",
+     "rename": null,
+     "target": null,
+     "optional": false
+    },
+    {
+     "name": "am-glob",
+     "kind": null,
+     "rename": null,
+     "target": null,
+     "optional": false
+    }
+   ]
+  },
+  {
+   "name": "am-net",
+   "id": "path+file:///w/crates/am-net#0.0.1",
+   "dependencies": [
+    {
+     "name": "am-domain",
+     "kind": null,
+     "rename": null,
+     "target": null,
+     "optional": false
+    },
+    {
+     "name": "reqwest",
+     "kind": null,
+     "rename": null,
+     "target": null,
+     "optional": false
+    },
+    {
+     "name": "tokio",
+     "kind": null,
+     "rename": null,
+     "target": null,
+     "optional": false
+    }
+   ]
+  },
+  {
+   "name": "am-providers",
+   "id": "path+file:///w/crates/am-providers#0.0.1",
+   "dependencies": [
+    {
+     "name": "am-domain",
+     "kind": null,
+     "rename": null,
+     "target": null,
+     "optional": false
+    },
+    {
+     "name": "am-net",
+     "kind": null,
+     "rename": null,
+     "target": null,
+     "optional": false
+    },
+    {
+     "name": "tokio",
+     "kind": null,
+     "rename": null,
+     "target": null,
+     "optional": false
+    }
+   ]
+  },
+  {
+   "name": "am-tools",
+   "id": "path+file:///w/crates/am-tools#0.0.1",
+   "dependencies": [
+    {
+     "name": "am-domain",
+     "kind": null,
+     "rename": null,
+     "target": null,
+     "optional": false
+    },
+    {
+     "name": "am-testkit",
+     "kind": "dev",
+     "rename": null,
+     "target": null,
+     "optional": false
+    },
+    {
+     "name": "am-glob",
+     "kind": null,
+     "rename": null,
+     "target": null,
+     "optional": false
+    }
+   ]
+  },
+  {
+   "name": "am-connectors",
+   "id": "path+file:///w/crates/am-connectors#0.0.1",
+   "dependencies": [
+    {
+     "name": "am-glob",
+     "kind": null,
+     "rename": null,
+     "target": null,
+     "optional": false
+    }
+   ]
+  },
+  {
+   "name": "am-render",
+   "id": "path+file:///w/crates/am-render#0.0.1",
+   "dependencies": []
+  },
+  {
+   "name": "am-services",
+   "id": "path+file:///w/crates/am-services#0.0.1",
+   "dependencies": []
+  },
+  {
+   "name": "am-mcp",
+   "id": "path+file:///w/crates/am-mcp#0.0.1",
+   "dependencies": [
+    {
+     "name": "am-domain",
+     "kind": null,
+     "rename": null,
+     "target": null,
+     "optional": false
+    },
+    {
+     "name": "rmcp",
+     "kind": null,
+     "rename": null,
+     "target": null,
+     "optional": false
+    },
+    {
+     "name": "tokio",
+     "kind": null,
+     "rename": null,
+     "target": null,
+     "optional": false
+    }
+   ]
+  },
+  {
+   "name": "am-extract",
+   "id": "path+file:///w/crates/am-extract#0.0.1",
+   "dependencies": []
+  },
+  {
+   "name": "am-secrets",
+   "id": "path+file:///w/crates/am-secrets#0.0.1",
+   "dependencies": [
+    {
+     "name": "am-domain",
+     "kind": null,
+     "rename": null,
+     "target": null,
+     "optional": false
+    },
+    {
+     "name": "keyring-core",
+     "kind": null,
+     "rename": null,
+     "target": "cfg(target_os = \"macos\")",
+     "optional": false
+    }
+   ]
+  },
+  {
+   "name": "am-api",
+   "id": "path+file:///w/crates/am-api#0.0.1",
+   "dependencies": [
+    {
+     "name": "am-domain",
+     "kind": null,
+     "rename": null,
+     "target": null,
+     "optional": false
+    }
+   ]
+  },
+  {
+   "name": "am-server",
+   "id": "path+file:///w/crates/am-server#0.0.1",
+   "dependencies": [
+    {
+     "name": "am-domain",
+     "kind": null,
+     "rename": null,
+     "target": null,
+     "optional": false
+    },
+    {
+     "name": "am-engine",
+     "kind": null,
+     "rename": null,
+     "target": null,
+     "optional": false
+    },
+    {
+     "name": "am-api",
+     "kind": null,
+     "rename": null,
+     "target": null,
+     "optional": false
+    },
+    {
+     "name": "am-store",
+     "kind": null,
+     "rename": null,
+     "target": null,
+     "optional": false
+    },
+    {
+     "name": "axum",
+     "kind": null,
+     "rename": null,
+     "target": null,
+     "optional": false
+    }
+   ]
+  },
+  {
+   "name": "am-app",
+   "id": "path+file:///w/crates/am-app#0.0.1",
+   "dependencies": [
+    {
+     "name": "am-domain",
+     "kind": null,
+     "rename": null,
+     "target": null,
+     "optional": false
+    },
+    {
+     "name": "am-config",
+     "kind": null,
+     "rename": null,
+     "target": null,
+     "optional": false
+    },
+    {
+     "name": "am-store",
+     "kind": null,
+     "rename": null,
+     "target": null,
+     "optional": false
+    },
+    {
+     "name": "am-engine",
+     "kind": null,
+     "rename": null,
+     "target": null,
+     "optional": false
+    },
+    {
+     "name": "am-net",
+     "kind": null,
+     "rename": null,
+     "target": null,
+     "optional": false
+    },
+    {
+     "name": "am-providers",
+     "kind": null,
+     "rename": null,
+     "target": null,
+     "optional": false
+    },
+    {
+     "name": "am-mcp",
+     "kind": null,
+     "rename": null,
+     "target": null,
+     "optional": false
+    },
+    {
+     "name": "am-server",
+     "kind": null,
+     "rename": null,
+     "target": null,
+     "optional": false
+    }
+   ]
+  },
+  {
+   "name": "am-desktop",
+   "id": "path+file:///w/crates/am-desktop#0.0.1",
+   "dependencies": [
+    {
+     "name": "am-server",
+     "kind": null,
+     "rename": null,
+     "target": null,
+     "optional": false
+    },
+    {
+     "name": "tauri",
+     "kind": null,
+     "rename": null,
+     "target": null,
+     "optional": false
+    }
+   ]
+  },
+  {
+   "name": "am-testkit",
+   "id": "path+file:///w/crates/am-testkit#0.0.1",
+   "dependencies": [
+    {
+     "name": "am-domain",
+     "kind": null,
+     "rename": null,
+     "target": null,
+     "optional": false
+    },
+    {
+     "name": "am-net",
+     "kind": null,
+     "rename": null,
+     "target": null,
+     "optional": false
+    },
+    {
+     "name": "tokio",
+     "kind": null,
+     "rename": null,
+     "target": null,
+     "optional": false
+    }
+   ]
+  },
+  {
+   "name": "am-e2e",
+   "id": "path+file:///w/crates/am-e2e#0.0.1",
+   "dependencies": [
+    {
+     "name": "am-app",
+     "kind": "dev",
+     "rename": null,
+     "target": null,
+     "optional": false
+    },
+    {
+     "name": "am-mcp",
+     "kind": "dev",
+     "rename": null,
+     "target": null,
+     "optional": false
+    }
+   ]
+  },
+  {
+   "name": "xtask",
+   "id": "path+file:///w/crates/xtask#0.0.1",
+   "dependencies": [
+    {
+     "name": "serde_json",
+     "kind": null,
+     "rename": null,
+     "target": null,
+     "optional": false
+    }
+   ]
+  }
+ ],
+ "workspace_members": [
+  "path+file:///w/crates/am-domain#0.0.1",
+  "path+file:///w/crates/am-glob#0.0.1",
+  "path+file:///w/crates/am-store#0.0.1",
+  "path+file:///w/crates/am-config#0.0.1",
+  "path+file:///w/crates/am-engine#0.0.1",
+  "path+file:///w/crates/am-net#0.0.1",
+  "path+file:///w/crates/am-providers#0.0.1",
+  "path+file:///w/crates/am-tools#0.0.1",
+  "path+file:///w/crates/am-connectors#0.0.1",
+  "path+file:///w/crates/am-render#0.0.1",
+  "path+file:///w/crates/am-services#0.0.1",
+  "path+file:///w/crates/am-mcp#0.0.1",
+  "path+file:///w/crates/am-extract#0.0.1",
+  "path+file:///w/crates/am-secrets#0.0.1",
+  "path+file:///w/crates/am-api#0.0.1",
+  "path+file:///w/crates/am-server#0.0.1",
+  "path+file:///w/crates/am-app#0.0.1",
+  "path+file:///w/crates/am-desktop#0.0.1",
+  "path+file:///w/crates/am-testkit#0.0.1",
+  "path+file:///w/crates/am-e2e#0.0.1",
+  "path+file:///w/crates/xtask#0.0.1"
+ ],
+ "version": 1
+}

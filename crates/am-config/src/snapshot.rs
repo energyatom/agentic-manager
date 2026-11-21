@@ -70,19 +70,14 @@ impl ConfigSnapshot {
     pub fn skills(&self) -> &BTreeMap<String, Skill> {
         &self.skills
     }
-    /// The hosts `seat` may reach (AD-12): today the project's
-    /// `tools.yaml` `egress_hosts`, the same for every seat (owner decision
-    /// 2026-11-20). A per-seat list later changes only
-    /// [`seat_allowed_hosts`].
-    pub fn allowed_hosts(&self, seat: &str) -> Vec<String> {
-        seat_allowed_hosts(&self.tools.egress_hosts, seat)
+    /// The host patterns `seat` may reach (AD-12, AD-48): exactly the
+    /// seat's own `allowed_hosts`, never an Account's endpoint; none for an
+    /// unknown seat.
+    pub fn allowed_hosts(&self, seat: &str) -> &[am_domain::HostPattern] {
+        self.seats
+            .get(seat)
+            .map_or(&[], |s| s.allowed_hosts.as_slice())
     }
-}
-
-/// The one rule for a seat's host allow-list, used by the validator's host
-/// warnings and by [`ConfigSnapshot::allowed_hosts`].
-pub(crate) fn seat_allowed_hosts(egress_hosts: &[String], _seat: &str) -> Vec<String> {
-    egress_hosts.to_vec()
 }
 
 /// sha256 over (path, bytes) pairs sorted by path. Each pair is framed by

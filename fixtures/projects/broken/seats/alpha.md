@@ -1,5 +1,5 @@
 ---
-schema_version: 1
+schema_version: 2
 name: Alpha
 role: Analyst
 team: core

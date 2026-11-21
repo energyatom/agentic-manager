@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "crates/am-domain",
+    "crates/am-glob",
     "crates/am-config",
     "crates/am-store",
     "crates/am-engine",
@@ -27,6 +28,7 @@ exclude = ["fixtures/supply-chain"]
 # am-desktop (Tauri) is built only in E11 and CI (AD-32, AD-47).
 default-members = [
     "crates/am-domain",
+    "crates/am-glob",
     "crates/am-config",
     "crates/am-store",
     "crates/am-engine",
@@ -65,6 +67,7 @@ disallowed_types = "deny"
 # pinned to the version current at E1 story 1 (2026-11-19).
 [workspace.dependencies]
 am-domain = { path = "crates/am-domain" }
+am-glob = { path = "crates/am-glob" }
 am-config = { path = "crates/am-config" }
 am-store = { path = "crates/am-store" }
 am-engine = { path = "crates/am-engine" }
@@ -118,6 +121,8 @@ url = "=2.5.8"
 # Source scope include/exclude globs (story 1.12, owner decision d):
 # Unlicense OR MIT, used under MIT; see docs/crate-notes/globset.md.
 globset = { version = "=0.4.21", default-features = false }
+# NFC for am-glob (story 1.14; already in the graph through url).
+unicode-normalization = "=0.1.26"
 # Config watcher (story 1.9, AD-16): CC0-1.0, allowed for this crate only by
 # AD-3's per-crate exception in deny.toml; see docs/crate-notes/notify.md.
 notify = "=8.2.2"

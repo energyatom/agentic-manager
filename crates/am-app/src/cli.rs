@@ -29,6 +29,19 @@ fn plural(n: usize, word: &str) -> String {
     }
 }
 
+/// The root of every project recorded in this Mac's runtime base except
+/// `root` itself (paths compared canonicalised, or as written when one
+/// cannot be).
+fn other_recorded_roots(places: &crate::runtime::Places, root: &Path) -> Vec<std::path::PathBuf> {
+    let canonical = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let own = canonical(root);
+    crate::runtime::records(&places.base)
+        .into_iter()
+        .map(|r| r.root.path)
+        .filter(|path| canonical(path) != own)
+        .collect()
+}
+
 /// `agentic validate [<project>]`: `args` are the words after `validate`.
 /// Returns the exit code: 0 with no errors (warnings allowed), 1 with any
 /// error, 2 for bad usage or a missing project folder.
@@ -48,10 +61,20 @@ pub fn validate(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> i3
     let opts = if template {
         am_config::LoadOptions::template(root)
     } else {
-        let knowledge = crate::runtime::Places::from_env()
-            .ok()
-            .and_then(|places| crate::runtime::knowledge_root(&places, root));
-        am_config::LoadOptions::project(knowledge)
+        let places = crate::runtime::Places::from_env().ok();
+        let knowledge = places
+            .as_ref()
+            .and_then(|places| crate::runtime::knowledge_root(places, root));
+        // AD-30: a folder that is, holds or lies inside another project this
+        // Mac has opened (a recorded root) may not be linked.
+        let recent_roots = places
+            .as_ref()
+            .map(|places| other_recorded_roots(places, root))
+            .unwrap_or_default();
+        am_config::LoadOptions {
+            recent_roots,
+            ..am_config::LoadOptions::project(knowledge)
+        }
     };
     let loaded = match am_config::load_in(root, opts) {
         Ok(l) => l,

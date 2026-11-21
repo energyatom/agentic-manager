@@ -5,7 +5,7 @@ use crate::finding::Report;
 use crate::node::{Key, Kind, Node};
 
 /// The only config schema version this app reads (AD-7, R4).
-pub(crate) const SCHEMA_VERSION: i64 = 1;
+pub(crate) const SCHEMA_VERSION: i64 = 2;
 
 pub(crate) const COMMENT_MESSAGE: &str = "comments are not kept when the app saves this file";
 const COMMENT_FIX: &str =
@@ -21,7 +21,7 @@ pub(crate) fn comments(rep: &mut Report, lines: &[u32]) {
     }
 }
 
-/// The top-level `schema_version` must be present and be 1. An older file
+/// The top-level `schema_version` must be present and be [`SCHEMA_VERSION`]. An older file
 /// is still an error until its migration is accepted (story 1.10): the fix
 /// names the offer when the app can step it, and says it cannot otherwise.
 pub(crate) fn schema_version(rep: &mut Report, root: &[(Key, Node)]) {
@@ -29,7 +29,7 @@ pub(crate) fn schema_version(rep: &mut Report, root: &[(Key, Node)]) {
         None => rep.error(
             1,
             "missing schema_version",
-            "add `schema_version: 1` as the first line",
+            format!("add `schema_version: {SCHEMA_VERSION}` as the first line"),
         ),
         Some((_, v)) => match v.kind {
             Kind::Int(SCHEMA_VERSION) => {}
@@ -54,7 +54,9 @@ pub(crate) fn schema_version(rep: &mut Report, root: &[(Key, Node)]) {
                 format!(
                     "unknown schema_version {n}; this app reads schema_version {SCHEMA_VERSION}"
                 ),
-                "set `schema_version: 1`; if a newer app wrote this file, update the app",
+                format!(
+                    "set `schema_version: {SCHEMA_VERSION}`; if a newer app wrote this file, update the app"
+                ),
             ),
             _ => rep.error(
                 v.line,
@@ -62,7 +64,7 @@ pub(crate) fn schema_version(rep: &mut Report, root: &[(Key, Node)]) {
                     "schema_version must be a whole number, not {}",
                     v.type_name()
                 ),
-                "set `schema_version: 1`",
+                format!("set `schema_version: {SCHEMA_VERSION}`"),
             ),
         },
     }

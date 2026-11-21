@@ -1,5 +1,5 @@
 ---
-schema_version: 1
+schema_version: 2
 name: Full
 role: Researcher
 team: core
@@ -31,5 +31,8 @@ links:
     group: Sites
   - title: Archive
     url: http://example.org/archive
+allowed_hosts:
+  - example.org
+  - docs.example.org
 ---
 Find new items worth reading and add them to the list.

@@ -1,4 +1,4 @@
-schema_version: 1
+schema_version: 2
 name: Report R1
 team: d2
 description: Flow F1. D2-Head writes document-a from table-t1 and hands it to D1, where D1-E1 to D1-E3 work on it in parallel. D1-Head consolidates their outputs into d1-opinion and hands it back. D2-Head writes report-r1, which D1-Head reviews before the Owner approves it. Starts by hand, or when f2-d1 completes.

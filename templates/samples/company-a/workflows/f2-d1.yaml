@@ -1,4 +1,4 @@
-schema_version: 1
+schema_version: 2
 name: D1 summary
 team: d1
 description: Flow F2, second part. When f2-update completes, D1-Head reads table-t1 through D2's read grant and writes d1-summary. Its completion starts f1.

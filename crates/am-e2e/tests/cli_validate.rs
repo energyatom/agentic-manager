@@ -253,11 +253,17 @@ fn template_mode_refuses_a_project_id_with_file_line_and_fix() {
     let company = dir.path().join("company.yaml");
     let text = std::fs::read_to_string(&company).unwrap();
     let id = am_domain::ProjectId::mint();
+    // After the schema_version line, whatever version the template is at.
+    let version = text
+        .lines()
+        .find(|l| l.starts_with("schema_version:"))
+        .unwrap()
+        .to_string();
     std::fs::write(
         &company,
         text.replacen(
-            "schema_version: 1\n",
-            &format!("schema_version: 1\nproject_id: {id}\n"),
+            &format!("{version}\n"),
+            &format!("{version}\nproject_id: {id}\n"),
             1,
         ),
     )

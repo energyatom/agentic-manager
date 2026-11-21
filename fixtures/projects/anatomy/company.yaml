@@ -1,4 +1,4 @@
-schema_version: 1
+schema_version: 2
 name: Anatomy Project
 description: A synthetic project whose seats use every seat anatomy field.
 timezone: UTC

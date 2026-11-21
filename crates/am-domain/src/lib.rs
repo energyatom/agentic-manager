@@ -11,7 +11,9 @@ pub mod audit;
 pub mod capability;
 pub mod clock;
 pub mod config_history;
+pub mod config_names;
 pub mod content;
+pub mod host;
 pub mod llm;
 pub mod mcp;
 pub mod net;
@@ -41,7 +43,9 @@ pub use clock::Clock;
 pub use config_history::{
     ConfigHistory, HistoryEntry, HistoryError, HistoryKind, NewIntent, PendingIntent,
 };
+pub use config_names::{CONFIG_NAMES, config_name_in, config_name_of, is_config_bearing};
 pub use content::{FileKind, FilePart, Instruction, UntrustedContent, UntrustedData};
+pub use host::{HostPattern, HostPatternError};
 pub use llm::{
     ChatOutcome, ChatRequest, EventSink, LlmProvider, Message, ModelCapabilities, Part,
     ProviderError, Role, StopReason, StreamEvent, ToolCall, ToolSpec, Usage,

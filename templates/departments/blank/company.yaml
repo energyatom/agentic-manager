@@ -1,4 +1,4 @@
-schema_version: 1
+schema_version: 2
 name: New company
 description: The Blank department. Installing it copies its one team, with no seats, tables or workflows; add seats from the role templates. The time zone and currency here only let agentic validate check the template.
 timezone: UTC

@@ -1,0 +1,15 @@
+[package]
+name = "am-glob"
+description = "The one glob matcher: globset behind its own type, literal separators, NFC-normalised pattern and subject; no IO (AD-4, Consistency Conventions: Globs)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+globset.workspace = true
+unicode-normalization.workspace = true

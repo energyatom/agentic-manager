@@ -8,7 +8,7 @@
 //! `workflows/`, `tables/`, `dashboards/` and `sources/` as `<id>.yaml`, and
 //! `schemas/<id>.json`, and `skills/<id>/` folders (SKILL.md plus
 //! `references/`). YAML is read with serde-saphyr. Every file carries
-//! `schema_version: 1`; ids are kebab-case file stems; references are checked
+//! `schema_version: 2` (story 1.14); ids are kebab-case file stems; references are checked
 //! across files; secret-looking values are errors; YAML comments are warnings
 //! because the app's writer does not keep them. A seat's capabilities are
 //! expanded into its grants by the fixed table in `am_domain::capability`
@@ -23,7 +23,14 @@
 //! older `schema_version` as a diff and writes nothing; a project with an
 //! offer builds no session ([`SessionError::MigrationPending`]); only
 //! [`accept_migrations`] writes them, through the writer, as `migration`
-//! History entries. The shipped registry has no step yet.
+//! History entries. Story 1.14 ships the first step, 1→2: a whole-project
+//! step that moves `tools.yaml` `egress_hosts` into the fetching seats'
+//! `allowed_hosts` (AD-48).
+//!
+//! Story 1.14 (AD-30, AD-48, Globs): a seat's `allowed_hosts` are parsed and
+//! matched only by `am_domain::HostPattern`; linked folders follow the
+//! amended root policy ([`LoadOptions`] names the home folder and the recent
+//! project roots); every glob compiles through `am-glob`.
 //!
 //! Story 1.13 (AD-32): [`load_in`] names where reference files are checked
 //! ([`LoadOptions`]: the project's runtime folder, a template's
@@ -124,6 +131,13 @@ pub struct LoadOptions {
     pub knowledge_root: Option<PathBuf>,
     /// The folder is a template or fixture: a `project_id` is an error.
     pub template: bool,
+    /// The owner's home folder, for `~/` paths and the `~/Library` rules
+    /// (AD-30); `None` reads `HOME` (tests inject a folder).
+    pub home: Option<PathBuf>,
+    /// The roots of the other recent projects (AD-30): a linked folder that
+    /// is, holds or lies inside one is refused. The caller passes them (this
+    /// crate keeps no index); `agentic validate` passes none.
+    pub recent_roots: Vec<PathBuf>,
 }
 
 impl LoadOptions {
@@ -133,6 +147,7 @@ impl LoadOptions {
         LoadOptions {
             knowledge_root,
             template: false,
+            ..LoadOptions::default()
         }
     }
 
@@ -142,6 +157,7 @@ impl LoadOptions {
         LoadOptions {
             knowledge_root: Some(am_domain::runtime::seed_knowledge(root)),
             template: true,
+            ..LoadOptions::default()
         }
     }
 }
@@ -199,8 +215,9 @@ fn load_inner(
     let mut loader = Loader {
         places: kinds::Places {
             project: root.to_path_buf(),
-            home: std::env::var_os("HOME").map(PathBuf::from),
+            home: opts.home.or_else(home_dir),
             knowledge_root: opts.knowledge_root,
+            recent_roots: opts.recent_roots,
         },
         template: opts.template,
         overrides,
@@ -209,6 +226,13 @@ fn load_inner(
     };
     loader.read_all(root);
     Ok(loader.finish())
+}
+
+/// The owner's home folder from `HOME`, when set.
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .filter(|h| !h.is_empty())
+        .map(PathBuf::from)
 }
 
 /// True when the loader reads the bytes of `rel` (forward slashes, relative)
@@ -424,7 +448,10 @@ impl Loader {
             self.report("company.yaml").error(
                 1,
                 "missing company.yaml",
-                "create company.yaml with schema_version: 1, name, timezone, currency and teams",
+                format!(
+                    "create company.yaml with schema_version: {}, name, timezone, currency and teams",
+                    checks::SCHEMA_VERSION
+                ),
             );
         }
         if self.exists(root, "tools.yaml")
@@ -526,13 +553,16 @@ impl Loader {
         let refs = &mut self.refs;
         match folder {
             "seats" => {
-                if let Some((front, offset, body)) = frontmatter(&mut rep, text, SEAT_FIX)
+                if let Some((front, offset, body)) = frontmatter(&mut rep, text, &seat_fix())
                     && let Some(node) = kinds::yaml(&mut rep, front, offset)
                 {
                     checks::text_secrets(&mut rep, body, body_first_line(text, body));
                     if kinds::declared_crawl_on(&node) {
                         self.declared.crawl_seats.insert(stem.to_string());
                     }
+                    self.declared
+                        .seat_hosts
+                        .insert(stem.to_string(), kinds::declared_hosts(&node));
                     if let Some(seat) = kinds::seat(&mut rep, refs, &self.places, stem, &node, body)
                     {
                         self.seats.insert(stem.to_string(), seat);
@@ -594,7 +624,6 @@ impl Loader {
     fn finish(mut self) -> Loaded {
         let mut known = std::mem::take(&mut self.declared);
         known.builtin_tools = am_domain::tool_manifest::builtin_tool_ids();
-        known.egress_hosts = self.tools.egress_hosts.clone();
         refs::resolve(&self.refs, &known, &mut self.reports);
         migrate::word_blocked(&self.places.project, &mut self.reports, &self.files);
         let mut findings: Vec<Finding> = self
@@ -630,7 +659,12 @@ impl Loader {
     }
 }
 
-const SEAT_FIX: &str = "start the file with a line `---`, the YAML fields (schema_version: 1, name, role, team), another `---`, then the instructions";
+fn seat_fix() -> String {
+    format!(
+        "start the file with a line `---`, the YAML fields (schema_version: {}, name, role, team), another `---`, then the instructions",
+        checks::SCHEMA_VERSION
+    )
+}
 
 /// Splits a seat file or a SKILL.md into (frontmatter, its line offset,
 /// body). The file must start with a `---` line and the frontmatter ends at
@@ -779,8 +813,9 @@ pub fn decisions_locked(root: &Path) -> Option<String> {
     let mut loader = Loader {
         places: kinds::Places {
             project: root.to_path_buf(),
-            home: std::env::var_os("HOME").map(PathBuf::from),
+            home: home_dir(),
             knowledge_root: None,
+            recent_roots: Vec::new(),
         },
         ..Loader::default()
     };
