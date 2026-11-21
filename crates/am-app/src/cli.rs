@@ -1,8 +1,15 @@
-//! CLI commands that need no runtime. `agentic validate [<project>]` (AD-16,
-//! epic R1) prints every finding as `file:line: message` with a `fix:` line,
-//! sorted by file and line, then a summary. `agentic audit export|verify`
-//! (AD-25, story 1.7) exports a project's audit log as JSON Lines and checks
-//! an export's hash chain.
+//! CLI commands that need no runtime. `agentic validate [--template]
+//! [<folder>]` (AD-16, epic R1) prints every finding as `file:line: message`
+//! with a `fix:` line, sorted by file and line, then a summary. `agentic
+//! audit export|verify` (AD-25, story 1.7) exports a project's audit log as
+//! JSON Lines and checks an export's hash chain.
+//!
+//! Both find a project's runtime folder read-only (story 1.13, AD-32): no
+//! lock, no write and no identity tool. `validate` on a project checks
+//! reference files against its runtime folder (or skips that check when it
+//! has none on this Mac) and never writes an id; `validate --template`
+//! checks them against the folder's `runtime-seed/` and refuses a
+//! `project_id`.
 
 use std::io::Write;
 use std::path::Path;
@@ -12,7 +19,7 @@ pub const EXIT_OK: i32 = 0;
 pub const EXIT_ERRORS: i32 = 1;
 pub const EXIT_USAGE: i32 = 2;
 
-const USAGE: &str = "usage: agentic validate [<project folder>]  (default: the current folder)";
+const USAGE: &str = "usage: agentic validate [--template] [<project or template folder>]  (default: the current folder)";
 
 fn plural(n: usize, word: &str) -> String {
     if n == 1 {
@@ -30,12 +37,23 @@ pub fn validate(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> i3
         let _ = writeln!(out, "{USAGE}");
         return EXIT_OK;
     }
-    if args.len() > 1 || args.iter().any(|a| a.starts_with('-')) {
+    let template = args.iter().any(|a| a == "--template");
+    let rest: Vec<&String> = args.iter().filter(|a| *a != "--template").collect();
+    if rest.len() > 1 || rest.iter().any(|a| a.starts_with('-')) {
         let _ = writeln!(err, "agentic validate: {USAGE}");
         return EXIT_USAGE;
     }
-    let project = args.first().map(String::as_str).unwrap_or(".");
-    let loaded = match am_config::load(Path::new(project)) {
+    let project = rest.first().map(|s| s.as_str()).unwrap_or(".");
+    let root = Path::new(project);
+    let opts = if template {
+        am_config::LoadOptions::template(root)
+    } else {
+        let knowledge = crate::runtime::Places::from_env()
+            .ok()
+            .and_then(|places| crate::runtime::knowledge_root(&places, root));
+        am_config::LoadOptions::project(knowledge)
+    };
+    let loaded = match am_config::load_in(root, opts) {
         Ok(l) => l,
         Err(e) => {
             let _ = writeln!(err, "agentic validate: {e}");
@@ -95,14 +113,16 @@ pub fn audit(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> i32 {
     }
 }
 
-/// `agentic audit export <project> [--out <file>]`: reads the project's
-/// `.agentic/state.db` through a read-only connection (no project lock, so
-/// it works while `serve` holds the project; a database newer than this app
-/// is refused). Without `--out` the JSON Lines go to stdout and the summary
-/// to stderr; with it, the export goes to an owner-only temporary file
-/// beside the target, renamed over it only when the export succeeded, and
-/// the summary goes to stdout. A target inside the project's `.agentic/`
-/// folder is refused as bad usage.
+/// `agentic audit export <project> [--out <file>]`: finds the project's
+/// runtime folder read-only (story 1.13: refused in words without a
+/// `company.yaml`, a `project_id`, a runtime folder on this Mac, or with an
+/// unmoved legacy folder) and reads its `state.db` through a read-only
+/// connection (no project lock, so it works while `serve` holds the
+/// project; a database newer than this app is refused). Without `--out` the
+/// JSON Lines go to stdout and the summary to stderr; with it, the export
+/// goes to an owner-only temporary file beside the target, renamed over it
+/// only when the export succeeded, and the summary goes to stdout. A target
+/// inside the runtime folder is refused as bad usage.
 fn audit_export(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> i32 {
     let mut project: Option<&str> = None;
     let mut file: Option<&str> = None;
@@ -123,17 +143,30 @@ fn audit_export(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> i3
     let Some(project) = project else {
         return audit_usage(err, "audit export needs the project folder");
     };
+    let layout = match crate::runtime::Places::from_env()
+        .and_then(|places| crate::runtime::find_runtime(&places, Path::new(project)))
+    {
+        Ok(l) => l,
+        Err(e) => {
+            let _ = writeln!(
+                err,
+                "agentic: cannot export the audit log of {project}: {e}"
+            );
+            return EXIT_ERRORS;
+        }
+    };
     if let Some(file) = file
-        && inside_agentic(Path::new(project), Path::new(file))
+        && inside(layout.dir(), Path::new(file))
     {
         return audit_usage(
             err,
             &format!(
-                "--out {file} is inside the project's .agentic folder; write the export elsewhere"
+                "--out {file} is inside the project's runtime folder {}; write the export elsewhere",
+                layout.dir().display()
             ),
         );
     }
-    let db = Path::new(project).join(".agentic").join("state.db");
+    let db = layout.state_db();
     if !db.is_file() {
         let _ = writeln!(
             err,
@@ -195,14 +228,13 @@ fn folder_of(path: &Path) -> &Path {
     }
 }
 
-/// `file`, or the folder it would be written in, is inside
-/// `<project>/.agentic/` (compared as canonical paths, so relative paths
-/// and links count).
-fn inside_agentic(project: &Path, file: &Path) -> bool {
-    let Ok(agentic) = project.join(".agentic").canonicalize() else {
+/// `file`, or the folder it would be written in, is inside `dir` (compared
+/// as canonical paths, so relative paths and links count).
+fn inside(dir: &Path, file: &Path) -> bool {
+    let Ok(dir) = dir.canonicalize() else {
         return false;
     };
-    let inside = |p: &Path| p.canonicalize().is_ok_and(|c| c.starts_with(&agentic));
+    let inside = |p: &Path| p.canonicalize().is_ok_and(|c| c.starts_with(&dir));
     inside(file) || inside(folder_of(file))
 }
 

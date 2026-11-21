@@ -1,7 +1,9 @@
 //! `am-app`: the composition root (AD-32). It wires adapters to ports and
 //! hosts the `agentic` CLI: `serve`, `validate` (story 1.4), `audit export`
 //! and `audit verify` (story 1.7), the journaled spike run used by criterion
-//! 2, and the `spike` subcommands for the owner's live runs.
+//! 2, and the `spike` subcommands for the owner's live runs. Since story
+//! 1.13 it resolves each project's runtime folder outside the project
+//! ([`runtime`]) through the OS identity adapters ([`identity`]).
 #![forbid(unsafe_code)]
 
 // The composition root depends on every adapter (Design Paradigm table); the
@@ -14,6 +16,8 @@ use am_render as _;
 use am_services as _;
 
 pub mod cli;
+pub mod identity;
+pub mod runtime;
 pub mod spike;
 
 use std::sync::Arc;

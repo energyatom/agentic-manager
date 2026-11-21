@@ -14,6 +14,27 @@ The other files (`company.yaml`, `tools.yaml`, `models/prices.yaml`,
 `models/capabilities.yaml`, workflows, tables, schemas, dashboards) are read
 as the field list in the story 1.4 plan records.
 
+## The project id and the runtime folder (story 1.13)
+
+`company.yaml` may hold `project_id: <id>` directly after `schema_version`:
+the project's id (a lowercase UUIDv7). You never write it yourself: the app
+inserts that one line on the project's first open and leaves every other byte
+of the file as it was. The project's runtime state (its database, lock,
+backups, logs and reference files) lives outside the project, in
+`~/Library/Application Support/agentic-manager-projects/<project-id>/`; the
+only runtime file in the project is `.agentic-open`, which says which Mac has
+it open and which a project's `.gitignore` should list. A `project_id` that
+is not a project id is an error. A template or fixture carries none:
+`agentic validate --template` (what `just check` runs over `templates/` and
+`fixtures/`) refuses one, naming the line.
+
+`agentic validate` on a project never writes an id. It checks reference files
+(`knowledge`, below) against the project's runtime folder on this Mac, and
+skips that check when the project has none here yet. With `--template` it
+checks them against the folder's `runtime-seed/knowledge/<seat-id>/` (or
+`runtime-seed/knowledge/team-<team-id>/`), where templates ship their seed
+files.
+
 ## Accounts: `models/accounts.yaml`
 
 ```yaml
@@ -101,7 +122,7 @@ Find new items and add them to the list.
 | `folders` | no | linked folders, below |
 | `text_fallback` | no | `true` serves text-readable files (txt, md, csv, tsv, json, a PDF's text) as text to a model that cannot read them natively; default `false` |
 | `skills` | no | ids of folders under `skills/` |
-| `knowledge` | no | `{ file, note? }`: reference files in `.agentic/knowledge/<seat-id>/`; `file` is relative, without `..`; a missing file is a warning, because `.agentic/` does not travel with the project |
+| `knowledge` | no | `{ file, note? }`: reference files in the runtime folder's `knowledge/<seat-id>/` (a template's `runtime-seed/knowledge/<seat-id>/`); `file` is relative, without `..`; a file missing there is a warning, because the runtime folder does not travel with the project |
 | `links` | no | `{ title, url, group? }`: `url` is http or https; a host not on the seat's allow-list is a warning |
 | `tools` | no | built-in tools of no capability (`write_document`, `draft_message`, `propose_change`) and MCP tools as `<server-id>/<tool-name>`; `read_skill_file` comes with an attached skill and is an error when listed without one |
 | `budget` | no | `{ per_run, per_week }` in the company currency |
@@ -145,9 +166,10 @@ compile.
 `path` is relative to the project folder, or to your home folder when it
 starts with `~/`; it is resolved by its text, without following links.
 Refused: an absolute path, `/`, `~` itself, `~/Library` or anything under it
-(the app's data folder lives there), any path with a `.agentic` part (in
-any letter case), the project folder itself or any folder that holds it (they
-hold its `.agentic/`), and a path whose `..` steps lead to one of these. A path that does not exist yet is a warning; one that
+(the app's data folder and the runtime folders live there), any path with a
+`.agentic` part (in any letter case: an older app's in-project runtime
+folder), the project folder itself or any folder that holds it, and a path
+whose `..` steps lead to one of these. A path that does not exist yet is a warning; one that
 names a file is an error.
 
 ## Skills: `skills/<id>/`
@@ -247,15 +269,18 @@ may leave out `seat`.
 
 ## Templates
 
-Every template under `templates/` is a minimal project, so `agentic validate`
-checks it as it is (`just check` runs it over each one). Installing a template
+Every template under `templates/` is a minimal project, so `agentic validate
+--template` checks it as it is (`just check` runs it over each one); it
+carries no `project_id`, and its seed reference files live under
+`runtime-seed/`, never `.agentic/`. The Blank department and the sample
+company ship a `.gitignore` that lists `.agentic-open`. Installing a template
 copies only part of it into the owner's project.
 
 | Template | Where | What installing it copies |
 |---|---|---|
 | Blank department | `templates/departments/blank/` | its one team from `company.yaml` (no seats, tables or workflows) |
 | Role templates: Head, Coordinator, Analyst, Researcher, Reviewer, Writer, Specialist, Human seat | `templates/roles/<role>/` (the Human seat is `human/`) | `seats/<role>.md` into the chosen team; for the Coordinator also `workflows/learning.yaml`, its learning loop, which has no trigger and runs only when started by hand |
-| Sample company (two departments) | `templates/samples/<sample>/` | the whole project: `company.yaml`, `models/accounts.yaml`, `tools.yaml`, seats, tables, workflows, skills, Sources, the synthetic files under `files/` and the team Knowledge notes under `.agentic/knowledge/` |
+| Sample company (two departments) | `templates/samples/<sample>/` | the whole project: `company.yaml`, `models/accounts.yaml`, `tools.yaml`, seats, tables, workflows, skills, Sources, the synthetic files under `files/`; the team Knowledge notes under `runtime-seed/knowledge/team-<team-id>/` are copied into the new project's runtime folder, never into the project |
 
 Each role template's seat carries its instructions, a `goal` and `backstory`,
 an avatar tint, default `tools` and `budget`, its `capabilities` (Folder

@@ -41,6 +41,7 @@ name = "am-app"
 version = "0.0.1"
 dependencies = [
  "am-api",
+ "am-app",
  "am-config",
  "am-connectors",
  "am-domain",
@@ -54,6 +55,7 @@ dependencies = [
  "am-server",
  "am-services",
  "am-store",
+ "am-testkit",
  "am-tools",
  "hex",
  "jiff 1.0.0",

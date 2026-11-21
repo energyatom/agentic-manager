@@ -1,5 +1,7 @@
 //! Repo automation (story 1.2): `check-deps` (AD-4 dependency direction),
-//! `denylist` (AD-23 department vocabulary) and `check-forbid` (no `unsafe`).
+//! `denylist` (AD-23 department vocabulary) and `check-forbid` (no `unsafe`);
+//! story 1.13 adds `runtime-paths` (AD-32: runtime paths named only by
+//! `am_domain::RuntimeLayout`).
 //! Later stories add `gen-types` and `bundle-services`. All three checks are
 //! offline; `just check` runs them.
 #![forbid(unsafe_code)]
@@ -7,6 +9,7 @@
 mod denylist;
 mod deps;
 mod forbid;
+mod runtime_paths;
 mod walk;
 
 use std::path::{Path, PathBuf};
@@ -15,7 +18,8 @@ use std::process::ExitCode;
 const USAGE: &str = "usage: cargo xtask <task> [options]
   check-deps   [--metadata <cargo-metadata.json>]   AD-4 dependency matrix
   denylist     [--root <dir>] [--list <file>]       AD-23 vocabulary scan
-  check-forbid [--root <dir>]                       every crate forbids unsafe";
+  check-forbid [--root <dir>]                       every crate forbids unsafe
+  runtime-paths [--root <dir>]                      AD-32 runtime paths only in RuntimeLayout";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -41,6 +45,7 @@ fn main() -> ExitCode {
             denylist::run(&root, &list)
         }
         "check-forbid" => forbid::run(&opts.root.clone().unwrap_or_else(repo_root)),
+        "runtime-paths" => runtime_paths::run(&opts.root.clone().unwrap_or_else(repo_root)),
         other => {
             eprintln!("xtask: unknown task `{other}`\n{USAGE}");
             return ExitCode::from(2);

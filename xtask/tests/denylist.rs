@@ -218,7 +218,11 @@ fn every_sample_id_is_denied() {
     }
 }
 
+/// A stream copy: reads and writes each file's bytes, never
+/// `std::fs::copy`, whose `clonefile(2)` step fails with EPERM under
+/// `~/Library/CloudStorage/` (story 1.13).
 fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
+    use std::io::{Read, Write};
     std::fs::create_dir_all(to).unwrap();
     for entry in std::fs::read_dir(from).unwrap() {
         let entry = entry.unwrap();
@@ -226,7 +230,16 @@ fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
         if entry.file_type().unwrap().is_dir() {
             copy_tree(&entry.path(), &target);
         } else {
-            std::fs::copy(entry.path(), &target).unwrap();
+            let mut src = std::fs::File::open(entry.path()).unwrap();
+            let mut dst = std::fs::File::create(&target).unwrap();
+            let mut buf = vec![0u8; 64 * 1024];
+            loop {
+                let n = src.read(&mut buf).unwrap();
+                if n == 0 {
+                    break;
+                }
+                dst.write_all(&buf[..n]).unwrap();
+            }
         }
     }
 }

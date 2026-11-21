@@ -7,8 +7,11 @@
 //!   transaction that also sets `user_version`. They never run backwards.
 //! - A database newer than this binary is refused before anything is written.
 //! - Before migrating an existing database (version >= 1), a `VACUUM INTO`
-//!   copy is written to `backups/state-v<from>-<UTC timestamp>.db` (mode 0600)
-//!   beside the database. A new database needs no backup.
+//!   copy is written to `backups/pre-migration/state-<UTC timestamp>-v<from>.db`
+//!   (mode 0600; the folder is the caller's, named by `RuntimeLayout`). A new
+//!   database needs no backup. Once every step committed, only the three
+//!   newest pre-migration copies are kept (AD-7, amended 2026-11-20); nothing
+//!   else in the folder is touched.
 //! - Every applied migration is returned in the [`OpenReport`], kept in
 //!   `migration_reports` once that table exists, and audited
 //!   (`store.migrated`, `args` NULL) once `audit_log` exists, so a new
@@ -17,7 +20,7 @@
 
 use std::path::{Path, PathBuf};
 
-use am_domain::Actor;
+use am_domain::{Actor, RuntimeLayout};
 use rusqlite::{Connection, params};
 
 use crate::{StoreError, audit, fsx, now_ts};
@@ -41,6 +44,9 @@ pub struct AppliedMigration {
     pub backup: Option<PathBuf>,
 }
 
+/// How many pre-migration backups are kept (AD-7).
+pub const PRE_MIGRATION_KEPT: usize = 3;
+
 /// What opening the database did to its schema.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpenReport {
@@ -49,12 +55,26 @@ pub struct OpenReport {
     /// The database was new (version 0) and was created at `version`.
     pub created: bool,
     pub applied: Vec<AppliedMigration>,
+    /// The kept legacy folder, when this open moved a legacy in-project
+    /// runtime folder out of the project (AD-32); reported like a migration.
+    pub legacy_kept: Option<PathBuf>,
 }
 
 impl OpenReport {
     /// The owner-facing lines, one per applied migration (one line for a new
-    /// database); empty when nothing was applied.
+    /// database), then the legacy move's line; empty when nothing was applied.
     pub fn lines(&self) -> Vec<String> {
+        let mut lines = self.schema_lines();
+        if let Some(kept) = &self.legacy_kept {
+            lines.push(format!(
+                "moved the project's old runtime folder out of the project; it is kept at {}: it still holds data that later deletions do not reach, and you may delete it by hand",
+                kept.display()
+            ));
+        }
+        lines
+    }
+
+    fn schema_lines(&self) -> Vec<String> {
         if self.created {
             return vec![format!("created at version {}", self.version)];
         }
@@ -192,25 +212,77 @@ fn migrate_with(
             backup: backup.clone(),
         });
     }
+    if backup.is_some() {
+        prune_backups(backups)?;
+    }
     Ok(OpenReport {
         version: known,
         created: found == 0,
         applied,
+        legacy_kept: None,
     })
 }
 
-/// `VACUUM INTO` a new owner-only file in `dir` (created 0700 if missing).
+/// True for a pre-migration copy's name (`state-<stamp>-v<n>.db`).
+fn is_backup_name(name: &str) -> bool {
+    name.starts_with("state-") && name.ends_with(".db") && !RuntimeLayout::is_kept_legacy(name)
+}
+
+/// Keeps the [`PRE_MIGRATION_KEPT`] newest pre-migration copies in `dir`
+/// (names sort by time) and deletes the older ones; nothing else is touched.
+fn prune_backups(dir: &Path) -> Result<(), StoreError> {
+    let read = std::fs::read_dir(dir)
+        .map_err(|e| StoreError::io(format!("cannot read {}", dir.display()), e))?;
+    let mut names: Vec<String> = read
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| is_backup_name(n))
+        .collect();
+    names.sort();
+    let excess = names.len().saturating_sub(PRE_MIGRATION_KEPT);
+    for name in &names[..excess] {
+        let path = dir.join(name);
+        std::fs::remove_file(&path)
+            .map_err(|e| StoreError::io(format!("cannot remove {}", path.display()), e))?;
+    }
+    Ok(())
+}
+
+/// `VACUUM INTO` a new owner-only file in `dir` (created 0700, with its
+/// parent, if missing), named by time so names sort oldest first.
 fn backup_into(conn: &Connection, dir: &Path, from: i64) -> Result<PathBuf, StoreError> {
+    if let Some(parent) = dir.parent() {
+        fsx::ensure_private_dir(parent)
+            .map_err(|e| StoreError::io(format!("cannot create {}", parent.display()), e))?;
+    }
     fsx::ensure_private_dir(dir)
         .map_err(|e| StoreError::io(format!("cannot create {}", dir.display()), e))?;
     let stamp = jiff::Timestamp::now()
-        .strftime("%Y%m%dT%H%M%S%.3fZ")
+        .strftime("%Y%m%dT%H%M%S%.6fZ")
         .to_string();
-    let path = dir.join(format!("state-v{from}-{stamp}.db"));
     // An empty 0600 file first, so the copy is never readable by others;
-    // VACUUM INTO accepts an empty target.
-    fsx::create_private_file(&path)
-        .map_err(|e| StoreError::io(format!("cannot create {}", path.display()), e))?;
+    // VACUUM INTO accepts an empty target. A name already taken (the same
+    // microsecond) gets a sequence number that still sorts after it.
+    let mut n = 1;
+    let path = loop {
+        let name = if n == 1 {
+            format!("state-{stamp}-v{from}.db")
+        } else {
+            format!("state-{stamp}~{n}-v{from}.db")
+        };
+        let path = dir.join(name);
+        match fsx::create_private_file(&path) {
+            Ok(_) => break path,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && n < 100 => n += 1,
+            Err(e) => {
+                return Err(StoreError::io(
+                    format!("cannot create {}", path.display()),
+                    e,
+                ));
+            }
+        }
+    };
     let target = path
         .to_str()
         .ok_or_else(|| StoreError::Invalid(format!("{} is not UTF-8", path.display())))?;
@@ -270,10 +342,13 @@ mod tests {
 
     #[test]
     fn report_lines() {
+        let layout = RuntimeLayout::at(PathBuf::from("/b/p"));
+        let backup = layout.backups_pre_migration().join("b.db");
         let new = OpenReport {
             version: 2,
             created: true,
             applied: vec![],
+            legacy_kept: None,
         };
         assert_eq!(new.lines(), vec!["created at version 2"]);
         let old = OpenReport {
@@ -283,22 +358,37 @@ mod tests {
                 AppliedMigration {
                     from: 1,
                     to: 2,
-                    backup: Some(PathBuf::from("/p/.agentic/backups/b.db")),
+                    backup: Some(backup.clone()),
                 },
                 AppliedMigration {
                     from: 2,
                     to: 3,
-                    backup: Some(PathBuf::from("/p/.agentic/backups/b.db")),
+                    backup: Some(backup.clone()),
                 },
             ],
+            legacy_kept: None,
         };
+        let b = backup.display();
         assert_eq!(
             old.lines(),
             vec![
-                "migrated from version 1 to 2, backup: /p/.agentic/backups/b.db",
-                "migrated from version 2 to 3, backup: /p/.agentic/backups/b.db",
+                format!("migrated from version 1 to 2, backup: {b}"),
+                format!("migrated from version 2 to 3, backup: {b}"),
             ]
         );
+        let kept = layout.legacy_copy("2026-11-21", 1);
+        let moved = OpenReport {
+            legacy_kept: Some(kept.clone()),
+            ..new
+        };
+        let lines = moved.lines();
+        assert_eq!(lines[0], "created at version 2");
+        assert!(lines[1].contains(&kept.display().to_string()), "{lines:?}");
+        assert!(
+            lines[1].contains("later deletions do not reach"),
+            "{lines:?}"
+        );
+        assert!(lines[1].contains("delete it by hand"), "{lines:?}");
     }
 
     /// A later step fails: the earlier step stays applied and reported (its

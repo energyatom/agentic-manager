@@ -11,9 +11,11 @@
 //!   are the numbered, embedded, forward-only SQL files in `migrations/`, run
 //!   after a `VACUUM INTO` backup and reported; a database newer than the
 //!   binary is refused.
-//! - [`open_project`] opens a project's `.agentic/` folder (owner-only,
-//!   git-ignored) under an exclusive lock that names its holder.
-//!   [`Store::open`] on a bare path remains for the spike's callers.
+//! - [`open_runtime`] opens a project's runtime folder (owner-only, outside
+//!   the project; am-app resolves it, AD-32) under an exclusive lock that
+//!   names its holder. [`legacy::move_legacy`] moves an older binary's
+//!   in-project folder there first (story 1.13). [`Store::open`] on a bare
+//!   path remains for the spike's callers.
 //!
 //! The spike keeps the minimal journal: runs, step runs, model calls, the
 //! ledger (reserve, then settle), triggers and fires. Config History (the
@@ -32,14 +34,16 @@ use serde_json::{Value, json};
 pub mod audit;
 mod config_history;
 mod fsx;
+pub mod legacy;
 mod migrations;
 pub mod project;
 
 pub use audit::{ChainBreak, ChainOk, verify_jsonl};
 pub use config_history::StoreConfigHistory;
-pub use migrations::{AppliedMigration, OpenReport, SCHEMA_VERSION};
+pub use fsx::stream_copy;
+pub use migrations::{AppliedMigration, OpenReport, PRE_MIGRATION_KEPT, SCHEMA_VERSION};
 use project::ProjectLock;
-pub use project::{LockHolder, open_project};
+pub use project::{LockHolder, lock_holder, lock_is_held, open_runtime};
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -76,6 +80,20 @@ pub enum StoreError {
         lock: PathBuf,
         holder: Option<LockHolder>,
     },
+    #[error(
+        "the project's old runtime folder {} is still open in another process ({}); close the older app there first",
+        .dir.display(),
+        project::holder_words(.holder)
+    )]
+    LegacyLocked {
+        dir: PathBuf,
+        holder: Option<LockHolder>,
+    },
+    #[error(
+        "moving the project's old runtime folder {} out of the project stopped: the copy of {file} did not match the original (sha256); the old folder is left where it is, untouched; free some disk space or check the disk, then open the project again",
+        .dir.display()
+    )]
+    LegacyUnverified { dir: PathBuf, file: String },
     #[error("{context}: {source}")]
     Io {
         context: String,
@@ -438,19 +456,23 @@ fn configure(conn: &Connection) -> Result<(), StoreError> {
 
 impl Store {
     /// Open (creating and migrating if needed) and start the writer thread.
-    /// A project opens through [`open_project`]; this bare-path open is kept
+    /// A project opens through [`open_runtime`]; this bare-path open is kept
     /// for the spike's callers. The AD-7 rules apply here too: before an
     /// existing database (version >= 1) is migrated, its `VACUUM INTO` backup
-    /// is written to a `backups/` folder (0700) created beside `path`.
+    /// is written to the `backups/pre-migration/` folder `RuntimeLayout`
+    /// names beside `path`.
     pub fn open(path: &Path) -> Result<Store, StoreError> {
-        Store::open_reporting(path, None).map(|(store, _)| store)
+        let dir = path.parent().unwrap_or_else(|| Path::new("."));
+        let backups = am_domain::RuntimeLayout::at(dir.to_path_buf()).backups_pre_migration();
+        Store::open_reporting(path, &backups, None).map(|(store, _)| store)
     }
 
-    /// [`Store::open`], returning what the migrations did. A project's
-    /// `lock` moves into the writer thread and is released only when the
-    /// read-write connection closes.
+    /// [`Store::open`], returning what the migrations did; pre-migration
+    /// backups go to `backups`. A project's `lock` moves into the writer
+    /// thread and is released only when the read-write connection closes.
     pub(crate) fn open_reporting(
         path: &Path,
+        backups: &Path,
         lock: Option<ProjectLock>,
     ) -> Result<(Store, OpenReport), StoreError> {
         fsx::create_private_file_if_missing(path)
@@ -460,11 +482,7 @@ impl Store {
         // journal mode, is written.
         migrations::refuse_newer(migrations::user_version(&conn)?)?;
         configure(&conn)?;
-        let backups = path
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .join("backups");
-        let report = migrations::migrate(&mut conn, &backups)?;
+        let report = migrations::migrate(&mut conn, backups)?;
         let (tx, rx) = mpsc::channel::<Job>();
         let handle = thread::Builder::new()
             .name("am-store-writer".into())
@@ -501,6 +519,44 @@ impl Store {
     pub fn reader(&self) -> Result<Reader, StoreError> {
         Reader::open(&self.path)
     }
+}
+
+/// Refuses a database at `path` that is newer than this binary (or not one
+/// this app made), reading it through [`open_read_only`]; nothing is
+/// created or written, not even a `-wal` or `-shm` file. An absent file passes (the resolver's check before
+/// any write, AD-32).
+pub fn check_database(path: &Path) -> Result<(), StoreError> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let conn = open_read_only(path)?;
+    migrations::refuse_newer(migrations::user_version(&conn)?)
+}
+
+/// A database opened read-only without writing beside it. With no `-wal`
+/// file (a clean close) it is opened `immutable`, so SQLite creates no
+/// `-wal` or `-shm` file; with one, a plain read-only connection reads the
+/// WAL's pages too.
+pub(crate) fn open_read_only(path: &Path) -> rusqlite::Result<Connection> {
+    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    if path.with_file_name(format!("{name}-wal")).exists() {
+        return Connection::open_with_flags(path, flags);
+    }
+    let mut uri = String::from("file:");
+    for c in path.to_string_lossy().chars() {
+        match c {
+            '%' => uri.push_str("%25"),
+            '?' => uri.push_str("%3f"),
+            '#' => uri.push_str("%23"),
+            c => uri.push(c),
+        }
+    }
+    uri.push_str("?immutable=1");
+    Connection::open_with_flags(uri, flags | OpenFlags::SQLITE_OPEN_URI)
 }
 
 /// A content hash is exactly 64 lowercase hex characters (sha256), so
@@ -718,6 +774,8 @@ pub mod testing {
     pub fn database_at_version(path: &Path, version: i64) -> Result<(), StoreError> {
         crate::migrations::database_at_version(path, version)
     }
+
+    pub use crate::fsx::testing::{refuse_clone_of, stream_copies_of_refused};
 
     /// One row in `triggers` (present since version 1), written directly.
     pub fn insert_fixture_trigger(path: &Path, id: &str) -> Result<(), StoreError> {

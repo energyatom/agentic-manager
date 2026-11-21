@@ -33,7 +33,8 @@ pub struct StdioSpec {
     pub args: Vec<String>,
     /// The only environment variables the child receives (name, value).
     pub env: Vec<(String, String)>,
-    /// The child's working folder (`.agentic/workspace/mcp/<server-id>/`).
+    /// The child's working folder (`RuntimeLayout::mcp_workspace`, the
+    /// runtime folder's `workspace/mcp/<server-id>/`).
     pub cwd: PathBuf,
 }
 

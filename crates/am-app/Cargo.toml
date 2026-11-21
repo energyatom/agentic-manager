@@ -14,6 +14,11 @@ workspace = true
 name = "agentic"
 path = "src/main.rs"
 
+[features]
+# Fail points for the resolver's tests (`am_app::runtime::testing`): enabled
+# only through dev-dependencies, never in the app.
+test-support = ["am-store/test-support", "am-config/test-support"]
+
 [dependencies]
 am-domain.workspace = true
 am-config.workspace = true
@@ -36,7 +41,10 @@ jiff.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+am-app = { path = ".", features = ["test-support"] }
 am-store = { workspace = true, features = ["test-support"] }
+am-config = { workspace = true, features = ["test-support"] }
+am-testkit.workspace = true
 tempfile.workspace = true
 # Story 1.8's serve test seeds config intents by their sha256.
 sha2.workspace = true

@@ -401,6 +401,7 @@ fn writer_refuses_bad_paths_in_words() {
     let root = dir.path();
     let (w, history) = writer(root);
     let outside = root.parent().unwrap().join("x.yaml");
+    let legacy_db = format!("{}/state.db", am_domain::runtime::LEGACY_DIR);
     for file in [
         "../x.yaml",
         "/etc/x",
@@ -409,7 +410,7 @@ fn writer_refuses_bad_paths_in_words() {
         "seats/missing.md",
         "notes.txt",
         "skills/brief/references/style.md",
-        ".agentic/state.db",
+        legacy_db.as_str(),
         "seats/.alpha.md.am-tmp",
         "",
     ] {

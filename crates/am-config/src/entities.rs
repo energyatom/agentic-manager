@@ -11,6 +11,9 @@ use am_domain::workspace::Access;
 /// `company.yaml`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Company {
+    /// The project's id (UUIDv7, AD-32), written by the app on the first
+    /// open; `None` until then, and always in a template.
+    pub project_id: Option<String>,
     pub name: String,
     pub description: Option<String>,
     /// IANA time zone name.
@@ -178,7 +181,7 @@ pub struct Seat {
     pub text_fallback: bool,
     /// Attached skill ids (`skills/<id>/`, AD-38).
     pub skills: Vec<String>,
-    /// Reference files in `.agentic/knowledge/<seat-id>/`.
+    /// Reference files in the runtime folder's `knowledge/<seat-id>/`.
     pub knowledge: Vec<KnowledgeEntry>,
     /// Saved links.
     pub links: Vec<Link>,
@@ -217,7 +220,8 @@ pub struct Folder {
     pub exclude: Vec<String>,
 }
 
-/// A reference file of a seat, relative to `.agentic/knowledge/<seat-id>/`.
+/// A reference file of a seat, relative to the runtime folder's
+/// `knowledge/<seat-id>/`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct KnowledgeEntry {
     pub file: String,

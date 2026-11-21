@@ -103,6 +103,12 @@ pub(crate) struct Doc {
     pub body: Option<String>,
 }
 
+/// True when the tree's top level holds `key`.
+pub(crate) fn has_top_key(tree: &Node, key: &str) -> bool {
+    tree.as_map()
+        .is_some_and(|m| m.iter().any(|(k, _)| k.name == key))
+}
+
 /// Reads `text` as a file of `kind`; the error says why it cannot be edited.
 pub(crate) fn parse(kind: FileKind, text: &str) -> Result<Doc, String> {
     let (front, body) = if kind.markdown() {

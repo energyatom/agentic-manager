@@ -25,6 +25,14 @@
 //! temp files are removed when a writer opens. One edit runs at a time. The
 //! writer remembers the (file, sha256) of its own writes for the watcher.
 //! It never creates, deletes or renames a config file.
+//!
+//! [`ConfigWriter::assign_identity`] (a [`ConfigIdentityAssign`], story 1.13,
+//! AD-32) is the one write that does not emit canonically: it inserts a
+//! single `project_id: <id>` line directly after `schema_version` and leaves
+//! every other byte of `company.yaml` as it was (comments, key order, blank
+//! lines and line endings), through the same intent, rename and commit, so
+//! `reconcile` settles a crash after the rename. It commits History and its
+//! audit only, never an approved grant set (AD-16).
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
@@ -64,6 +72,14 @@ pub struct ConfigEdit {
     pub ops: Vec<EditOp>,
     /// A seat's or skill's new Markdown body; `None` keeps it byte for byte.
     pub body: Option<String>,
+}
+
+/// The System mint of a missing `project_id` (AD-32): one line inserted in
+/// `company.yaml` after `schema_version`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigIdentityAssign {
+    /// The project id (UUIDv7, lowercase hyphenated).
+    pub project_id: String,
 }
 
 /// Where a test stops a write as a crash would (`test-support` only).
@@ -284,6 +300,57 @@ impl ConfigWriter {
             )));
         }
         self.step(actor, &file, HistoryKind::Edit, None, before, after)
+    }
+
+    /// Inserts `project_id: <id>` directly after `company.yaml`'s
+    /// `schema_version` line (with that line's ending) and returns the
+    /// History entry; every other byte stays. Refused when the id is not a
+    /// UUIDv7, when the file already holds a `project_id` or has no
+    /// `schema_version` line.
+    pub fn assign_identity(
+        &self,
+        actor: Actor,
+        assign: ConfigIdentityAssign,
+    ) -> Result<HistoryEntry, WriteError> {
+        let _one = self.serial()?;
+        let id = assign.project_id;
+        if am_domain::ProjectId::parse(&id).is_none() {
+            return Err(WriteError::BadEdit(format!(
+                "'{id}' is not a project id (a lowercase UUIDv7)"
+            )));
+        }
+        let file = "company.yaml";
+        self.resolve(file)?;
+        let before = self.read(file)?;
+        let text = String::from_utf8(before.clone()).map_err(|_| WriteError::NotEditable {
+            file: file.to_string(),
+            reason: "it is not UTF-8 text".into(),
+        })?;
+        let doc =
+            canon::parse(FileKind::Company, &text).map_err(|reason| WriteError::NotEditable {
+                file: file.to_string(),
+                reason,
+            })?;
+        if canon::has_top_key(&doc.tree, "project_id") {
+            return Err(WriteError::NoChange(format!(
+                "{file} already holds a project_id; the app never writes over one"
+            )));
+        }
+        let after =
+            insert_after_schema_version(&text, &format!("project_id: {id}")).ok_or_else(|| {
+                WriteError::NotEditable {
+                    file: file.to_string(),
+                    reason: "it has no `schema_version:` line at the top level".into(),
+                }
+            })?;
+        self.step(
+            actor,
+            file,
+            HistoryKind::Edit,
+            None,
+            before,
+            after.into_bytes(),
+        )
     }
 
     /// Writes entry `id`'s before-bytes back, as a new `undo` entry. Refused
@@ -620,6 +687,40 @@ impl ConfigWriter {
         }
         Ok(())
     }
+}
+
+/// `text` with `line` inserted after its first top-level `schema_version:`
+/// line, ending as that line ends (a last line without one gets the file's
+/// line ending before the new line). `None` without such a line.
+fn insert_after_schema_version(text: &str, line: &str) -> Option<String> {
+    let crlf = text.contains("\r\n");
+    let mut out = String::with_capacity(text.len() + line.len() + 2);
+    let mut done = false;
+    for l in text.split_inclusive('\n') {
+        out.push_str(l);
+        if done {
+            continue;
+        }
+        let is_version = l
+            .strip_prefix("schema_version")
+            .is_some_and(|rest| rest.trim_start_matches([' ', '\t']).starts_with(':'));
+        if !is_version {
+            continue;
+        }
+        let ending = if l.ends_with("\r\n") {
+            "\r\n"
+        } else if l.ends_with('\n') {
+            "\n"
+        } else {
+            let e = if crlf { "\r\n" } else { "\n" };
+            out.push_str(e);
+            e
+        };
+        out.push_str(line);
+        out.push_str(ending);
+        done = true;
+    }
+    done.then_some(out)
 }
 
 /// A failed replace: `No` when the file kept its bytes for certain, `Maybe`
