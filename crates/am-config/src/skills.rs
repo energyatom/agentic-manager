@@ -5,50 +5,23 @@
 //! counts in the snapshot hash and gets the secret check. Nothing here is
 //! run, and nothing a skill says reaches a seat's grants.
 
-use std::fs::Metadata;
 use std::path::Path;
 
 use crate::finding::Report;
-use crate::{Loader, checks, frontmatter, kinds, node};
+use crate::{Entry, Loader, checks, frontmatter, kinds, node};
 
 const REFERENCE_EXTENSIONS: &[&str] = &["md", "txt", "csv", "json", "yaml", "yml"];
 const REFERENCE_MAX_BYTES: u64 = 256 * 1024;
 const REFERENCE_MAX_FILES: usize = 20;
 const ONLY: &str = "a skill folder holds SKILL.md and references/ only";
 
-/// The entries of `dir` with their metadata (not following links), sorted
-/// by name. Only `.DS_Store` (Finder's own file) is skipped: every other
-/// hidden entry gets the same checks as any entry.
-fn listing(dir: &Path) -> Vec<(String, Metadata)> {
-    let Ok(read) = std::fs::read_dir(dir) else {
-        return Vec::new();
-    };
-    let mut out: Vec<(String, Metadata)> = read
-        .flatten()
-        .filter_map(|e| {
-            let name = e.file_name().to_string_lossy().into_owned();
-            let meta = std::fs::symlink_metadata(e.path()).ok()?;
-            (name != ".DS_Store").then_some((name, meta))
-        })
-        .collect();
-    out.sort_by(|a, b| a.0.cmp(&b.0));
-    out
-}
-
-#[cfg(unix)]
-fn executable(meta: &Metadata) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    meta.permissions().mode() & 0o111 != 0
-}
-
-#[cfg(not(unix))]
-fn executable(_meta: &Metadata) -> bool {
-    false
-}
+// Folder entries come from `Loader::listing` (links not followed, sorted by
+// name, only `.DS_Store` skipped: every other hidden entry gets the same
+// checks as any entry).
 
 /// Reports a link or an executable file; true when the entry is fine so far.
-fn plain_entry(rep: &mut Report, name: &str, meta: &Metadata) -> bool {
-    if meta.file_type().is_symlink() {
+fn plain_entry(rep: &mut Report, name: &str, meta: &Entry) -> bool {
+    if meta.link {
         rep.error(
             1,
             format!("'{name}' is a link; links are not accepted in a skill folder"),
@@ -56,7 +29,7 @@ fn plain_entry(rep: &mut Report, name: &str, meta: &Metadata) -> bool {
         );
         return false;
     }
-    if meta.is_file() && executable(meta) {
+    if meta.file && meta.exec {
         rep.error(
             1,
             format!("'{name}' is executable; no file in a skill folder may be"),
@@ -69,9 +42,9 @@ fn plain_entry(rep: &mut Report, name: &str, meta: &Metadata) -> bool {
 
 /// Walks `skills/`, declaring every skill folder and reading each one.
 pub(crate) fn load_all(loader: &mut Loader, root: &Path) {
-    for (name, meta) in listing(&root.join("skills")) {
+    for (name, meta) in loader.listing(root, "skills") {
         let rel = format!("skills/{name}");
-        if meta.file_type().is_symlink() {
+        if meta.link {
             loader.report(&rel).error(
                 1,
                 "a link is not accepted in skills/",
@@ -79,7 +52,7 @@ pub(crate) fn load_all(loader: &mut Loader, root: &Path) {
             );
             continue;
         }
-        if !meta.is_dir() {
+        if !meta.dir {
             loader.report(&rel).warning(
                 1,
                 "this file is not read",
@@ -107,11 +80,11 @@ fn load_one(loader: &mut Loader, root: &Path, id: &str) {
     let base = format!("skills/{id}");
     let mut has_skill_md = false;
     let mut has_references = false;
-    for (name, meta) in listing(&root.join(&base)) {
+    for (name, meta) in loader.listing(root, &base) {
         let rel = format!("{base}/{name}");
         let mut rep = Report::new(&rel);
         if plain_entry(&mut rep, &name, &meta) {
-            if meta.is_dir() {
+            if meta.dir {
                 match name.as_str() {
                     "references" => has_references = true,
                     "scripts" => rep.error(
@@ -203,8 +176,8 @@ fn load_references(
 ) -> std::collections::BTreeMap<String, String> {
     let dir = format!("{base}/references");
     let mut out = std::collections::BTreeMap::new();
-    let entries = listing(&root.join(&dir));
-    let files = entries.iter().filter(|(_, m)| m.is_file()).count();
+    let entries = loader.listing(root, &dir);
+    let files = entries.iter().filter(|(_, m)| m.file).count();
     if files > REFERENCE_MAX_FILES {
         loader.report(&dir).error(
             1,
@@ -222,12 +195,12 @@ fn load_references(
             continue;
         }
         let ext = name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase());
-        if meta.is_dir()
+        if meta.dir
             || !ext
                 .as_deref()
                 .is_some_and(|e| REFERENCE_EXTENSIONS.contains(&e))
         {
-            let what = if meta.is_dir() { "folder" } else { "file" };
+            let what = if meta.dir { "folder" } else { "file" };
             rep.error(
                 1,
                 format!("{what} '{name}' is not accepted in references/"),
@@ -239,12 +212,12 @@ fn load_references(
             loader.merge(rep);
             continue;
         }
-        if meta.len() > REFERENCE_MAX_BYTES {
+        if meta.len > REFERENCE_MAX_BYTES {
             rep.error(
                 1,
                 format!(
                     "'{name}' is {} bytes; a reference file may be at most 256 KB",
-                    meta.len()
+                    meta.len
                 ),
                 "split the file or keep only the part the skill needs",
             );

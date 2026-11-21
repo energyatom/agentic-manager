@@ -1,7 +1,9 @@
 # Supply-chain policy (AD-3; story 1.2). `just supply-chain` runs it twice:
 # on the aarch64-apple-darwin graph (whole workspace) and on the
 # x86_64-unknown-linux-gnu graph without am-desktop. Advisories are cargo-audit's
-# job in the same recipe. Never add a licence or an `exceptions` entry here.
+# job in the same recipe. Never add a licence here. The one licence exception
+# is CC0-1.0 for notify@8.2.2 (AD-3, owner 2026-11-21, story 1.9); never add
+# another exception without an owner decision.
 
 [graph]
 # A bare `cargo deny check` uses the macOS graph; the Linux graph runs from
@@ -12,6 +14,13 @@ all-features = false
 [licenses]
 confidence-threshold = 0.93
 allow = ["MIT", "MIT-0", "Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "ISC", "Zlib", "Unicode-3.0", "MPL-2.0"]
+
+# notify (the config watcher) is CC0-1.0: allowed for this crate at its pinned
+# Stack version only, so a bump is reviewed again. Its dependencies stay under
+# the allow-list; any other CC0-1.0 crate fails.
+[[licenses.exceptions]]
+crate = "notify@8.2.2"
+allow = ["CC0-1.0"]
 
 [bans]
 multiple-versions = "warn"

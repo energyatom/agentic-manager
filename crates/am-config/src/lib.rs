@@ -17,14 +17,21 @@
 //! [`ConfigWriter`] is the only code that writes these files: canonical key
 //! order, Markdown bodies kept byte for byte, atomic replace, History through
 //! the `am_domain::ConfigHistory` port, Undo and Restore (story 1.8), and the
-//! targeted `project_id` insert of [`ConfigIdentityAssign`] (story 1.13). The
-//! watcher and config migrations come in later stories.
+//! targeted `project_id` insert of [`ConfigIdentityAssign`] (story 1.13).
+//! Config migrations come in a later story.
 //!
 //! Story 1.13 (AD-32): [`load_in`] names where reference files are checked
 //! ([`LoadOptions`]: the project's runtime folder, a template's
 //! `runtime-seed/`, or nowhere) and whether the folder is a template (which
 //! carries no `project_id`); [`read_company`] and [`decisions_locked`] are the
 //! resolver's reads before a project opens.
+//!
+//! Story 1.9 (R2, AD-16): [`ConfigSession`] holds the accepted bytes of every
+//! file the snapshot is read from and builds the snapshot only from them (an
+//! exact-map load, no disk read of those files); a `notify` watcher announces
+//! each outside change once as a [`ConfigEvent`], and
+//! [`ConfigSession::reload`] applies every pending change as one new snapshot,
+//! recording each file in History as an `outside_edit`.
 #![forbid(unsafe_code)]
 
 mod canon;
@@ -38,6 +45,7 @@ mod linediff;
 mod node;
 mod refs;
 mod schema_check;
+mod session;
 mod skills;
 mod snapshot;
 mod writer;
@@ -47,6 +55,7 @@ use std::path::{Path, PathBuf};
 
 pub use entities::*;
 pub use finding::{Finding, Severity};
+pub use session::{ConfigEvent, ConfigSession, ReloadError, SessionError};
 pub use snapshot::ConfigSnapshot;
 #[cfg(feature = "test-support")]
 pub use writer::FailPoint;
@@ -148,9 +157,30 @@ pub fn load_with(root: &Path, overrides: BTreeMap<String, Vec<u8>>) -> Result<Lo
     load_full(root, overrides, LoadOptions::default())
 }
 
+/// [`load_in`] from an exact file map (story 1.9): every tracked file (see
+/// [`tracked`]) exists only when `files` names it and is read only from
+/// there, never from disk, so a snapshot holds no bytes the owner has not
+/// accepted. Folders, file metadata and untracked paths still come from disk.
+pub(crate) fn load_exact(
+    root: &Path,
+    files: BTreeMap<String, Vec<u8>>,
+    opts: LoadOptions,
+) -> Result<Loaded, LoadError> {
+    load_inner(root, BTreeMap::new(), Some(files), opts)
+}
+
 fn load_full(
     root: &Path,
     overrides: BTreeMap<String, Vec<u8>>,
+    opts: LoadOptions,
+) -> Result<Loaded, LoadError> {
+    load_inner(root, overrides, None, opts)
+}
+
+fn load_inner(
+    root: &Path,
+    overrides: BTreeMap<String, Vec<u8>>,
+    exact: Option<BTreeMap<String, Vec<u8>>>,
     opts: LoadOptions,
 ) -> Result<Loaded, LoadError> {
     if !root.exists() {
@@ -167,10 +197,66 @@ fn load_full(
         },
         template: opts.template,
         overrides,
+        exact,
         ..Loader::default()
     };
     loader.read_all(root);
     Ok(loader.finish())
+}
+
+/// True when the loader reads the bytes of `rel` (forward slashes, relative)
+/// into the snapshot: a config file the writer edits, or a file in a skill's
+/// `references/` folder. The session tracks exactly these paths.
+pub(crate) fn tracked(rel: &str) -> bool {
+    if canon::kind_of(rel).is_some() {
+        return true;
+    }
+    let parts: Vec<&str> = rel.split('/').collect();
+    let fine = |p: &&str| !p.is_empty() && *p != "." && *p != ".." && !p.contains(['\\', '\0']);
+    matches!(parts.as_slice(), ["skills", id, "references", name]
+        if parts.iter().all(fine) &&!id.starts_with('.') && *name != ".DS_Store")
+}
+
+/// One folder entry as the loader sees it (from disk, or from an exact map).
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct Entry {
+    pub link: bool,
+    pub dir: bool,
+    pub file: bool,
+    pub exec: bool,
+    pub len: u64,
+}
+
+impl Entry {
+    fn of(meta: &std::fs::Metadata) -> Entry {
+        Entry {
+            link: meta.file_type().is_symlink(),
+            dir: meta.is_dir(),
+            file: meta.is_file(),
+            exec: executable(meta),
+            len: meta.len(),
+        }
+    }
+}
+
+#[cfg(unix)]
+fn executable(meta: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    meta.is_file() && meta.permissions().mode() & 0o111 != 0
+}
+
+#[cfg(not(unix))]
+fn executable(_meta: &std::fs::Metadata) -> bool {
+    false
+}
+
+/// `dir/name`, or `name` at the root.
+fn join_rel(dir: &str, name: &str) -> String {
+    if dir.is_empty() {
+        name.to_string()
+    } else {
+        format!("{dir}/{name}")
+    }
 }
 
 #[derive(Default)]
@@ -180,6 +266,8 @@ struct Loader {
     template: bool,
     /// Bytes to read instead of a file's (see [`load_with`]).
     overrides: BTreeMap<String, Vec<u8>>,
+    /// The exact map of tracked files (see [`load_exact`]).
+    exact: Option<BTreeMap<String, Vec<u8>>>,
     reports: BTreeMap<String, Report>,
     files: BTreeMap<String, Vec<u8>>,
     refs: Refs,
@@ -209,9 +297,13 @@ impl Loader {
     /// The file's text, recorded for the hash; `None` (with a finding) when
     /// it cannot be read as UTF-8.
     fn read(&mut self, root: &Path, rel: &str) -> Option<String> {
-        let read = match self.overrides.get(rel) {
-            Some(b) => Ok(b.clone()),
-            None => std::fs::read(root.join(rel)),
+        let read = match (self.overrides.get(rel), &self.exact) {
+            (Some(b), _) => Ok(b.clone()),
+            (None, Some(map)) if tracked(rel) => map
+                .get(rel)
+                .cloned()
+                .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound)),
+            (None, _) => std::fs::read(root.join(rel)),
         };
         let bytes = match read {
             Ok(b) => b,
@@ -235,9 +327,82 @@ impl Loader {
         }
     }
 
+    /// True when the file `rel` exists (a link is followed).
+    fn exists(&self, root: &Path, rel: &str) -> bool {
+        match &self.exact {
+            Some(map) if tracked(rel) => map.contains_key(rel),
+            _ => root.join(rel).is_file(),
+        }
+    }
+
+    /// The entries of the folder `dir` (project-relative, `""` for the root)
+    /// with their metadata, links not followed, sorted by name; nothing when
+    /// it is absent. Only `.DS_Store` (Finder's own file) is skipped. With an
+    /// exact map, a tracked file is listed only when the map names it.
+    pub(crate) fn listing(&self, root: &Path, dir: &str) -> Vec<(String, Entry)> {
+        let mut out: BTreeMap<String, Entry> = BTreeMap::new();
+        if let Ok(read) = std::fs::read_dir(root.join(dir)) {
+            for e in read.flatten() {
+                let name = e.file_name().to_string_lossy().into_owned();
+                if name == ".DS_Store" {
+                    continue;
+                }
+                if let Ok(meta) = std::fs::symlink_metadata(e.path()) {
+                    out.insert(name, Entry::of(&meta));
+                }
+            }
+        }
+        if let Some(map) = &self.exact {
+            // A tracked regular file exists only when the map names it; any
+            // other entry (a folder, a link) stays, so its checks still run.
+            out.retain(|name, e| !e.file || !tracked(&join_rel(dir, name)));
+            let prefix = if dir.is_empty() {
+                String::new()
+            } else {
+                format!("{dir}/")
+            };
+            for (rel, bytes) in map.range(prefix.clone()..) {
+                let Some(rest) = rel.strip_prefix(&prefix) else {
+                    break;
+                };
+                match rest.split_once('/') {
+                    None => {
+                        let on_disk = std::fs::symlink_metadata(root.join(rel)).ok();
+                        let exec = on_disk.as_ref().is_some_and(executable);
+                        out.insert(
+                            rest.to_string(),
+                            Entry {
+                                file: true,
+                                exec,
+                                len: bytes.len() as u64,
+                                ..Entry::default()
+                            },
+                        );
+                    }
+                    Some((sub, _)) => {
+                        out.entry(sub.to_string()).or_insert(Entry {
+                            dir: true,
+                            ..Entry::default()
+                        });
+                    }
+                }
+            }
+        }
+        out.into_iter().collect()
+    }
+
+    /// The non-hidden file names in the folder `dir`, sorted.
+    fn entries(&self, root: &Path, dir: &str) -> Vec<String> {
+        self.listing(root, dir)
+            .into_iter()
+            .filter(|(name, e)| e.file && !name.starts_with('.'))
+            .map(|(name, _)| name)
+            .collect()
+    }
+
     fn read_all(&mut self, root: &Path) {
         // company.yaml is required; the rest are optional.
-        if root.join("company.yaml").is_file() {
+        if self.exists(root, "company.yaml") {
             if let Some(text) = self.read(root, "company.yaml") {
                 let mut rep = Report::new("company.yaml");
                 if let Some(node) = kinds::yaml(&mut rep, &text, 0) {
@@ -255,7 +420,7 @@ impl Loader {
                 "create company.yaml with schema_version: 1, name, timezone, currency and teams",
             );
         }
-        if root.join("tools.yaml").is_file()
+        if self.exists(root, "tools.yaml")
             && let Some(text) = self.read(root, "tools.yaml")
         {
             let mut rep = Report::new("tools.yaml");
@@ -269,7 +434,7 @@ impl Loader {
         }
         for stem in MODEL_FILES {
             let rel = format!("models/{stem}.yaml");
-            if !root.join(&rel).is_file() {
+            if !self.exists(root, &rel) {
                 continue;
             }
             let Some(text) = self.read(root, &rel) else {
@@ -293,7 +458,7 @@ impl Loader {
             }
             self.merge(rep);
         }
-        for name in entries(&root.join("models")) {
+        for name in self.entries(root, "models") {
             let known = MODEL_FILES.iter().any(|m| name == format!("{m}.yaml"));
             if !known {
                 self.report(&format!("models/{name}")).warning(
@@ -305,7 +470,7 @@ impl Loader {
         }
         skills::load_all(self, root);
         for (folder, ext) in FOLDERS {
-            for name in entries(&root.join(folder)) {
+            for name in self.entries(root, folder) {
                 let rel = format!("{folder}/{name}");
                 let Some(stem) = name.strip_suffix(&format!(".{ext}")) else {
                     self.report(&rel).warning(
@@ -457,21 +622,6 @@ impl Loader {
     }
 }
 
-/// The non-hidden file names in `dir`, sorted; nothing when it is absent.
-fn entries(dir: &Path) -> Vec<String> {
-    let Ok(read) = std::fs::read_dir(dir) else {
-        return Vec::new();
-    };
-    let mut names: Vec<String> = read
-        .flatten()
-        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
-        .map(|e| e.file_name().to_string_lossy().into_owned())
-        .filter(|n| !n.starts_with('.'))
-        .collect();
-    names.sort();
-    names
-}
-
 const SEAT_FIX: &str = "start the file with a line `---`, the YAML fields (schema_version: 1, name, role, team), another `---`, then the instructions";
 
 /// Splits a seat file or a SKILL.md into (frontmatter, its line offset,
@@ -559,7 +709,12 @@ pub fn read_company(root: &Path) -> Result<CompanyHead, CompanyRefusal> {
     let bytes = std::fs::read(&path).map_err(|e| CompanyRefusal::Unreadable(e.to_string()))?;
     let text = String::from_utf8(bytes)
         .map_err(|_| CompanyRefusal::Unreadable("it is not UTF-8 text".into()))?;
-    let node = node::parse(&text, 0)
+    company_head(&text)
+}
+
+/// [`read_company`] on the text of `company.yaml`.
+pub(crate) fn company_head(text: &str) -> Result<CompanyHead, CompanyRefusal> {
+    let node = node::parse(text, 0)
         .map_err(|e| CompanyRefusal::Unreadable(format!("line {}: {}", e.line, e.message)))?;
     let entries = match &node.kind {
         node::Kind::Map(m) => m.as_slice(),

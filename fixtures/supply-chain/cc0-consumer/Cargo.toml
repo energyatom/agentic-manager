@@ -1,0 +1,16 @@
+# Licence-policy probe (story 1.9): a manifest that depends on the CC0-1.0
+# cc0-probe fixture. Its own workspace, excluded from the repo workspace.
+[package]
+name = "cc0-consumer"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+cc0-probe = { path = "../cc0-probe", version = "0.1.0" }
+
+[workspace]

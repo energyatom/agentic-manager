@@ -27,6 +27,7 @@ jiff.workspace = true
 thiserror.workspace = true
 url.workspace = true
 globset.workspace = true
+notify.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
