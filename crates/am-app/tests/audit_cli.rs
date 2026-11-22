@@ -99,6 +99,7 @@ fn populated(dir: &Path, root: &Path) -> Store {
             target: "host-1".into(),
             outcome: "not on the allow-list".into(),
             hash: None,
+            args: Default::default(),
         },
     )
     .unwrap();

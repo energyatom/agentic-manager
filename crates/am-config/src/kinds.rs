@@ -301,6 +301,32 @@ fn web_url(rep: &mut Report, t: &Text, name: &str) -> bool {
     ok
 }
 
+/// An MCP server's `url` (AD-12, AD-26): `https://…`, or
+/// `http://127.0.0.1:<port>[/path]` with an explicit port for a server on
+/// this Mac. The egress client pins an MCP server to exactly that endpoint
+/// and never reaches `localhost`, so `localhost` is not accepted. The error
+/// does not repeat the URL (it may hold a password).
+fn mcp_url(rep: &mut Report, t: &Text) -> bool {
+    let ok = url::Url::parse(&t.value).is_ok_and(|u| {
+        let no_userinfo = u.username().is_empty() && u.password().is_none();
+        let host = u.host_str().unwrap_or("");
+        no_userinfo
+            && match u.scheme() {
+                "https" => !host.is_empty(),
+                "http" => host == "127.0.0.1" && u.port().is_some(),
+                _ => false,
+            }
+    });
+    if !ok {
+        rep.error(
+            t.line,
+            "'url' of an MCP server must be an https URL, or http://127.0.0.1:<port> (an explicit port) for a server on this Mac, with no user name or password",
+            "set `url:` to https://… or, for a server on this Mac, http://127.0.0.1:<port>/…",
+        );
+    }
+    ok
+}
+
 /// The provider whose Account names its own endpoint.
 const OPENAI_COMPATIBLE: &str = "openai-compatible";
 
@@ -821,7 +847,7 @@ fn mcp_server(rep: &mut Report, item: &Node) -> Option<McpServer> {
         );
     }
     let command = s.text(rep, "command");
-    let url = s.text(rep, "url").filter(|t| web_url(rep, t, "url"));
+    let url = s.text(rep, "url").filter(|t| mcp_url(rep, t));
     match transport.as_ref().map(|t| t.value.as_str()) {
         Some("stdio") if command.is_none() => rep.error(
             s.line,

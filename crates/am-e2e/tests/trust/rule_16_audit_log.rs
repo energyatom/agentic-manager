@@ -155,6 +155,7 @@ fn populated(root: &Path) -> Store {
             target: "root-1:notes/a.md".into(),
             outcome: "ok".into(),
             hash: Some(sha256_hex("the file's bytes")),
+            args: Default::default(),
         },
     )
     .unwrap();

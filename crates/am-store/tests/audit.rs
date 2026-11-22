@@ -159,6 +159,7 @@ fn populated(root: &Path) -> Store {
             target: "root-1:notes/a.md".into(),
             outcome: "ok".into(),
             hash: Some(sha256_hex("the file's bytes")),
+            args: Default::default(),
         },
     )
     .unwrap();
@@ -283,6 +284,7 @@ fn an_audit_entry_without_a_hash_has_null_args() {
                 target: "host-1".into(),
                 outcome: "not on the allow-list".into(),
                 hash: None,
+                args: Default::default(),
             },
         )
         .unwrap();
@@ -393,6 +395,7 @@ fn the_writer_refuses_a_field_with_a_nul_byte() {
                 target: "root-1:a.md".into(),
                 outcome: "ok\u{0}{\"sha256\":\"x\"}".into(),
                 hash: None,
+                args: Default::default(),
             },
         )
         .unwrap_err();
@@ -460,6 +463,7 @@ fn an_audit_hash_that_is_not_sha256_hex_is_refused() {
                     target: "root-1:a.md".into(),
                     outcome: "ok".into(),
                     hash: Some(hash.clone()),
+                    args: Default::default(),
                 },
             )
             .unwrap_err();
@@ -664,6 +668,7 @@ fn a_chain_written_by_1_6_binaries_verifies_after_migrating_and_writing() {
                 target: "root-1:a.md".into(),
                 outcome: "ok".into(),
                 hash: Some(sha256_hex("bytes")),
+                args: Default::default(),
             },
         )
         .unwrap();
@@ -683,4 +688,84 @@ fn a_chain_written_by_1_6_binaries_verifies_after_migrating_and_writing() {
     let ok = verify_jsonl(text.as_bytes()).unwrap();
     assert_eq!((ok.entries, ok.head), (count, head));
     assert_eq!(store.reader().unwrap().verify_audit_chain().unwrap(), None);
+}
+
+/// Story 2.2 (AD-12, AD-25): an `Audit` command's named `args` (an egress
+/// block's scheme, host, port, reason and caller id) are stored as the
+/// entry's redacted `args`, next to its hash when it has one, read back by
+/// `audit_args`, exported, and the chain verifies.
+#[test]
+fn an_audit_entrys_named_args_are_stored_and_exported() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, _) = open_project(dir.path()).unwrap();
+    let args: std::collections::BTreeMap<String, String> = [
+        ("scheme", "https"),
+        ("host", "other.example.net"),
+        ("port", "443"),
+        ("reason", "not on the seat's allowed hosts"),
+        ("seat", "s1"),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_string(), v.to_string()))
+    .collect();
+    store
+        .writer()
+        .exec(
+            Actor::System {
+                component: "am-net".into(),
+            },
+            WriteCommand::Audit {
+                action: "egress.blocked".into(),
+                target: "https://other.example.net:443".into(),
+                outcome: "blocked".into(),
+                hash: None,
+                args: args.clone(),
+            },
+        )
+        .unwrap();
+    store
+        .writer()
+        .exec(
+            sys(),
+            WriteCommand::Audit {
+                action: "folder.read".into(),
+                target: "root-1:a.md".into(),
+                outcome: "ok".into(),
+                hash: Some(sha256_hex("bytes")),
+                args: [("root".to_string(), "root-1".to_string())]
+                    .into_iter()
+                    .collect(),
+            },
+        )
+        .unwrap();
+
+    let reader = store.reader().unwrap();
+    assert_eq!(
+        reader
+            .audit_args("egress.blocked", "https://other.example.net:443")
+            .unwrap(),
+        vec![args.clone()]
+    );
+    let with_hash = reader.audit_args("folder.read", "root-1:a.md").unwrap();
+    assert_eq!(with_hash.len(), 1);
+    assert_eq!(with_hash[0].get("root").map(String::as_str), Some("root-1"));
+    assert_eq!(
+        with_hash[0].get("sha256").map(String::as_str),
+        Some(sha256_hex("bytes").as_str()),
+        "the hash is kept next to the args"
+    );
+
+    let (text, _, _) = export(&store);
+    let blocked = entries(&text)
+        .into_iter()
+        .find(|e| e["action"] == "egress.blocked")
+        .expect("exported");
+    assert_eq!(blocked["args"]["host"], "other.example.net");
+    assert_eq!(blocked["args"]["seat"], "s1");
+    assert_eq!(
+        blocked["actor"],
+        json!({"kind": "system", "component": "am-net"})
+    );
+    verify_jsonl(text.as_bytes()).unwrap();
+    assert_eq!(reader.verify_audit_chain().unwrap(), None);
 }

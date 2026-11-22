@@ -337,10 +337,10 @@ impl LlmProvider for AnthropicProvider {
                     scheme: AuthScheme::XApiKey,
                     account_id: account_id.clone(),
                 }),
-                caller: Caller {
+                caller: Some(Caller::Account {
+                    account: account_id,
                     seat: None,
-                    account: Some(account_id),
-                },
+                }),
                 ..HttpRequest::post_json(url, body.to_string().into_bytes())
             };
             let Some(resp) = send_cancellable(&egress, req, &cancel).await? else {

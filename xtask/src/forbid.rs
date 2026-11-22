@@ -125,7 +125,7 @@ fn unsafe_lines(code: &str) -> Vec<usize> {
 
 /// Blanks comments, string literals and char literals (keeping newlines), so
 /// only code remains for the keyword and attribute checks.
-fn strip_comments_and_strings(src: &str) -> String {
+pub fn strip_comments_and_strings(src: &str) -> String {
     scan(src).0
 }
 

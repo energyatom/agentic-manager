@@ -802,3 +802,37 @@ fn repeated_grants_tool_settings_and_view_columns_are_errors() {
         "built-in tool setting 'web_search' appears twice",
     );
 }
+
+/// Story 2.2 review (low): an http MCP server on this Mac is reached only
+/// at `http://127.0.0.1:<port>` (the egress client pins an MCP server to
+/// its approved endpoint and never reaches `localhost`), so the validator
+/// refuses `http://localhost:<port>` for an MCP `url`, and its fix names
+/// the 127.0.0.1 form only. An https URL and the 127.0.0.1 form pass.
+#[test]
+fn an_http_mcp_server_on_this_mac_is_named_by_127_0_0_1_only() {
+    let copy = valid_copy();
+    let text = std::fs::read_to_string(copy.path().join("tools.yaml")).unwrap();
+    let mut servers = String::new();
+    for (id, url) in [
+        ("on-localhost", "http://localhost:3001/mcp"),
+        ("no-port", "http://127.0.0.1/mcp"),
+        ("on-loopback", "http://127.0.0.1:3001/mcp"),
+        ("remote", "https://mcp.example.org/mcp"),
+    ] {
+        servers.push_str(&format!(
+            "  - id: {id}\n    transport: http\n    url: {url}\n    version: 1.0.0\n    network: none\n    tools:\n      - name: list_notes\n        class: read\n"
+        ));
+    }
+    write(copy.path(), "tools.yaml", &format!("{text}{servers}"));
+    let found = findings(copy.path());
+    let url_errors: Vec<&Finding> = errors(&found)
+        .into_iter()
+        .filter(|f| f.file == "tools.yaml" && f.message.contains("'url'"))
+        .collect();
+    assert_eq!(url_errors.len(), 2, "{found:#?}");
+    for f in &url_errors {
+        assert!(f.fix.contains("http://127.0.0.1:<port>"), "{f:?}");
+        assert!(!f.fix.contains("localhost"), "{f:?}");
+        assert!(!f.message.contains("localhost"), "{f:?}");
+    }
+}

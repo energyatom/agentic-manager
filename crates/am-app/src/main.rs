@@ -11,11 +11,15 @@
 //!   a configured workflow, only in a terminal; exit 0 succeeded, 1 failed or
 //!   refused, 2 usage) and `agentic status [--project <folder>]` (the runs,
 //!   newest first, with their steps; reads only)
-//! - `agentic spike c1 [--provider anthropic|lmstudio|ollama] [--model M]`
 //! - `agentic spike c3 --db PATH [--cron EXPR] [--tz ZONE]` (sleep/wake demo)
-//! - `agentic spike c4 [--dir PATH] [--anthropic-model M] [--local-model M] [--no-anthropic] [--no-local] [--out FILE]`
 //! - `agentic spike c7` (Keychain store, read, delete with a canary)
 //! - `agentic spike local-context` (LM Studio's loaded context length)
+//!
+//! The spike's `c1` and `c4`, which read the Keychain entry
+//! `spike-anthropic` and called a provider with no configured Account, left
+//! the binary in story 2.2 (owner decision 9, 2026-11-22); their recorded
+//! evidence is `docs/spike-report.md`, and the live tests in
+//! `crates/am-e2e/tests/spike/` still run them on the owner's Mac.
 #![forbid(unsafe_code)]
 
 use std::path::PathBuf;
@@ -23,8 +27,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use am_app::spike;
-use am_domain::{HttpRequest, LlmProvider, SecretString};
-use am_providers::{AnthropicProvider, OpenAiCompatProvider};
+use am_domain::{Caller, HttpRequest, SecretString};
 
 struct Args(Vec<String>);
 
@@ -87,17 +90,18 @@ async fn main() {
         }
         Some("__spike-run") => spike_run(&args).await,
         Some("spike") => match argv.get(1).map(String::as_str) {
-            Some("c1") => c1(&args).await,
             Some("c3") => c3(&args).await,
-            Some("c4") => c4(&args).await,
             Some("c7") => c7(),
             Some("local-context") => local_context().await,
-            _ => fail("usage: agentic spike c1|c3|c4|c7|local-context"),
+            _ => {
+                eprintln!("usage: agentic spike c3|c7|local-context");
+                std::process::exit(2);
+            }
         },
         Some("--version") => println!("agentic {}", env!("CARGO_PKG_VERSION")),
         _ => {
             eprintln!(
-                "usage: agentic serve [--project <path>] | agentic validate [<project>] | agentic audit export|verify | agentic accounts add|remove|list|test | agentic run <workflow> | agentic status | agentic spike c1|c3|c4|c7|local-context"
+                "usage: agentic serve [--project <path>] | agentic validate [<project>] | agentic audit export|verify | agentic accounts add|remove|list|test | agentic run <workflow> | agentic status | agentic spike c3|c7|local-context"
             );
             std::process::exit(2);
         }
@@ -127,7 +131,7 @@ fn owner_side() -> Result<am_app::cli::OwnerSide, i32> {
 
 /// `agentic accounts add|remove|list|test` (story 2.1, AD-15): the command
 /// with the owner's side ([`owner_side`]), the Keychain and `am-net`'s
-/// client.
+/// client over the directory and audit sink the command hands it.
 async fn accounts(args: &[String]) -> i32 {
     use am_app::cli::{AccountsContext, OwnerSide};
     let OwnerSide {
@@ -145,8 +149,8 @@ async fn accounts(args: &[String]) -> i32 {
         identity,
         terminal,
         secrets,
-        egress: Arc::new(move |policy| {
-            Arc::new(am_net::NetEgress::new(policy, for_egress.clone(), None))
+        egress: Arc::new(move |directory, audit| {
+            Arc::new(am_net::NetEgress::new(directory, for_egress.clone(), audit))
                 as Arc<dyn am_domain::EgressClient>
         }),
     };
@@ -239,6 +243,46 @@ async fn serve(args: &Args) -> i32 {
             return 1;
         }
     };
+    // The bound port, recorded owner-only while we serve (removed at exit):
+    // in the user-level folder of running servers, with or without a
+    // project, and in the project's runtime folder. Every egress directory,
+    // `agentic accounts test`'s included, refuses every recorded port to
+    // Accounts and MCP servers (AD-12).
+    let app_data = match am_app::runtime::Places::from_env() {
+        Ok(places) => places.app_data,
+        Err(e) => {
+            eprintln!("agentic: {e}");
+            return 1;
+        }
+    };
+    if let Err(e) = am_app::runtime::record_serving(&app_data, port) {
+        eprintln!("agentic: {e}");
+        return 1;
+    }
+    if let Some(o) = &opened
+        && let Err(e) = am_app::runtime::record_serve_port(&o.layout, port)
+    {
+        eprintln!("agentic: {e}");
+        am_app::runtime::clear_serving(&app_data);
+        return 1;
+    }
+    // The project's egress client, handed the port too. Its blocks go to the
+    // project's audit log.
+    let egress = match (&opened, &project) {
+        (Some(o), Some(p)) => match egress_for(p, o) {
+            Ok(egress) => {
+                egress.set_own_port(port);
+                Some(egress)
+            }
+            Err(e) => {
+                eprintln!("agentic: cannot read the project's network allow-lists: {e}");
+                am_app::runtime::clear_serve_port(&o.layout);
+                am_app::runtime::clear_serving(&app_data);
+                return 1;
+            }
+        },
+        _ => None,
+    };
     let state = am_server::AppState::new(port);
     println!("agentic: serving on http://127.0.0.1:{port}");
     if !args.flag("--no-browser") {
@@ -259,8 +303,29 @@ async fn serve(args: &Args) -> i32 {
             1
         }
     };
+    // The client holds a handle on the store's writer: dropped first.
+    drop(egress);
+    if let Some(o) = &opened {
+        am_app::runtime::clear_serve_port(&o.layout);
+    }
+    am_app::runtime::clear_serving(&app_data);
     drop(opened);
     code
+}
+
+/// The open project's egress client (story 2.2): its egress directory, the
+/// Keychain, and a sink writing to its audit log.
+fn egress_for(
+    project: &str,
+    opened: &am_app::runtime::Opened,
+) -> Result<am_net::NetEgress, String> {
+    let places = am_app::runtime::Places::from_env().map_err(|e| e.to_string())?;
+    let directory = am_app::egress::ProjectDirectory::open(&PathBuf::from(project), &places)?;
+    Ok(am_net::NetEgress::new(
+        Arc::new(directory),
+        am_app::keychain(),
+        Arc::new(am_app::egress::StoreAuditSink::new(opened.store.writer())),
+    ))
 }
 
 /// Resolves and opens the project at `p` (am-app's runtime resolver over
@@ -327,58 +392,6 @@ async fn spike_run(args: &Args) {
     }
 }
 
-fn anthropic_model(args: &Args) -> String {
-    args.value("--anthropic-model")
-        .or_else(|| args.value("--model"))
-        .or_else(|| std::env::var("AM_SPIKE_ANTHROPIC_MODEL").ok())
-        .unwrap_or_else(|| am_app::DEFAULT_ANTHROPIC_MODEL.into())
-}
-
-/// The LM Studio model to use: named with the flag or `AM_SPIKE_LOCAL_MODEL`.
-/// It is never guessed (the first listed model may be an embedding or a
-/// text-only model).
-fn local_model(named: Option<String>) -> Result<String, String> {
-    named
-        .or_else(|| std::env::var("AM_SPIKE_LOCAL_MODEL").ok())
-        .ok_or_else(|| {
-            "name the LM Studio model with --local-model (c4), --model (c1) or AM_SPIKE_LOCAL_MODEL: a tool-capable model for C1, a vision-capable model for C4".to_string()
-        })
-}
-
-async fn c1(args: &Args) {
-    let secrets = am_app::keychain();
-    let egress = am_app::default_egress(secrets);
-    let which = args
-        .value("--provider")
-        .unwrap_or_else(|| "anthropic".into());
-    let (provider, model): (Arc<dyn LlmProvider>, String) = match which.as_str() {
-        "anthropic" => (
-            Arc::new(AnthropicProvider::new(
-                egress.clone(),
-                am_app::SPIKE_ANTHROPIC_ACCOUNT,
-            )),
-            anthropic_model(args),
-        ),
-        "lmstudio" => {
-            let m = local_model(args.value("--model")).unwrap_or_else(|e| fail(&e));
-            (Arc::new(OpenAiCompatProvider::lm_studio(egress.clone())), m)
-        }
-        "ollama" => (
-            Arc::new(OpenAiCompatProvider::ollama(egress.clone())),
-            args.value("--model")
-                .unwrap_or_else(|| fail("--model is required for ollama")),
-        ),
-        other => fail(&format!("unknown provider {other}")),
-    };
-    match spike::c1_probe(provider, &model, 2048).await {
-        Ok(r) => {
-            println!("{r:#?}");
-            println!("C1 {}: {}", which, if r.passed() { "PASS" } else { "FAIL" });
-        }
-        Err(e) => fail(&e.to_string()),
-    }
-}
-
 async fn c3(args: &Args) {
     use am_engine::scheduler::{CatchUp, Scheduler};
     struct SystemClock;
@@ -430,60 +443,11 @@ async fn c3(args: &Args) {
     }
 }
 
-async fn c4(args: &Args) {
-    let dir = args
-        .value("--dir")
-        .or_else(|| std::env::var("AM_SPIKE_DOCS_DIR").ok())
-        .unwrap_or_else(|| fail("AM_SPIKE_DOCS_DIR not set"));
-    let secrets = am_app::keychain();
-    let egress = am_app::default_egress(secrets);
-    let mut models = Vec::new();
-    if !args.flag("--no-anthropic") {
-        let m = anthropic_model(args);
-        models.push(spike::ModelUnderTest {
-            label: format!("frontier: anthropic {m}"),
-            kind: spike::ModelKind::Frontier,
-            provider: Arc::new(AnthropicProvider::new(
-                egress.clone(),
-                am_app::SPIKE_ANTHROPIC_ACCOUNT,
-            )),
-            price: Some(spike::anthropic_price(&m)),
-            model: m,
-        });
-    }
-    if !args.flag("--no-local") {
-        match local_model(args.value("--local-model")) {
-            Ok(m) => models.push(spike::ModelUnderTest {
-                label: format!("local: lmstudio {m} (vision)"),
-                kind: spike::ModelKind::Local,
-                provider: Arc::new(
-                    OpenAiCompatProvider::lm_studio(egress.clone()).with_vision(true),
-                ),
-                price: None,
-                model: m,
-            }),
-            Err(e) => eprintln!("agentic: local half not run: {e}"),
-        }
-    }
-    let audit = Arc::new(PrintAudit);
-    let rows = spike::files_to_models(&PathBuf::from(dir), &models, audit)
-        .await
-        .unwrap_or_else(|e| fail(&e));
-    let table = spike::c4_table(&rows);
-    println!("{table}");
-    match spike::c4_verdict(&rows) {
-        Ok(()) => println!("C4: PASS"),
-        Err(why) => println!("C4: FAIL\n{why}"),
-    }
-    if let Some(out) = args.value("--out") {
-        std::fs::write(&out, &table).unwrap_or_else(|e| fail(&e.to_string()));
-    }
-}
-
+/// Blocks are printed: the spike's commands have no project store.
 struct PrintAudit;
 impl am_domain::AuditSink for PrintAudit {
     fn record(&self, e: am_domain::AuditEvent) {
-        eprintln!("audit {} {} {}", e.action, e.target, e.outcome);
+        eprintln!("audit {} {} {} {:?}", e.action, e.target, e.outcome, e.args);
     }
 }
 
@@ -517,9 +481,24 @@ fn c7() {
 }
 
 async fn local_context() {
-    let egress = am_app::default_egress(am_app::keychain());
+    use am_domain::EgressClient;
+    let lmstudio = am_domain::net::reserved_local_account(am_domain::net::LOCAL_LMSTUDIO)
+        .map(|e| e.to_string())
+        .unwrap_or_default();
+    // The reserved local Account `local-lmstudio` only (AD-12, AD-31).
+    let egress = am_net::NetEgress::new(
+        Arc::new(am_app::egress::LocalAccountsOnly),
+        am_app::keychain(),
+        Arc::new(PrintAudit),
+    );
     let resp = egress
-        .send(HttpRequest::get("http://127.0.0.1:1234/api/v1/models"))
+        .send(HttpRequest {
+            caller: Some(Caller::Account {
+                account: am_domain::net::LOCAL_LMSTUDIO.into(),
+                seat: None,
+            }),
+            ..HttpRequest::get(format!("{lmstudio}/api/v1/models"))
+        })
         .await
         .unwrap_or_else(|e| fail(&format!("LM Studio not reachable: {e}")));
     let body = am_net::read_all(resp.body.as_ref())

@@ -1,6 +1,6 @@
 [package]
 name = "am-net"
-description = "EgressClient: the only HTTP client, with allow-lists and loopback exceptions (AD-12)."
+description = "EgressClient: the only HTTP client; every request is held to its caller's allow-list from one directory (AD-12, AD-48)."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

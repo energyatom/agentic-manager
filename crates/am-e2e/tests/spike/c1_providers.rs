@@ -172,7 +172,7 @@ async fn live_anthropic_c1() {
     }
     let provider = Arc::new(AnthropicProvider::new(
         live::egress(),
-        am_app::SPIKE_ANTHROPIC_ACCOUNT,
+        live::SPIKE_ANTHROPIC_ACCOUNT,
     ));
     let r = c1_probe(provider, &live::anthropic_model(), 2048)
         .await

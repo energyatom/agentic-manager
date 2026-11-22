@@ -803,3 +803,101 @@ fn a_reader_gives_the_args_of_the_audit_entries_of_one_action_and_target() {
         Vec::new()
     );
 }
+
+/// Story 2.2 review (medium): a `config.*` audit entry comes only with a
+/// config intent. A free `WriteCommand::Audit` naming a `config.` action is
+/// refused and writes nothing, and `config_note_args` gives only the notes
+/// a committed intent wrote right after its History entry: a note put into
+/// the log any other way (raw SQL here) is in `audit_args` but never in
+/// `config_note_args`, so it cannot confirm an Account.
+#[test]
+fn only_a_config_intent_writes_a_config_note() {
+    let (dir, store, history) = open();
+    let id = history
+        .begin_intent(
+            reviewer(),
+            created(
+                "models/accounts.yaml",
+                ACCOUNTS,
+                vec![account_added("cloud2")],
+            ),
+        )
+        .unwrap();
+    history.commit_entry(reviewer(), id).unwrap();
+    let before = audit(&store).len();
+
+    for action in ["config.widened", "config.edited", "config.created"] {
+        let forged = store.writer().exec(
+            reviewer(),
+            WriteCommand::Audit {
+                action: action.into(),
+                target: "forged".into(),
+                outcome: "ok".into(),
+                hash: None,
+                args: account_added("forged").args,
+            },
+        );
+        assert!(forged.is_err(), "{action}: refused");
+    }
+    assert_eq!(audit(&store).len(), before, "nothing written");
+
+    // A note written outside any intent, straight into the table.
+    {
+        let c = Connection::open(dir.path().join("state.db")).unwrap();
+        let args = serde_json::to_string(&account_added("forged").args).unwrap();
+        c.execute(
+            "INSERT INTO audit_log (at, actor, action, target, outcome, args, prev_hash, entry_hash)
+             VALUES ('2026-11-22T10:00:00.000Z', '{\"kind\":\"human\",\"person\":\"owner\",\"hat\":\"Reviewer\"}', 'config.widened', 'forged', 'ok', ?1, 'x', 'y')",
+            [args],
+        )
+        .unwrap();
+    }
+    let reader = store.reader().unwrap();
+    assert_eq!(
+        reader.audit_args("config.widened", "forged").unwrap().len(),
+        1
+    );
+    assert!(
+        reader
+            .config_note_args("config.widened", "forged")
+            .unwrap()
+            .is_empty(),
+        "a note not written by an intent"
+    );
+    let notes = reader.config_note_args("config.widened", "cloud2").unwrap();
+    assert_eq!(notes.len(), 1, "the intent's own note");
+    assert_eq!(notes[0].args, account_added("cloud2").args);
+    // Each note names who confirmed it and the file its History entry is of.
+    assert_eq!(notes[0].actor, reviewer());
+    assert_eq!(notes[0].file, "models/accounts.yaml");
+
+    // A note carried by another file's intent, or by a System actor's, is
+    // returned with that file and that actor (the confirmation refuses
+    // both).
+    let id = history
+        .begin_intent(
+            reviewer(),
+            created("company.yaml", ACCOUNTS, vec![account_added("cloud5")]),
+        )
+        .unwrap();
+    history.commit_entry(reviewer(), id).unwrap();
+    let id = history
+        .begin_intent(
+            sys(),
+            created(
+                "models/prices.yaml",
+                ACCOUNTS,
+                vec![account_added("cloud6")],
+            ),
+        )
+        .unwrap();
+    history.commit_entry(sys(), id).unwrap();
+    let reader = store.reader().unwrap();
+    let other_file = reader.config_note_args("config.widened", "cloud5").unwrap();
+    assert_eq!(other_file.len(), 1);
+    assert_eq!(other_file[0].file, "company.yaml");
+    assert_eq!(other_file[0].actor, reviewer());
+    let by_system = reader.config_note_args("config.widened", "cloud6").unwrap();
+    assert_eq!(by_system.len(), 1);
+    assert_eq!(by_system[0].actor, sys());
+}

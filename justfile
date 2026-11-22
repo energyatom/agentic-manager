@@ -1,6 +1,7 @@
 # Agentic Manager task runner. `just check` is the gate: fmt, clippy
 # -D warnings, nextest and the offline repo checks (AD-4 dependency direction,
-# every crate forbids unsafe, AD-23 vocabulary denylist), am-store's doctests
+# every crate forbids unsafe, AD-23 vocabulary denylist, AD-32 runtime paths,
+# AD-12 fixed hosts and the egress seam guard), am-store's doctests
 # (the `compile_fail` proof that a write needs an Actor, story 1.6) and `agentic validate`
 # over the valid fixture projects (story 1.4) and templates/ (story 1.5).
 # `just supply-chain` runs the licence, bans and sources policy (cargo-deny)
@@ -12,7 +13,7 @@ export CARGO_TARGET_DIR := env_var_or_default("CARGO_TARGET_DIR", env_var("HOME"
 default: check
 
 # The story gate: format, lints, every offline test and the repo checks.
-check: fmt-check clippy test doctest check-deps check-forbid denylist runtime-paths validate
+check: fmt-check clippy test doctest check-deps check-forbid denylist runtime-paths fixed-hosts seam-guard validate
 
 fmt-check:
     cargo fmt --all -- --check
@@ -48,6 +49,16 @@ denylist:
 # path (`.agentic` at its start or after `/`) outside am_domain::RuntimeLayout.
 runtime-paths:
     cargo xtask runtime-paths
+
+# AD-12 (story 2.2): every fixed host in shipped source (crates/*/src, tests
+# left out) is on the scan's one named list, with its reason: no telemetry.
+fixed-hosts:
+    cargo xtask fixed-hosts
+
+# Story 2.2, decision 7: shipped code never names am-net's test-only
+# constructor NetEgress::with_seams.
+seam-guard:
+    cargo xtask seam-guard
 
 # AD-16, AD-33: `agentic validate --template` on every valid fixture project
 # and every shipped template (the Blank department, the role templates and

@@ -77,7 +77,7 @@ impl RmcpClient {
                 url.to_string(),
             );
         let transport =
-            StreamableHttpClientTransport::with_client(EgressHttpClient::new(egress), config);
+            StreamableHttpClientTransport::with_client(EgressHttpClient::new(egress, id), config);
         let service = ().serve(transport).await.map_err(|e| McpError::Connect(e.to_string()))?;
         Ok(Self::from_service(id.to_string(), service))
     }

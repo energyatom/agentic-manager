@@ -53,8 +53,8 @@ pub use llm::{
 };
 pub use mcp::{McpClient, McpError, McpToolInfo};
 pub use net::{
-    AuthRef, AuthScheme, BodyChunks, Caller, EgressClient, EgressError, HttpMethod, HttpRequest,
-    HttpResponse,
+    AuthRef, AuthScheme, BodyChunks, Caller, EgressClient, EgressDirectory, EgressError, Endpoint,
+    HttpMethod, HttpRequest, HttpResponse, reserved_local_account,
 };
 pub use runtime::{
     IdentityError, MacId, ProjectId, ProjectIdentity, RootIdentity, RuntimeBase, RuntimeLayout,

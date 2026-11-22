@@ -330,7 +330,39 @@ fn serve_on_a_new_project_gives_it_an_id_and_a_runtime_folder_outside_it() {
     assert!(MacId::parse(&m.mac_id).is_some());
     assert_eq!(m.pid, serve.pid());
 
+    // Story 2.2 review: the bound port is recorded, owner-only, in the
+    // runtime folder (every egress client of the project refuses it), and
+    // removed at a clean stop.
+    let serving = serve
+        .seen
+        .iter()
+        .find_map(|l| l.split("serving on http://127.0.0.1:").nth(1))
+        .expect("the serving line")
+        .trim()
+        .to_string();
+    assert_eq!(
+        std::fs::read_to_string(layout.serve_port()).unwrap().trim(),
+        serving
+    );
+    assert_eq!(mode(&layout.serve_port()), 0o600);
+
+    let running = am_domain::runtime::serving_dir(&e.app_data()).join(serve.pid().to_string());
+    assert_eq!(
+        std::fs::read_to_string(&running).unwrap().trim(),
+        serving,
+        "the user-level record of running servers"
+    );
+    assert_eq!(mode(&running), 0o600);
+
     serve.stop(&root);
+    assert!(
+        !layout.serve_port().exists(),
+        "the port file is gone after a clean stop"
+    );
+    assert!(
+        !running.exists(),
+        "the user-level record is gone after a clean stop"
+    );
     assert_eq!(
         names(&root),
         files_before,
@@ -644,9 +676,27 @@ fn serve_without_a_project_is_unchanged() {
     BufReader::new(child.stdout.take().unwrap())
         .read_line(&mut line)
         .unwrap();
+    // Story 2.2 review: even with no project, the bound port is recorded
+    // in the user-level folder of running servers, under the process id.
+    let port = line
+        .split("serving on http://127.0.0.1:")
+        .nth(1)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let recorded = am_domain::runtime::serving_dir(&e.app_data()).join(child.id().to_string());
+    let seen = std::fs::read_to_string(&recorded);
+    let recorded_mode = mode(&recorded);
     let _ = child.kill();
     let _ = child.wait();
     assert!(line.contains("serving on http://127.0.0.1:"), "{line}");
+    assert_eq!(
+        seen.unwrap_or_default().trim(),
+        port,
+        "{}",
+        recorded.display()
+    );
+    assert_eq!(recorded_mode, 0o600);
     assert!(names(&dir).is_empty());
     assert!(!e.base().dir().exists());
 }

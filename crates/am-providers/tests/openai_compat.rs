@@ -171,7 +171,14 @@ fn assert_one_request(egress: &FakeEgress, base_url: &str) {
         "the key is referenced, never carried: {:?}",
         req.headers
     );
-    assert_eq!(req.caller.account.as_deref(), Some("acct"));
+    // Story 2.2: the request names its caller, the Account (AD-12).
+    assert_eq!(
+        req.caller,
+        Some(am_domain::net::Caller::Account {
+            account: "acct".into(),
+            seat: None
+        })
+    );
     let body: serde_json::Value = serde_json::from_slice(&req.body).expect("a JSON body");
     assert_eq!(body["stream"], true, "{body}");
     assert_eq!(body["stream_options"]["include_usage"], true, "{body}");

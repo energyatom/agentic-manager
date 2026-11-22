@@ -1,15 +1,20 @@
 //! Repo automation (story 1.2): `check-deps` (AD-4 dependency direction),
 //! `denylist` (AD-23 department vocabulary) and `check-forbid` (no `unsafe`);
 //! story 1.13 adds `runtime-paths` (AD-32: runtime paths named only by
-//! `am_domain::RuntimeLayout`).
+//! `am_domain::RuntimeLayout`); story 2.2 adds `fixed-hosts` (AD-12: every
+//! fixed host of the shipped source is on one named list) and `seam-guard`
+//! (shipped code never names am-net's test-only constructor).
 //! Later stories add `gen-types` and `bundle-services`. All three checks are
 //! offline; `just check` runs them.
 #![forbid(unsafe_code)]
 
 mod denylist;
 mod deps;
+mod fixed_hosts;
 mod forbid;
 mod runtime_paths;
+mod seam_guard;
+mod shipped;
 mod walk;
 
 use std::path::{Path, PathBuf};
@@ -19,7 +24,9 @@ const USAGE: &str = "usage: cargo xtask <task> [options]
   check-deps   [--metadata <cargo-metadata.json>]   AD-4 dependency matrix
   denylist     [--root <dir>] [--list <file>]       AD-23 vocabulary scan
   check-forbid [--root <dir>]                       every crate forbids unsafe
-  runtime-paths [--root <dir>]                      AD-32 runtime paths only in RuntimeLayout";
+  runtime-paths [--root <dir>]                      AD-32 runtime paths only in RuntimeLayout
+  fixed-hosts  [--root <dir>]                       AD-12 fixed hosts only from the named list
+  seam-guard   [--root <dir>]                       NetEgress::with_seams only in tests";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -46,6 +53,8 @@ fn main() -> ExitCode {
         }
         "check-forbid" => forbid::run(&opts.root.clone().unwrap_or_else(repo_root)),
         "runtime-paths" => runtime_paths::run(&opts.root.clone().unwrap_or_else(repo_root)),
+        "fixed-hosts" => fixed_hosts::run(&opts.root.clone().unwrap_or_else(repo_root)),
+        "seam-guard" => seam_guard::run(&opts.root.clone().unwrap_or_else(repo_root)),
         other => {
             eprintln!("xtask: unknown task `{other}`\n{USAGE}");
             return ExitCode::from(2);

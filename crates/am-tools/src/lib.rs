@@ -194,6 +194,7 @@ impl FolderAccess {
             target: format!("{root}/{rel}"),
             outcome: outcome.into(),
             hash,
+            args: Default::default(),
         });
     }
 
