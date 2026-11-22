@@ -5,6 +5,15 @@
 //! `--template` (what `just validate` runs over templates/ and fixtures/)
 //! checks reference files against the folder's `runtime-seed/` and refuses a
 //! `project_id`; on a project, validate never writes an id.
+//!
+//! Story 2.12 (AD-17): on a project, `agentic validate` reads this Mac's user
+//! Accounts list from the app data dir under HOME, and tests never read the
+//! real one. So the fixture rows here run in `--template` mode (Account
+//! references checked for form only), the fixtures' Account findings moved
+//! with their Accounts to `fixtures/accounts/` (crates/am-config/tests/
+//! user_accounts.rs), and the rows that need a user list run the real
+//! binary with HOME in a temporary folder (crates/am-app/tests/
+//! user_accounts.rs).
 #![forbid(unsafe_code)]
 
 use std::path::{Path, PathBuf};
@@ -31,7 +40,7 @@ fn validate(args: &[&str]) -> (i32, String, String) {
 #[test]
 fn valid_fixture_exits_zero_with_no_errors() {
     let path = fixture("valid");
-    let (code, out, err) = validate(&[path.to_str().unwrap()]);
+    let (code, out, err) = validate(&["--template", path.to_str().unwrap()]);
     assert_eq!(code, 0, "{out}{err}");
     assert!(!out.contains(": warning:"), "{out}");
     assert!(out.contains("0 errors"), "{out}");
@@ -40,13 +49,12 @@ fn valid_fixture_exits_zero_with_no_errors() {
 #[test]
 fn broken_fixture_prints_every_problem_with_a_fix_and_exits_one() {
     let path = fixture("broken");
-    let (code, out, _) = validate(&[path.to_str().unwrap()]);
+    let (code, out, _) = validate(&["--template", path.to_str().unwrap()]);
     assert_eq!(code, 1, "{out}");
     let lines: Vec<&str> = out.lines().collect();
     let expect = [
         "workflows/ghost.yaml:6: unknown seat 'ghost-seat'",
         "workflows/nightly.yaml:6: invalid cron",
-        "models/accounts.yaml:6: secret-looking value",
         "tables/bare.yaml:1: missing schema_version",
         "seats/teleporter.md:7: unknown tool 'teleport'",
         "dashboards/overview.yaml:4: warning: comments are not kept when the app saves this file",
@@ -98,13 +106,12 @@ fn has_finding_with_fix(out: &str, want: &str) {
 #[test]
 fn broken_anatomy_prints_every_error_with_a_fix_and_exits_one() {
     let path = fixture("broken-anatomy");
-    let (code, out, _) = validate(&[path.to_str().unwrap()]);
+    let (code, out, _) = validate(&["--template", path.to_str().unwrap()]);
     assert_eq!(code, 1, "{out}");
     for want in [
         "seats/refused.md:8: folder path '~/Library/x' is not allowed",
         "seats/refused.md:10: folder path '.agentic/x' is not allowed",
         "seats/reader.md:7: tool 'read_url' needs the browse capability",
-        "seats/searcher.md:9: account 'crawly' is a crawl-service Account",
         "seats/messy.md:6: backstory",
         "seats/messy.md:8: unknown skill 'ghost'",
         "seats/messy.md:11: link 'ftp://example.org/files'",
@@ -115,7 +122,9 @@ fn broken_anatomy_prints_every_error_with_a_fix_and_exits_one() {
     ] {
         has_finding_with_fix(&out, want);
     }
-    assert!(out.contains("11 errors"), "{out}");
+    // The wrong-kind Account (seats/searcher.md:9) needs the user list:
+    // crates/am-app/tests/user_accounts.rs.
+    assert!(out.contains("10 errors"), "{out}");
 }
 
 #[test]
@@ -136,7 +145,7 @@ fn anatomy_fixture_exits_zero_with_its_warnings() {
 #[test]
 fn sources_ok_exits_zero_with_two_warnings() {
     let path = fixture("sources-ok");
-    let (code, out, _) = validate(&[path.to_str().unwrap()]);
+    let (code, out, _) = validate(&["--template", path.to_str().unwrap()]);
     assert_eq!(code, 0, "{out}");
     has_finding_with_fix(&out, "sources/site.yaml:5: warning: ");
     has_finding_with_fix(&out, "sources/site.yaml:8: warning: ");
@@ -146,10 +155,9 @@ fn sources_ok_exits_zero_with_two_warnings() {
 #[test]
 fn sources_broken_prints_each_error_and_exits_one() {
     let path = fixture("sources-broken");
-    let (code, out, _) = validate(&[path.to_str().unwrap()]);
+    let (code, out, _) = validate(&["--template", path.to_str().unwrap()]);
     assert_eq!(code, 1, "{out}");
     for want in [
-        "models/accounts.yaml:5: 'base_url' must be an https URL",
         "sources/crawl.yaml:6: ",
         "sources/crawl.yaml:8: ",
         "sources/crawl.yaml:10: unknown table 'ghost'",
@@ -157,7 +165,7 @@ fn sources_broken_prints_each_error_and_exits_one() {
     ] {
         has_finding_with_fix(&out, want);
     }
-    assert!(out.contains("5 errors"), "{out}");
+    assert!(out.contains("4 errors"), "{out}");
 }
 
 // Story 1.5: every shipped template validates as it is.
@@ -275,24 +283,26 @@ fn template_mode_refuses_a_project_id_with_file_line_and_fix() {
         "company.yaml:2: a template or fixture carries no project_id",
     );
     assert!(out.contains("remove the `project_id:` line"), "{out}");
-    // As a project the same folder is fine, and validate writes nothing.
-    let before = std::fs::read(&company).unwrap();
-    let (code, out, _) = validate(&[dir.path().to_str().unwrap()]);
-    assert_eq!(code, 0, "{out}");
-    assert_eq!(std::fs::read(&company).unwrap(), before);
+    // As a project the same folder is fine, and validate writes nothing:
+    // story 2.12 moved that half to crates/am-app/tests/user_accounts.rs
+    // (project mode reads this Mac's user list under HOME).
 }
 
+// Story 2.12: `a_project_without_a_runtime_folder_skips_the_reference_file_
+// warning_and_gets_no_id` moved to crates/am-app/tests/user_accounts.rs: as
+// a project validate reads this Mac's user list, which needs a HOME in a
+// temporary folder.
+
+/// Story 2.12 (AD-17): the one old-format project fails `--template` with
+/// an error at its old Accounts file, line 1, with the migrate fix.
 #[test]
-fn a_project_without_a_runtime_folder_skips_the_reference_file_warning_and_gets_no_id() {
-    let dir = tempfile::tempdir().unwrap();
-    copy_dir(&fixture("anatomy"), dir.path());
-    let company = dir.path().join("company.yaml");
-    let before = std::fs::read(&company).unwrap();
-    let (code, out, _) = validate(&[dir.path().to_str().unwrap()]);
-    assert_eq!(code, 0, "{out}");
-    assert!(!out.contains("absent.md"), "{out}");
-    assert!(out.contains("0 errors, 2 warnings"), "{out}");
-    assert_eq!(std::fs::read(&company).unwrap(), before, "no id is written");
+fn the_legacy_accounts_fixture_fails_with_the_migrate_fix() {
+    let path = fixture("legacy-accounts");
+    let (code, out, _) = validate(&["--template", path.to_str().unwrap()]);
+    assert_eq!(code, 1, "{out}");
+    has_finding_with_fix(&out, "models/accounts.yaml:1: ");
+    assert!(out.contains("agentic accounts migrate --project"), "{out}");
+    assert!(out.contains("1 error"), "{out}");
 }
 
 #[test]
@@ -331,7 +341,7 @@ fn warnings_alone_exit_zero() {
         format!("# note\n{company}"),
     )
     .unwrap();
-    let (code, out, _) = validate(&[dir.path().to_str().unwrap()]);
+    let (code, out, _) = validate(&["--template", dir.path().to_str().unwrap()]);
     assert_eq!(code, 0, "{out}");
     assert!(
         out.contains("company.yaml:1: warning: comments are not kept"),

@@ -31,6 +31,20 @@ fn write(root: &Path, rel: &str, text: &str) {
     std::fs::write(path, text).unwrap();
 }
 
+/// The findings with the valid fixture's user list passed
+/// (`fixtures/accounts/valid.yaml`, story 2.12).
+fn findings_with_valid_accounts(root: &Path) -> Vec<Finding> {
+    let list = am_config::user_accounts::load(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/accounts/valid.yaml"),
+    );
+    assert!(list.findings.is_empty(), "{:#?}", list.findings);
+    let opts = am_config::LoadOptions {
+        user_accounts: Some(list.accounts),
+        ..am_config::LoadOptions::default()
+    };
+    am_config::load_in(root, opts).unwrap().findings
+}
+
 fn findings(root: &Path) -> Vec<Finding> {
     load(root).expect("the project folder exists").findings
 }
@@ -59,7 +73,6 @@ fn valid_project_has_no_findings_and_every_entity() {
     let snap = loaded.snapshot.expect("a valid project gives a snapshot");
     assert_eq!(snap.company().name, "Example Project");
     assert_eq!(snap.company().teams.len(), 2);
-    assert_eq!(snap.accounts().len(), 1);
     assert_eq!(snap.prices().models.len(), 1);
     assert_eq!(snap.capabilities().models.len(), 1);
     assert_eq!(snap.tools().mcp_servers.len(), 1);
@@ -154,21 +167,6 @@ fn a_six_field_cron_is_refused() {
     );
     let found = findings(copy.path());
     at(&found, "workflows/digest.yaml", 7, "invalid cron");
-}
-
-// Row: secret-looking value.
-
-#[test]
-fn secret_looking_value_in_the_broken_fixture() {
-    let found = findings(&fixture("broken"));
-    let f = at(&found, "models/accounts.yaml", 6, "secret-looking value");
-    assert_eq!(f.severity, Severity::Error);
-    assert!(f.fix.contains("Keychain"), "{}", f.fix);
-    assert!(f.fix.contains("Account"), "{}", f.fix);
-    assert!(
-        !f.message.contains("abcdef0123456789"),
-        "a finding never echoes the value"
-    );
 }
 
 #[test]
@@ -366,7 +364,9 @@ fn the_broken_fixture_reports_everything_sorted() {
     let loaded = load(&fixture("broken")).unwrap();
     assert!(loaded.snapshot.is_none(), "errors give no snapshot");
     let found = loaded.findings;
-    assert!(errors(&found).len() >= 5, "{found:#?}");
+    // Story 2.12: the fixture's old Accounts file left (its findings moved
+    // to `fixtures/accounts/broken.yaml`, crates/am-config/tests/user_accounts.rs).
+    assert!(errors(&found).len() >= 4, "{found:#?}");
     for (file, line, message, severity) in [
         (
             "workflows/ghost.yaml",
@@ -375,12 +375,6 @@ fn the_broken_fixture_reports_everything_sorted() {
             Severity::Error,
         ),
         ("workflows/nightly.yaml", 6, "invalid cron", Severity::Error),
-        (
-            "models/accounts.yaml",
-            6,
-            "secret-looking value",
-            Severity::Error,
-        ),
         (
             "tables/bare.yaml",
             1,
@@ -466,9 +460,13 @@ fn references_are_checked_across_files() {
         "workflows/digest.yaml",
         &wf.replace("output_schema: summary", "output_schema: absent"),
     );
-    let found = findings(copy.path());
+    // Story 2.12 (AD-17): an Account id is resolved against this Mac's user
+    // list; one the list lacks is a warning with the add fix.
+    let found = findings_with_valid_accounts(copy.path());
     at(&found, "seats/beta.md", 5, "unknown team 'nowhere'");
-    at(&found, "seats/beta.md", 11, "unknown account 'missing'");
+    let f = at(&found, "seats/beta.md", 11, "'missing'");
+    assert_eq!(f.severity, Severity::Warning, "{f:?}");
+    assert!(f.fix.contains("agentic accounts add missing"), "{f:?}");
     at(
         &found,
         "workflows/digest.yaml",
@@ -535,13 +533,8 @@ fn edit(root: &Path, rel: &str, from: &str, to: &str) {
 
 #[test]
 fn an_empty_required_value_is_reported_like_a_missing_one() {
+    // Story 2.12: the Accounts half moved to user_accounts.rs (the user file).
     let copy = valid_copy();
-    edit(
-        copy.path(),
-        "models/accounts.yaml",
-        "provider: anthropic",
-        "provider:",
-    );
     edit(
         copy.path(),
         "tables/items.yaml",
@@ -549,13 +542,7 @@ fn an_empty_required_value_is_reported_like_a_missing_one() {
         "  - id: title\n    type:",
     );
     let found = findings(copy.path());
-    at(&found, "models/accounts.yaml", 3, "missing 'provider'");
     at(&found, "tables/items.yaml", 9, "missing 'type'");
-    // The account is still declared, so the seat that names it is fine.
-    assert!(
-        found.iter().all(|f| f.file != "seats/beta.md"),
-        "{found:#?}"
-    );
 }
 
 #[test]
@@ -608,118 +595,6 @@ fn a_secret_in_a_block_scalar_is_reported_at_its_own_line() {
         .map(|f| f.line)
         .collect();
     assert_eq!(secret_lines, vec![23], "{found:#?}");
-}
-
-/// The general `base_url` rule (every provider but `openai-compatible`,
-/// which has its own stricter rule since story 2.3): https, or plain http
-/// only to this Mac, never with a user name or password.
-#[test]
-fn plain_http_is_only_for_this_mac_and_never_with_userinfo() {
-    let copy = valid_copy();
-    let text = std::fs::read_to_string(copy.path().join("models/accounts.yaml")).unwrap();
-    write(
-        copy.path(),
-        "models/accounts.yaml",
-        &format!(
-            "{text}  - id: tricky\n    provider: firecrawl\n    base_url: http://127.0.0.1:80@remote.example/\n\
-             \x20 - id: lan\n    provider: firecrawl\n    base_url: http://192.168.1.5:8080/v1\n\
-             \x20 - id: creds\n    provider: firecrawl\n    base_url: https://user:pw@example.org/v1\n\
-             \x20 - id: box\n    provider: firecrawl\n    base_url: http://localhost:1234/v1\n\
-             \x20 - id: loop\n    provider: firecrawl\n    base_url: http://127.0.0.1:1234/v1\n"
-        ),
-    );
-    let found = findings(copy.path());
-    for line in [9, 12, 15] {
-        let f = at(&found, "models/accounts.yaml", line, "https URL");
-        assert!(
-            f.message.contains("localhost") && f.fix.contains("localhost"),
-            "{f:?}"
-        );
-    }
-    assert_eq!(errors(&found).len(), 3, "{found:#?}");
-}
-
-/// Story 2.3 (review): one rule for an `openai-compatible` Account's
-/// `base_url`, the same one `agentic accounts add` applies. Only
-/// `https://<DNS name>[/path]` on port 443 and
-/// `http://127.0.0.1:<port>[/path]` are accepted; `localhost`, an IP
-/// literal, another https port, https to this Mac, a loopback URL without a
-/// port, plain http elsewhere, a user name or password and a query are each
-/// an error at the `base_url` line, whose fix gives the two forms (and no
-/// longer suggests `localhost`). A password in the URL is never repeated.
-#[test]
-fn a_compatible_base_url_takes_only_the_two_accepted_forms() {
-    let refused = [
-        "http://localhost:1234/v1",
-        "https://10.0.0.5/v1",
-        "https://relay.example:8443/v1",
-        "http://127.0.0.1/v1",
-        "https://127.0.0.1:8080/v1",
-        "http://192.168.1.5:8080/v1",
-        "https://someone:hunter2canary@example.org/v1",
-        "https://relay.example/v1?tier=a",
-        "http://example.org/v1",
-        "https://2130706433/v1",
-    ];
-    let accepted = ["https://relay.example/api/v1", "http://127.0.0.1:1234/v1"];
-    let copy = valid_copy();
-    let mut text = std::fs::read_to_string(copy.path().join("models/accounts.yaml")).unwrap();
-    let first = text.lines().count() as u32 + 3;
-    for (n, url) in refused.iter().chain(&accepted).enumerate() {
-        text.push_str(&format!(
-            "  - id: box{n}\n    provider: openai-compatible\n    base_url: {url}\n"
-        ));
-    }
-    write(copy.path(), "models/accounts.yaml", &text);
-
-    let found = findings(copy.path());
-    for (n, url) in refused.iter().enumerate() {
-        let f = at(
-            &found,
-            "models/accounts.yaml",
-            first + 3 * n as u32,
-            "base_url",
-        );
-        assert_eq!(f.severity, Severity::Error, "{url}: {f:?}");
-        assert!(
-            f.fix.contains("https://<host>") && f.fix.contains("http://127.0.0.1:<port>"),
-            "{url}: the fix gives the two forms: {f:?}"
-        );
-        assert!(
-            !f.fix.contains("localhost"),
-            "{url}: the fix does not suggest localhost: {f:?}"
-        );
-        assert!(
-            !format!("{f:?}").contains("hunter2canary"),
-            "{url}: a password is never repeated: {f:?}"
-        );
-    }
-    assert_eq!(
-        errors(&found).len(),
-        refused.len(),
-        "the two accepted forms are no error: {found:#?}"
-    );
-}
-
-/// A compatible Account with no `base_url` is told the two forms too.
-#[test]
-fn a_compatible_account_without_a_base_url_is_told_the_two_forms() {
-    let copy = valid_copy();
-    let text = std::fs::read_to_string(copy.path().join("models/accounts.yaml")).unwrap();
-    let line = text.lines().count() as u32 + 1;
-    write(
-        copy.path(),
-        "models/accounts.yaml",
-        &format!("{text}  - id: box\n    provider: openai-compatible\n"),
-    );
-    let found = findings(copy.path());
-    let f = at(&found, "models/accounts.yaml", line, "needs 'base_url'");
-    assert!(
-        f.fix.contains("https://<host>") && f.fix.contains("http://127.0.0.1:<port>"),
-        "{f:?}"
-    );
-    assert!(!f.fix.contains("localhost"), "{f:?}");
-    assert_eq!(errors(&found).len(), 1, "{found:#?}");
 }
 
 #[test]

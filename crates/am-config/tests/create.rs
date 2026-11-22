@@ -10,6 +10,12 @@
 //! `InMemoryConfigHistory`; the store's side is in
 //! `crates/am-store/tests/config_history.rs`. Written before `create`
 //! exists.
+//!
+//! Story 2.12 (AD-17): the Accounts file is user-level, so these tests make
+//! the user Accounts file (`accounts.yaml`) in a temporary app data dir
+//! through `ConfigWriter::for_user_accounts`; the two rows that need a
+//! project folder (a missing parent folder, a linked parent) create a
+//! project's `models/prices.yaml` instead. Rewritten before the retarget.
 #![forbid(unsafe_code)]
 
 mod common;
@@ -19,13 +25,18 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use am_config::{ConfigCreate, ConfigWriter, FailPoint, WriteError, canonical_bytes, load};
+use am_config::{
+    ConfigCreate, ConfigWriter, FailPoint, USER_ACCOUNTS_FILE, WriteError, canonical_bytes, load,
+    user_accounts,
+};
 use am_domain::{Actor, AuditNote, ConfigHistory, HistoryKind};
 use am_testkit::InMemoryConfigHistory;
 use common::copy_of;
 use sha2::{Digest, Sha256};
 
-const FILE: &str = "models/accounts.yaml";
+const FILE: &str = USER_ACCOUNTS_FILE;
+/// A project file in a folder, for the rows about folders.
+const PRICES: &str = "models/prices.yaml";
 const ACCOUNTS: &str =
     "schema_version: 2\naccounts:\n  - id: cloud\n    provider: anthropic\n    secret_ref: cloud\n";
 
@@ -40,7 +51,15 @@ fn sha(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 
+/// The writer of the user Accounts file in the app data dir `root`.
 fn writer(root: &Path) -> (ConfigWriter, Arc<InMemoryConfigHistory>) {
+    let history = Arc::new(InMemoryConfigHistory::default());
+    let w = ConfigWriter::for_user_accounts(root, history.clone()).unwrap();
+    (w, history)
+}
+
+/// The writer of the project at `root`.
+fn project_writer(root: &Path) -> (ConfigWriter, Arc<InMemoryConfigHistory>) {
     let history = Arc::new(InMemoryConfigHistory::default());
     let w = ConfigWriter::open(root, history.clone()).unwrap();
     (w, history)
@@ -54,11 +73,15 @@ fn create(file: &str, bytes: &[u8]) -> ConfigCreate {
     }
 }
 
-/// The valid fixture without `models/accounts.yaml` (its seat `beta` names
-/// the Account `cloud`, so the project has one error until it is created).
+/// An app data dir with no Accounts file yet (the first add on a Mac).
 fn without_accounts() -> tempfile::TempDir {
-    let dir = copy_of("valid");
-    std::fs::remove_file(dir.path().join(FILE)).unwrap();
+    tempfile::tempdir().unwrap()
+}
+
+/// An app data dir holding an Accounts file.
+fn with_accounts() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join(FILE), ACCOUNTS).unwrap();
     dir
 }
 
@@ -112,12 +135,10 @@ fn create_writes_a_missing_file_as_a_create_entry() {
     assert_eq!(history.entries(None).unwrap(), vec![entry.clone()]);
     assert!(history.pending_intents().unwrap().is_empty());
     assert!(w.is_own_write(FILE, &entry.after_sha256));
-    assert!(leftovers(&root.join("models")).is_empty(), "no temp file");
-    let loaded = load(root).unwrap();
-    assert_eq!(loaded.error_count(), 0, "{:#?}", loaded.findings);
-    let snap = loaded.snapshot.unwrap();
-    assert_eq!(snap.accounts().len(), 1);
-    assert_eq!(snap.accounts()[0].id, "cloud");
+    assert!(leftovers(root).is_empty(), "no temp file");
+    let loaded = user_accounts::load(&root.join(FILE));
+    assert!(loaded.findings.is_empty(), "{:#?}", loaded.findings);
+    assert_eq!(loaded.accounts.ids(), ["cloud"]);
 }
 
 /// Missing parent folders inside the project are created.
@@ -125,23 +146,25 @@ fn create_writes_a_missing_file_as_a_create_entry() {
 fn create_makes_missing_parent_folders_inside_the_project() {
     let dir = copy_of("valid");
     let root = dir.path();
+    let prices = std::fs::read(root.join(PRICES)).unwrap();
     std::fs::remove_dir_all(root.join("models")).unwrap();
-    let bytes = canonical_bytes(FILE, ACCOUNTS.as_bytes()).unwrap();
-    let (w, history) = writer(root);
+    let bytes = canonical_bytes(PRICES, &prices).unwrap();
+    let (w, history) = project_writer(root);
 
-    let entry = w.create(owner(), create(FILE, &bytes)).unwrap();
+    let entry = w.create(owner(), create(PRICES, &bytes)).unwrap();
 
     assert!(root.join("models").is_dir());
-    assert_eq!(std::fs::read(root.join(FILE)).unwrap(), bytes);
+    assert_eq!(std::fs::read(root.join(PRICES)).unwrap(), bytes);
     assert_eq!(entry.kind, HistoryKind::Create);
     assert_eq!(history.entries(None).unwrap().len(), 1);
-    assert!(leftovers(&root.join("models")).is_empty());
+    assert!(leftovers(root).is_empty());
+    assert_eq!(load(root).unwrap().error_count(), 0);
 }
 
 /// A file that already exists is never replaced by a create.
 #[test]
 fn create_refuses_a_file_that_already_exists() {
-    let dir = copy_of("valid");
+    let dir = with_accounts();
     let root = dir.path();
     let before = std::fs::read(root.join(FILE)).unwrap();
     let (w, history) = writer(root);
@@ -153,7 +176,7 @@ fn create_refuses_a_file_that_already_exists() {
     assert!(err.to_string().contains("already exists"), "{err}");
     assert_eq!(std::fs::read(root.join(FILE)).unwrap(), before);
     assert_nothing_recorded(&history);
-    assert!(leftovers(&root.join("models")).is_empty());
+    assert!(leftovers(root).is_empty());
 }
 
 /// A `ConfigHistory` that writes `bytes` at `file` right after the intent
@@ -226,7 +249,7 @@ fn create_refuses_a_file_that_appears_while_it_runs_and_keeps_it() {
         bytes: outside.clone(),
         armed: AtomicBool::new(true),
     });
-    let w = ConfigWriter::open(root, history).unwrap();
+    let w = ConfigWriter::for_user_accounts(root, history).unwrap();
 
     let err = w
         .create(owner(), create(FILE, ACCOUNTS.as_bytes()))
@@ -239,7 +262,7 @@ fn create_refuses_a_file_that_appears_while_it_runs_and_keeps_it() {
         "the file that appeared stays"
     );
     assert_nothing_recorded(&inner);
-    assert!(leftovers(&root.join("models")).is_empty(), "no temp file");
+    assert!(leftovers(root).is_empty(), "no temp file");
 }
 
 /// A volume that refuses hard links refuses the create in words, writing
@@ -259,7 +282,7 @@ fn create_on_a_volume_without_hard_links_is_refused_in_words() {
     assert!(words.contains("hard link"), "{words}");
     assert!(!root.join(FILE).exists());
     assert_nothing_recorded(&history);
-    assert!(leftovers(&root.join("models")).is_empty());
+    assert!(leftovers(root).is_empty());
 }
 
 /// Undo of a create is refused in words: the writer never deletes a file.
@@ -280,7 +303,7 @@ fn undo_of_a_create_is_refused_in_words_and_keeps_the_file() {
     assert_eq!(history.entries(None).unwrap(), vec![entry]);
 }
 
-/// A create names a config file inside the project by its plain path; a
+/// A create names the one file the writer writes by its plain name; a
 /// parent that is a link is not followed, so nothing is written outside.
 #[test]
 fn create_refuses_bad_paths_and_a_linked_parent() {
@@ -292,6 +315,7 @@ fn create_refuses_bad_paths_and_a_linked_parent() {
         "../accounts.yaml",
         "models/../../accounts.yaml",
         "notes/accounts.yaml",
+        "models/accounts.yaml",
         "",
     ] {
         let err = w
@@ -303,12 +327,14 @@ fn create_refuses_bad_paths_and_a_linked_parent() {
 
     #[cfg(unix)]
     {
+        let project = copy_of("valid");
+        let root = project.path();
+        let prices = std::fs::read(root.join(PRICES)).unwrap();
+        let (w, history) = project_writer(root);
         let outside = tempfile::tempdir().unwrap();
         std::fs::remove_dir_all(root.join("models")).unwrap();
         std::os::unix::fs::symlink(outside.path(), root.join("models")).unwrap();
-        let err = w
-            .create(owner(), create(FILE, ACCOUNTS.as_bytes()))
-            .unwrap_err();
+        let err = w.create(owner(), create(PRICES, &prices)).unwrap_err();
         assert!(err.to_string().contains("link"), "{err}");
         assert!(
             std::fs::read_dir(outside.path()).unwrap().next().is_none(),
@@ -318,8 +344,8 @@ fn create_refuses_bad_paths_and_a_linked_parent() {
     }
 }
 
-/// As for an edit, a create that adds an error to the project is refused
-/// with the finding, and nothing is written.
+/// As for an edit, a create whose file has an error is refused with the
+/// finding, and nothing is written.
 #[test]
 fn create_refuses_a_result_that_adds_an_error() {
     let dir = without_accounts();
@@ -401,7 +427,7 @@ fn create_interrupted_after_placing_is_completed_by_reconcile() {
     assert_eq!(report.completed.len(), 1);
     assert_eq!(report.completed[0].kind, HistoryKind::Create);
     assert!(history.pending_intents().unwrap().is_empty());
-    assert!(leftovers(&root.join("models")).is_empty());
+    assert!(leftovers(root).is_empty());
 }
 
 /// A crash before the file was placed leaves no file; `reconcile` drops the
@@ -421,11 +447,11 @@ fn create_interrupted_before_placing_leaves_no_file() {
     assert!(!root.join(FILE).exists());
     drop(w);
     // A writer opened afterwards (the next start) removes the temp file.
-    let w2 = ConfigWriter::open(root, history.clone()).unwrap();
+    let w2 = ConfigWriter::for_user_accounts(root, history.clone()).unwrap();
     let report = w2.reconcile(owner()).unwrap();
     assert!(report.completed.is_empty());
     assert_eq!(report.dropped.len(), 1);
     assert!(history.pending_intents().unwrap().is_empty());
     assert!(!root.join(FILE).exists());
-    assert!(leftovers(&root.join("models")).is_empty());
+    assert!(leftovers(root).is_empty());
 }

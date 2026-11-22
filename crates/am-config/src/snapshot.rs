@@ -13,7 +13,6 @@ use crate::entities::*;
 pub struct ConfigSnapshot {
     pub(crate) hash: String,
     pub(crate) company: Company,
-    pub(crate) accounts: Vec<Account>,
     pub(crate) prices: Prices,
     pub(crate) capabilities: Capabilities,
     pub(crate) tools: ToolsConfig,
@@ -34,9 +33,6 @@ impl ConfigSnapshot {
     }
     pub fn company(&self) -> &Company {
         &self.company
-    }
-    pub fn accounts(&self) -> &[Account] {
-        &self.accounts
     }
     pub fn prices(&self) -> &Prices {
         &self.prices

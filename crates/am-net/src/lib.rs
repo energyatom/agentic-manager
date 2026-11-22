@@ -76,6 +76,20 @@ const CREDENTIAL_HEADERS: [&str; 8] = [
 /// client's `mcp-session-id`) but dropped once a redirect changes origin.
 const SESSION_HEADERS: [&str; 1] = ["mcp-session-id"];
 
+/// The words of a keyed call whose Account moved around its key read.
+fn key_moved_words(account: &str) -> String {
+    format!(
+        "the Account {account} changed on this Mac while its key was read, so the key was not sent"
+    )
+}
+
+/// The start of a refusal of an Account its directory does not answer
+/// (an internal marker, stripped before anything is shown or audited).
+const ACCOUNT_NOT_ANSWERED: &str = "\u{0}account-not-answered:";
+
+/// The fixed audit reason of an Account its directory does not answer.
+const ACCOUNT_REFUSED_REASON: &str = "the Account is not answered by this Mac's Accounts (not confirmed, changed or not on this Mac)";
+
 /// The words of a refusal for a key that is not the caller's own.
 pub const NOT_THE_CALLERS_CREDENTIAL: &str = "the credential does not belong to this caller";
 
@@ -398,7 +412,7 @@ pub fn check_caller(
         Caller::Account { account, .. } => {
             let Some(endpoint) = directory.account_endpoint(account) else {
                 return Err(match directory.account_refusal(account) {
-                    Some(why) => format!("the Account {account} is not called: {why}"),
+                    Some(why) => format!("{ACCOUNT_NOT_ANSWERED}{account} is not called: {why}"),
                     None => format!("the Account {account} is not known"),
                 });
             };
@@ -644,9 +658,19 @@ impl Inner {
     }
 
     fn refuse(&self, caller: Option<&Caller>, refused: Refused) -> EgressError {
+        // An Account the directory refuses is audited with a fixed reason:
+        // the directory's words (which may come from the Accounts file) go
+        // back to the caller only, never into an audit chain.
+        let (audited, returned) = match refused.reason.strip_prefix(ACCOUNT_NOT_ANSWERED) {
+            Some(rest) => (
+                ACCOUNT_REFUSED_REASON.to_string(),
+                format!("the Account {rest}"),
+            ),
+            None => (refused.reason.clone(), refused.reason),
+        };
         self.audit
-            .record(self.block_event(caller, refused.target.as_ref(), &refused.reason));
-        EgressError::Blocked(refused.reason)
+            .record(self.block_event(caller, refused.target.as_ref(), &audited));
+        EgressError::Blocked(returned)
     }
 
     /// The caller's rule, then the address check: the one address to
@@ -737,26 +761,63 @@ impl Inner {
             ));
         }
         let mut current = target.take().unwrap_or_else(|| target_of(&url));
+        // AD-15 *Key use*: a keyed Account's stamp is taken before its host
+        // is resolved, and again right after the key read.
+        let mut stamp = req
+            .auth
+            .as_ref()
+            .map(|auth| self.directory.account_stamp(&auth.account_id));
         let mut addr = match self.checked_addr(&caller, &current).await? {
             Ok(a) => a,
             Err(refused) => return Err(self.refuse(Some(&caller), refused)),
         };
-        // The credential, read once, only after every check passed; kept as
-        // a `SecretString` until the transport builds its header.
-        let mut credential = match &req.auth {
-            None => None,
-            Some(auth) => {
-                let secret = self
-                    .secrets
-                    .get(&auth.account_id)
-                    .map_err(|e| EgressError::Network(e.to_string()))?
-                    .ok_or_else(|| EgressError::MissingSecret(auth.account_id.clone()))?;
-                Some(Credential {
-                    scheme: auth.scheme,
-                    secret: Arc::new(secret),
-                })
+        // The credential, read only after every check passed; kept as a
+        // `SecretString` until the transport builds its header. AD-15 *Key
+        // use*: the key is sent only when the stamp taken before resolving
+        // and the one taken right after the key read are both present,
+        // equal, and confirm the endpoint the request goes to; otherwise the
+        // key is dropped unsent and the checks run once more, and a second
+        // failure refuses the call.
+        let mut credential = None;
+        let mut pinned_stamp = None;
+        if let Some(auth) = &req.auth {
+            let mut attempt = 0;
+            loop {
+                let before = stamp.take().flatten();
+                let goes_to = current.endpoint();
+                if let Some(before) = before.filter(|s| Some(&s.endpoint) == goes_to.as_ref()) {
+                    let secret = self
+                        .secrets
+                        .get(&auth.account_id)
+                        .map_err(|e| EgressError::Network(e.to_string()))?
+                        .ok_or_else(|| EgressError::MissingSecret(auth.account_id.clone()))?;
+                    if self.directory.account_stamp(&auth.account_id).as_ref() == Some(&before) {
+                        credential = Some(Credential {
+                            scheme: auth.scheme,
+                            secret: Arc::new(secret),
+                        });
+                        pinned_stamp = Some(before);
+                        break;
+                    }
+                    drop(secret);
+                }
+                attempt += 1;
+                if attempt > 1 {
+                    return Err(self.refuse(
+                        Some(&caller),
+                        Refused {
+                            target: Some(current.clone()),
+                            reason: key_moved_words(&auth.account_id),
+                        },
+                    ));
+                }
+                stamp = Some(self.directory.account_stamp(&auth.account_id));
+                addr = match self.checked_addr(&caller, &current).await? {
+                    Ok(a) => a,
+                    Err(refused) => return Err(self.refuse(Some(&caller), refused)),
+                };
             }
-        };
+        }
         let mut headers = req.headers.clone();
         let mut redirects = 0usize;
         loop {
@@ -825,6 +886,24 @@ impl Inner {
                 Ok(a) => a,
                 Err(refused) => return Err(self.refuse(Some(&caller), refused)),
             };
+            if next.same_origin(&current)
+                && credential.is_some()
+                && let Some(auth) = &req.auth
+            {
+                // A same-origin hop reuses the key only while the Account's
+                // confirmation still stands where it stood at the key read.
+                let now = self.directory.account_stamp(&auth.account_id);
+                if now.is_none() || now != pinned_stamp {
+                    drop(credential.take());
+                    return Err(self.refuse(
+                        Some(&caller),
+                        Refused {
+                            target: Some(next.clone()),
+                            reason: key_moved_words(&auth.account_id),
+                        },
+                    ));
+                }
+            }
             if !next.same_origin(&current) {
                 // For the rest of the chain: no credential, no
                 // credential-like or session header.

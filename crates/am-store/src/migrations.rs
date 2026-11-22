@@ -37,6 +37,22 @@ const MIGRATIONS: &[&str] = &[
 /// The schema version this binary knows.
 pub const SCHEMA_VERSION: i64 = MIGRATIONS.len() as i64;
 
+/// One store's migration set (story 2.12, AD-7): its numbered SQL files,
+/// the `application_id` it stamps (so neither store ever opens as the
+/// other) and the name prefix of its pre-migration copies.
+pub(crate) struct MigrationSet {
+    pub(crate) migrations: &'static [&'static str],
+    pub(crate) application_id: i32,
+    pub(crate) backup_prefix: &'static str,
+}
+
+/// The project store's set.
+pub(crate) const PROJECT: MigrationSet = MigrationSet {
+    migrations: MIGRATIONS,
+    application_id: crate::APPLICATION_ID,
+    backup_prefix: "state",
+};
+
 /// One applied migration: `from` to `to` (`to = from + 1`), with the backup
 /// taken before the first of them (none for a new database).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -133,11 +149,15 @@ fn apply_step(
     from: i64,
     backup: Option<&Path>,
     report: bool,
+    stamp: Option<i32>,
 ) -> Result<(), StoreError> {
     let to = from + 1;
     let tx = conn.transaction()?;
     tx.execute_batch(sql)?;
     tx.pragma_update(None, "user_version", to)?;
+    if let Some(id) = stamp {
+        tx.pragma_update(None, "application_id", id)?;
+    }
     if report {
         let at = now_ts();
         let backup = backup.map(|b| b.display().to_string());
@@ -181,26 +201,53 @@ fn table_exists(conn: &Connection, name: &str) -> Result<bool, StoreError> {
 /// Applies every migration the database lacks; `backups` is the folder for
 /// the pre-migration copy.
 pub(crate) fn migrate(conn: &mut Connection, backups: &Path) -> Result<OpenReport, StoreError> {
-    migrate_with(conn, backups, MIGRATIONS)
+    migrate_set(conn, backups, &PROJECT)
+}
+
+/// The database's `application_id`.
+pub(crate) fn application_id(conn: &Connection) -> Result<i32, StoreError> {
+    Ok(conn.pragma_query_value(None, "application_id", |r| r.get(0))?)
+}
+
+/// Applies every migration of `set` the database lacks, then stamps the
+/// set's `application_id` on a database that has none yet (a new one, or a
+/// project store from before the stamp).
+pub(crate) fn migrate_set(
+    conn: &mut Connection,
+    backups: &Path,
+    set: &MigrationSet,
+) -> Result<OpenReport, StoreError> {
+    // A database with no id yet gets it in the transaction of its first
+    // step, so no crash leaves a migrated database without it.
+    let stamp = (application_id(conn)? == 0).then_some(set.application_id);
+    let report = migrate_with(conn, backups, set.migrations, set.backup_prefix, stamp)?;
+    if application_id(conn)? == 0 {
+        // Nothing to migrate (a project store from before the stamp).
+        conn.pragma_update(None, "application_id", set.application_id)?;
+    }
+    Ok(report)
 }
 
 fn migrate_with(
     conn: &mut Connection,
     backups: &Path,
     migrations: &[&str],
+    prefix: &str,
+    stamp: Option<i32>,
 ) -> Result<OpenReport, StoreError> {
     let known = migrations.len() as i64;
     let found = user_version(conn)?;
     refuse_unknown(found, known)?;
     let backup = if (1..known).contains(&found) {
-        Some(backup_into(conn, backups, found)?)
+        Some(backup_into(conn, backups, found, prefix)?)
     } else {
         None
     };
     let mut applied = Vec::new();
     for (index, sql) in migrations.iter().enumerate().skip(found as usize) {
         let from = index as i64;
-        apply_step(conn, sql, from, backup.as_deref(), true).map_err(|e| {
+        let id = if applied.is_empty() { stamp } else { None };
+        apply_step(conn, sql, from, backup.as_deref(), true, id).map_err(|e| {
             StoreError::MigrationFailed {
                 from,
                 to: from + 1,
@@ -215,7 +262,7 @@ fn migrate_with(
         });
     }
     if backup.is_some() {
-        prune_backups(backups)?;
+        prune_backups(backups, prefix)?;
     }
     Ok(OpenReport {
         version: known,
@@ -225,21 +272,24 @@ fn migrate_with(
     })
 }
 
-/// True for a pre-migration copy's name (`state-<stamp>-v<n>.db`).
-fn is_backup_name(name: &str) -> bool {
-    name.starts_with("state-") && name.ends_with(".db") && !RuntimeLayout::is_kept_legacy(name)
+/// True for a pre-migration copy's name (`<prefix>-<stamp>-v<n>.db`).
+fn is_backup_name(name: &str, prefix: &str) -> bool {
+    name.strip_prefix(prefix)
+        .is_some_and(|rest| rest.starts_with('-'))
+        && name.ends_with(".db")
+        && !RuntimeLayout::is_kept_legacy(name)
 }
 
 /// Keeps the [`PRE_MIGRATION_KEPT`] newest pre-migration copies in `dir`
 /// (names sort by time) and deletes the older ones; nothing else is touched.
-fn prune_backups(dir: &Path) -> Result<(), StoreError> {
+fn prune_backups(dir: &Path, prefix: &str) -> Result<(), StoreError> {
     let read = std::fs::read_dir(dir)
         .map_err(|e| StoreError::io(format!("cannot read {}", dir.display()), e))?;
     let mut names: Vec<String> = read
         .flatten()
         .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
         .map(|e| e.file_name().to_string_lossy().into_owned())
-        .filter(|n| is_backup_name(n))
+        .filter(|n| is_backup_name(n, prefix))
         .collect();
     names.sort();
     let excess = names.len().saturating_sub(PRE_MIGRATION_KEPT);
@@ -253,7 +303,12 @@ fn prune_backups(dir: &Path) -> Result<(), StoreError> {
 
 /// `VACUUM INTO` a new owner-only file in `dir` (created 0700, with its
 /// parent, if missing), named by time so names sort oldest first.
-fn backup_into(conn: &Connection, dir: &Path, from: i64) -> Result<PathBuf, StoreError> {
+fn backup_into(
+    conn: &Connection,
+    dir: &Path,
+    from: i64,
+    prefix: &str,
+) -> Result<PathBuf, StoreError> {
     if let Some(parent) = dir.parent() {
         fsx::ensure_private_dir(parent)
             .map_err(|e| StoreError::io(format!("cannot create {}", parent.display()), e))?;
@@ -269,9 +324,9 @@ fn backup_into(conn: &Connection, dir: &Path, from: i64) -> Result<PathBuf, Stor
     let mut n = 1;
     let path = loop {
         let name = if n == 1 {
-            format!("state-{stamp}-v{from}.db")
+            format!("{prefix}-{stamp}-v{from}.db")
         } else {
-            format!("state-{stamp}~{n}-v{from}.db")
+            format!("{prefix}-{stamp}~{n}-v{from}.db")
         };
         let path = dir.join(name);
         match fsx::create_private_file(&path) {
@@ -312,7 +367,7 @@ pub(crate) fn database_at_version(path: &Path, version: i64) -> Result<(), Store
         .take(upto as usize)
         .skip(have.max(0) as usize)
     {
-        apply_step(&mut conn, sql, index as i64, None, false)?;
+        apply_step(&mut conn, sql, index as i64, None, false, None)?;
     }
     if version > SCHEMA_VERSION {
         conn.pragma_update(None, "user_version", version)?;
@@ -404,7 +459,7 @@ mod tests {
         let backups = dir.path().join("backups");
         let chain = [MIGRATIONS[0], MIGRATIONS[1], "THIS IS NOT SQL;"];
 
-        let err = migrate_with(&mut conn, &backups, &chain).unwrap_err();
+        let err = migrate_with(&mut conn, &backups, &chain, "state", None).unwrap_err();
         let StoreError::MigrationFailed {
             from, to, backup, ..
         } = &err

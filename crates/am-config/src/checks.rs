@@ -11,8 +11,7 @@ pub(crate) const COMMENT_MESSAGE: &str = "comments are not kept when the app sav
 const COMMENT_FIX: &str =
     "move the note into a description: field or into the project's docs, then delete the comment";
 
-pub(crate) const SECRET_FIX: &str =
-    "keep keys in the Keychain; reference an Account (models/accounts.yaml, secret_ref) instead";
+pub(crate) const SECRET_FIX: &str = "keep keys only in the Keychain: add the key to this Mac's Accounts (accounts.yaml in the app data folder) with `agentic accounts add <id>`, then name the Account by its id instead";
 
 /// Warns at every comment line (decision b).
 pub(crate) fn comments(rep: &mut Report, lines: &[u32]) {

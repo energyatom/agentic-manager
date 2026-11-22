@@ -346,7 +346,9 @@ fn serve_on_a_new_project_gives_it_an_id_and_a_runtime_folder_outside_it() {
     );
     assert_eq!(mode(&layout.serve_port()), 0o600);
 
-    let running = am_domain::runtime::serving_dir(&e.app_data()).join(serve.pid().to_string());
+    let running = am_domain::runtime::AppDataLayout::new(e.app_data())
+        .serving_dir()
+        .join(serve.pid().to_string());
     assert_eq!(
         std::fs::read_to_string(&running).unwrap().trim(),
         serving,
@@ -684,7 +686,9 @@ fn serve_without_a_project_is_unchanged() {
         .unwrap_or_default()
         .trim()
         .to_string();
-    let recorded = am_domain::runtime::serving_dir(&e.app_data()).join(child.id().to_string());
+    let recorded = am_domain::runtime::AppDataLayout::new(e.app_data())
+        .serving_dir()
+        .join(child.id().to_string());
     let seen = std::fs::read_to_string(&recorded);
     let recorded_mode = mode(&recorded);
     let _ = child.kill();

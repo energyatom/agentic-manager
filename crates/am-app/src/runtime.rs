@@ -35,7 +35,9 @@ use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 
 use am_config::{ConfigIdentityAssign, ConfigWriter};
-use am_domain::runtime::{APP_DATA_NAME, MAC_ID_FILE, RUNTIME_BASE_NAME, legacy_dir, open_marker};
+use am_domain::runtime::{
+    APP_DATA_NAME, AppDataLayout, RUNTIME_BASE_NAME, legacy_dir, open_marker,
+};
 use am_domain::{
     Actor, IdentityError, MacId, ProjectId, ProjectIdentity, RootIdentity, RuntimeBase,
     RuntimeLayout, VolumeState,
@@ -84,6 +86,9 @@ pub struct Places {
     pub base: RuntimeBase,
     /// `<OS app data>/agentic-manager/`: this Mac's id, the run file.
     pub app_data: PathBuf,
+    /// Every path in the app data dir (AD-17): the user Accounts file, the
+    /// user store and its lock, built from `app_data`.
+    pub user: AppDataLayout,
     /// AD-30's cloud roots: a project under one leaves its legacy folder by
     /// a checked copy, never a rename.
     pub cloud_roots: Vec<PathBuf>,
@@ -94,9 +99,11 @@ impl Places {
     /// `~/Library/Application Support`; elsewhere `$XDG_DATA_HOME`), with
     /// the cloud roots under `home`.
     pub fn under(app_support: &Path, home: &Path) -> Places {
+        let app_data = app_support.join(APP_DATA_NAME);
         Places {
             base: RuntimeBase::new(app_support.join(RUNTIME_BASE_NAME)),
-            app_data: app_support.join(APP_DATA_NAME),
+            user: AppDataLayout::new(app_data.clone()),
+            app_data,
             cloud_roots: vec![
                 home.join("Library").join("CloudStorage"),
                 home.join("Library")
@@ -152,7 +159,7 @@ fn private_dir_builder() -> std::fs::DirBuilder {
 }
 
 /// Creates `dir` 0700 when missing (its parents as the OS makes them).
-fn ensure_private_dir(dir: &Path) -> Result<(), Refusal> {
+pub(crate) fn ensure_private_dir(dir: &Path) -> Result<(), Refusal> {
     if dir.is_dir() {
         return Ok(());
     }
@@ -219,11 +226,13 @@ pub fn clear_serve_port(layout: &RuntimeLayout) {
 
 /// Records, owner-only, the port this `agentic serve` process listens on in
 /// the user-level folder of running servers
-/// ([`am_domain::runtime::serving_dir`]), named by its process id, with or
+/// ([`AppDataLayout::serving_dir`]), named by its process id, with or
 /// without a project: every egress directory refuses every recorded port
 /// to Accounts and MCP servers (story 2.2, AD-12).
 pub fn record_serving(app_data: &Path, port: u16) -> Result<(), Refusal> {
-    let dir = am_domain::runtime::serving_dir(app_data);
+    let dir = AppDataLayout::new(app_data.to_path_buf()).serving_dir();
+    // The app data dir is created owner-only, then the folder in it.
+    ensure_private_dir(app_data)?;
     ensure_private_dir(&dir)?;
     replace_file(
         &dir.join(std::process::id().to_string()),
@@ -234,7 +243,9 @@ pub fn record_serving(app_data: &Path, port: u16) -> Result<(), Refusal> {
 /// Removes this process's record of its port (at `serve`'s exit).
 pub fn clear_serving(app_data: &Path) {
     let _ = std::fs::remove_file(
-        am_domain::runtime::serving_dir(app_data).join(std::process::id().to_string()),
+        AppDataLayout::new(app_data.to_path_buf())
+            .serving_dir()
+            .join(std::process::id().to_string()),
     );
 }
 
@@ -242,7 +253,8 @@ pub fn clear_serving(app_data: &Path) {
 /// process is not running is ignored and removed; anything that is not a
 /// process id holding a port is ignored.
 pub fn serving_ports(app_data: &Path) -> Vec<u16> {
-    let Ok(entries) = std::fs::read_dir(am_domain::runtime::serving_dir(app_data)) else {
+    let Ok(entries) = std::fs::read_dir(AppDataLayout::new(app_data.to_path_buf()).serving_dir())
+    else {
         return Vec::new();
     };
     let mut ports = Vec::new();
@@ -276,7 +288,7 @@ pub fn serving_ports(app_data: &Path) -> Vec<u16> {
 /// A file that cannot be read or does not hold a UUID is refused in words
 /// and never re-minted.
 pub fn read_mac_id(app_data: &Path) -> Result<Option<MacId>, Refusal> {
-    let path = app_data.join(MAC_ID_FILE);
+    let path = AppDataLayout::new(app_data.to_path_buf()).mac_id();
     match std::fs::read_to_string(&path) {
         Ok(text) => MacId::parse(text.trim()).map(Some).ok_or_else(|| {
             Refusal(format!(
@@ -296,7 +308,7 @@ pub fn read_mac_id(app_data: &Path) -> Result<Option<MacId>, Refusal> {
 /// exclusively with mode 0600. A file made meanwhile is read instead.
 pub fn mint_mac_id(app_data: &Path) -> Result<MacId, Refusal> {
     ensure_private_dir(app_data)?;
-    let path = app_data.join(MAC_ID_FILE);
+    let path = AppDataLayout::new(app_data.to_path_buf()).mac_id();
     let id = MacId::mint();
     match private_options().write(true).create_new(true).open(&path) {
         Ok(mut f) => {

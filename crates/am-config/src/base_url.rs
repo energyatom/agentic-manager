@@ -1,5 +1,5 @@
 //! The one rule for an `openai-compatible` Account's `base_url` (story 2.3,
-//! AD-12, AD-48): the loader applies it to `models/accounts.yaml` and
+//! AD-12, AD-48): the loader applies it to this Mac's user Accounts file (`accounts.yaml`) and
 //! `agentic accounts` applies it to `--base-url`, so the two never disagree
 //! about what a compatible endpoint is.
 //!

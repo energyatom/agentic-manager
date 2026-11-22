@@ -47,7 +47,7 @@
 //! Story 2.3: [`compatible_base_url`] is the one rule for an
 //! `openai-compatible` Account's `base_url`, applied by the loader and by
 //! `agentic accounts`; [`AccountsFile::entry_errors`] names the errors of
-//! one entry of `models/accounts.yaml`.
+//! one entry of this Mac's user Accounts file.
 //!
 //! Story 1.9 (R2, AD-16): [`ConfigSession`] holds the accepted bytes of every
 //! file the snapshot is read from and builds the snapshot only from them (an
@@ -74,14 +74,15 @@ mod schema_check;
 mod session;
 mod skills;
 mod snapshot;
+pub mod user_accounts;
 mod writer;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 pub use account_edit::{
-    ACCOUNTS_FILE, AccountUse, AccountsFile, account_uses, accounts_file, add_account_edit,
-    is_config_id, new_accounts_file, outside_changes, remove_account_edit, reserved_account_ids,
+    AccountUse, AccountsFile, account_uses, accounts_file, add_account_edit, is_config_id,
+    new_accounts_file, outside_changes, remove_account_edit, reserved_account_ids,
 };
 pub use base_url::{COMPATIBLE_BASE_URL_FORMS, CompatibleBaseUrl, compatible_base_url};
 pub use entities::*;
@@ -89,6 +90,7 @@ pub use finding::{Finding, Severity};
 pub use migrate::{MigrationOffer, accept_migrations, migration_offers};
 pub use session::{ConfigEvent, ConfigSession, ReloadError, SessionError};
 pub use snapshot::ConfigSnapshot;
+pub use user_accounts::{LEGACY_ACCOUNTS_FILE, USER_ACCOUNTS_FILE, UserAccounts, key_ref};
 #[cfg(feature = "test-support")]
 pub use writer::FailPoint;
 pub use writer::{
@@ -156,6 +158,11 @@ pub struct LoadOptions {
     /// is, holds or lies inside one is refused. The caller passes them (this
     /// crate keeps no index); `agentic validate` passes none.
     pub recent_roots: Vec<PathBuf>,
+    /// This Mac's Accounts (story 2.12, AD-17): a project names them by id
+    /// only. With a list, an id it lacks is a Warning at each line naming
+    /// it; `None` (a template, a library test) checks an Account reference
+    /// for form only. The reserved local ids always resolve.
+    pub user_accounts: Option<UserAccounts>,
 }
 
 impl LoadOptions {
@@ -238,6 +245,7 @@ fn load_inner(
             recent_roots: opts.recent_roots,
         },
         template: opts.template,
+        user_accounts: opts.user_accounts,
         overrides,
         exact,
         ..Loader::default()
@@ -323,7 +331,8 @@ struct Loader {
     /// Ids as declared, whether or not their entity passed every check.
     declared: Known,
     company: Option<Company>,
-    accounts: Vec<Account>,
+    /// This Mac's Accounts, when the caller passed them (story 2.12).
+    user_accounts: Option<UserAccounts>,
     prices: Prices,
     capabilities: Capabilities,
     tools: ToolsConfig,
@@ -489,21 +498,28 @@ impl Loader {
             if !self.exists(root, &rel) {
                 continue;
             }
+            if *stem == "accounts" {
+                // Story 2.12 (AD-17): Accounts belong to this Mac. The old
+                // per-project file is an error and is never parsed, so
+                // nothing in it declares an Account or reaches a key.
+                let project = self.places.project.display().to_string();
+                self.report(&rel).error(
+                    1,
+                    format!(
+                        "{LEGACY_ACCOUNTS_FILE} holds Accounts, which now live on this Mac (one list for every project), not in a project; this file is not read"
+                    ),
+                    format!(
+                        "move them to this Mac's Accounts with `agentic accounts migrate --project {project}`, which removes this file"
+                    ),
+                );
+                continue;
+            }
             let Some(text) = self.read(root, &rel) else {
                 continue;
             };
             let mut rep = Report::new(&rel);
             if let Some(node) = kinds::yaml(&mut rep, &text, 0) {
                 match *stem {
-                    "accounts" => {
-                        self.declared
-                            .accounts
-                            .extend(kinds::declared_ids(&node, "accounts"));
-                        self.declared
-                            .account_providers
-                            .extend(kinds::declared_account_providers(&node));
-                        self.accounts = kinds::accounts(&mut rep, &node);
-                    }
                     "prices" => self.prices = kinds::prices(&mut rep, &node),
                     _ => self.capabilities = kinds::capabilities(&mut rep, &node),
                 }
@@ -642,6 +658,15 @@ impl Loader {
     fn finish(mut self) -> Loaded {
         let mut known = std::mem::take(&mut self.declared);
         known.builtin_tools = am_domain::tool_manifest::builtin_tool_ids();
+        if let Some(list) = &self.user_accounts {
+            known.user_list = true;
+            for a in list.accounts() {
+                known.accounts.insert(a.id.clone());
+                known
+                    .account_providers
+                    .insert(a.id.clone(), a.provider.clone());
+            }
+        }
         refs::resolve(&self.refs, &known, &mut self.reports);
         migrate::word_blocked(&self.places.project, &mut self.reports, &self.files);
         let mut findings: Vec<Finding> = self
@@ -659,7 +684,6 @@ impl Loader {
             (false, Some(company)) => Some(ConfigSnapshot {
                 hash: snapshot::content_hash(&self.files),
                 company,
-                accounts: self.accounts,
                 prices: self.prices,
                 capabilities: self.capabilities,
                 tools: self.tools,

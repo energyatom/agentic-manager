@@ -47,9 +47,9 @@ pub struct Hat {
     pub description: Option<String>,
 }
 
-/// An Account in `models/accounts.yaml` (AD-31): never a key, only its
-/// Keychain reference.
-#[derive(Debug, Clone, PartialEq)]
+/// An Account of this Mac's user Accounts file (AD-17, AD-31): never a
+/// key, only its Keychain reference.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Account {
     pub id: String,
     /// `anthropic`, `openai`, `openai-compatible` (model); `brave`, `tavily`,

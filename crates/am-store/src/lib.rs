@@ -44,6 +44,7 @@ mod fsx;
 pub mod legacy;
 mod migrations;
 pub mod project;
+pub mod user;
 
 pub use audit::{ChainBreak, ChainOk, ConfigNote, verify_jsonl};
 pub use config_history::StoreConfigHistory;
@@ -51,6 +52,12 @@ pub use fsx::stream_copy;
 pub use migrations::{AppliedMigration, OpenReport, PRE_MIGRATION_KEPT, SCHEMA_VERSION};
 use project::ProjectLock;
 pub use project::{LockHolder, lock_holder, lock_is_held, open_runtime, open_runtime_unchanged};
+
+/// The project store's `application_id` (story 2.12, AD-7): stamped on
+/// every project database, so this Mac's user store
+/// ([`user::USER_APPLICATION_ID`]) never opens as a project store and a
+/// project store never opens as the user store.
+pub const APPLICATION_ID: i32 = 0x414D_5052;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -119,6 +126,29 @@ pub enum StoreError {
     NoDatabase { path: PathBuf },
     #[error("opening a project is not supported on this platform yet")]
     Unsupported,
+    /// Story 2.12: a database carrying another store's `application_id`.
+    #[error("{} is {what}, not {expected}; move it aside and try again", .path.display())]
+    WrongStore {
+        path: PathBuf,
+        what: String,
+        expected: String,
+    },
+    /// Story 2.12 (AD-7): a user store a newer app wrote.
+    #[error(
+        "this Mac's user store {} is at version {found}, newer than this app knows ({known}): a newer version of the app wrote it; use that newer app, or update this one",
+        .path.display()
+    )]
+    UserTooNew {
+        path: PathBuf,
+        found: i64,
+        known: i64,
+    },
+    /// Story 2.12 (AD-6): `user.lock` stayed held past the bounded wait.
+    #[error(
+        "this Mac's Accounts are being changed by another process: its lock {} is held and stayed held for {waited_s} s; nothing was written; run the command again when that process is done",
+        .lock.display()
+    )]
+    UserLocked { lock: PathBuf, waited_s: u64 },
     #[error("the writer stopped")]
     WriterGone,
     #[error("{0}")]
@@ -526,8 +556,9 @@ impl Store {
         fsx::create_private_file_if_missing(path)
             .map_err(|e| StoreError::io(format!("cannot create {}", path.display()), e))?;
         let mut conn = Connection::open(path)?;
-        // Refuse a newer (or foreign) database before anything, even the
-        // journal mode, is written.
+        // Refuse another store's database, a newer one (or a foreign one)
+        // before anything, even the journal mode, is written.
+        refuse_other_store(path, migrations::application_id(&conn)?)?;
         migrations::refuse_newer(migrations::user_version(&conn)?)?;
         configure(&conn)?;
         let report = migrations::migrate(&mut conn, backups)?;
@@ -578,7 +609,23 @@ pub fn check_database(path: &Path) -> Result<(), StoreError> {
         return Ok(());
     }
     let conn = open_read_only(path)?;
+    refuse_other_store(path, migrations::application_id(&conn)?)?;
     migrations::refuse_newer(migrations::user_version(&conn)?)
+}
+
+/// A project store refuses a database stamped with another
+/// `application_id`: this Mac's user store above all (story 2.12).
+pub(crate) fn refuse_other_store(path: &Path, id: i32) -> Result<(), StoreError> {
+    let what = match id {
+        0 | APPLICATION_ID => return Ok(()),
+        user::USER_APPLICATION_ID => "this Mac's user store (its Accounts records, user.db)",
+        _ => "not a database this app made",
+    };
+    Err(StoreError::WrongStore {
+        path: path.to_path_buf(),
+        what: what.into(),
+        expected: "a project's database".into(),
+    })
 }
 
 /// A database opened read-only without writing beside it. With no `-wal`
@@ -614,6 +661,21 @@ fn is_sha256_hex(h: &str) -> bool {
 }
 
 fn apply(conn: &mut Connection, actor: &Actor, cmd: &WriteCommand) -> Result<(), StoreError> {
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    execute(&tx, actor, cmd)?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// The one command executor (story 2.12, AD-6): checks the command, runs it
+/// and appends its audit entries in the caller's transaction. The project
+/// store's writer thread and the user store's guard ([`user::UserStore`])
+/// both call it, so the two stores record intents, History and audit alike.
+pub(crate) fn execute(
+    tx: &rusqlite::Transaction,
+    actor: &Actor,
+    cmd: &WriteCommand,
+) -> Result<(), StoreError> {
     // A `config.*` entry comes only with a config intent (its History
     // entry and the notes it carried, in one transaction): a free audit
     // entry cannot write one, so none can pass for an owner's confirmation.
@@ -642,7 +704,6 @@ fn apply(conn: &mut Connection, actor: &Actor, cmd: &WriteCommand) -> Result<(),
             "refused run: `config_hash` must be 64 lowercase hex characters (sha256)".into(),
         ));
     }
-    let tx = conn.transaction()?;
     let now = now_ts();
     let mut config_entry = None;
     // The audit notes a committed or reconciled config intent carried
@@ -699,7 +760,7 @@ fn apply(conn: &mut Connection, actor: &Actor, cmd: &WriteCommand) -> Result<(),
             call_id,
             usage,
             cost_micro_usd,
-        } => settle(&tx, call_id, *usage, *cost_micro_usd)?,
+        } => settle(tx, call_id, *usage, *cost_micro_usd)?,
         WriteCommand::MarkLost { call_id } => {
             let n = tx.execute(
                 "UPDATE model_calls SET status = 'lost', settled = 1 WHERE id = ?1 AND settled = 0",
@@ -717,7 +778,7 @@ fn apply(conn: &mut Connection, actor: &Actor, cmd: &WriteCommand) -> Result<(),
             step_run_id,
             status,
             output,
-        } => finish_step(&tx, step_run_id, status, output, &now)?,
+        } => finish_step(tx, step_run_id, status, output, &now)?,
         WriteCommand::SettleAndFinishStep {
             call_id,
             usage,
@@ -726,8 +787,8 @@ fn apply(conn: &mut Connection, actor: &Actor, cmd: &WriteCommand) -> Result<(),
             status,
             output,
         } => {
-            settle(&tx, call_id, *usage, *cost_micro_usd)?;
-            finish_step(&tx, step_run_id, status, output, &now)?;
+            settle(tx, call_id, *usage, *cost_micro_usd)?;
+            finish_step(tx, step_run_id, status, output, &now)?;
         }
         WriteCommand::FinishRun { run_id, status } => {
             tx.execute(
@@ -759,20 +820,20 @@ fn apply(conn: &mut Connection, actor: &Actor, cmd: &WriteCommand) -> Result<(),
         }
         WriteCommand::Audit { .. } => {}
         WriteCommand::BeginConfigIntent { id, intent } => {
-            config_entry = Some(config_history::begin(&tx, actor, id, intent, &now)?);
+            config_entry = Some(config_history::begin(tx, actor, id, intent, &now)?);
         }
         WriteCommand::CommitConfigEntry { intent_id } => {
-            let (entry, notes) = config_history::complete(&tx, intent_id, false, &now)?;
+            let (entry, notes) = config_history::complete(tx, intent_id, false, &now)?;
             config_entry = Some(entry);
             config_notes = notes;
         }
         WriteCommand::ReconcileConfigIntent { intent_id } => {
-            let (entry, notes) = config_history::complete(&tx, intent_id, true, &now)?;
+            let (entry, notes) = config_history::complete(tx, intent_id, true, &now)?;
             config_entry = Some(entry);
             config_notes = notes;
         }
         WriteCommand::DropConfigIntent { intent_id } => {
-            config_entry = Some(config_history::drop_intent(&tx, intent_id)?);
+            config_entry = Some(config_history::drop_intent(tx, intent_id)?);
         }
     }
     let Some((action, target, args)) = config_entry.or_else(|| cmd.audit_entry()) else {
@@ -782,11 +843,10 @@ fn apply(conn: &mut Connection, actor: &Actor, cmd: &WriteCommand) -> Result<(),
         WriteCommand::Audit { outcome, .. } => outcome.clone(),
         _ => "ok".to_string(),
     };
-    audit::append(&tx, actor, &action, &target, &outcome, args.as_ref(), &now)?;
+    audit::append(tx, actor, &action, &target, &outcome, args.as_ref(), &now)?;
     for (asked, (action, target, args)) in &config_notes {
-        audit::append(&tx, asked, action, target, "ok", args.as_ref(), &now)?;
+        audit::append(tx, asked, action, target, "ok", args.as_ref(), &now)?;
     }
-    tx.commit()?;
     Ok(())
 }
 

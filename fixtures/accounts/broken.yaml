@@ -1,0 +1,19 @@
+schema_version: 2
+accounts:
+  - id: cloud
+    provider: anthropic
+    secret_ref: cloud
+    api_key: abcdef0123456789
+  - id: crawly
+    provider: firecrawl
+    base_url: http://10.0.0.5
+    secret_ref: crawly
+  - id: other
+    provider: anthropic
+    secret_ref: someone-else
+  - id: local-ollama
+    provider: anthropic
+  - id: nameless
+  - id: cloud
+    provider: openai
+    secret_ref: cloud

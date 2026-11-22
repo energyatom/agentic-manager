@@ -16,6 +16,10 @@
 //!   keychain afterwards.
 //!
 //! Written before the command exists.
+//!
+//! Story 2.12 (AD-17): the commands take no `--project`; they are run from
+//! inside the project folder, and "nothing written" means no user Accounts
+//! file in the temporary HOME's app data dir (and no old project file).
 #![forbid(unsafe_code)]
 #![cfg(unix)]
 
@@ -26,7 +30,7 @@ use std::process::{Command, Stdio};
 use am_app::runtime::{OpenRequest, Places, Prompt, open_project};
 
 const COMPANY: &str = "schema_version: 2\nname: Example\ntimezone: UTC\ncurrency: EUR\n";
-const ACCOUNTS_FILE: &str = "models/accounts.yaml";
+const LEGACY_FILE: &str = "models/accounts.yaml";
 const CANARY: &str = "sk-ant-canary-tty-0a1b2c3d4e5f-WXYZ";
 
 struct NoPrompt;
@@ -45,6 +49,7 @@ impl Prompt for NoPrompt {
 struct Env {
     dir: tempfile::TempDir,
     root: PathBuf,
+    places: Places,
 }
 
 fn env() -> Env {
@@ -68,7 +73,7 @@ fn env() -> Env {
         take_over: false,
     };
     drop(open_project(&places, identity.as_ref(), &req, &mut NoPrompt).unwrap());
-    Env { dir, root }
+    Env { dir, root, places }
 }
 
 impl Env {
@@ -76,15 +81,17 @@ impl Env {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_agentic"));
         cmd.arg("accounts")
             .args(args)
-            .arg("--project")
-            .arg(&self.root)
+            .current_dir(&self.root)
             .env("HOME", self.dir.path().join("home"))
             .env("XDG_DATA_HOME", self.dir.path().join("xdg"));
         cmd
     }
 
+    /// The user Accounts file; nothing a refused command does may make it,
+    /// nor the old project file.
     fn accounts_file(&self) -> PathBuf {
-        self.root.join(ACCOUNTS_FILE)
+        assert!(!self.root.join(LEGACY_FILE).exists());
+        self.places.user.accounts_file()
     }
 }
 

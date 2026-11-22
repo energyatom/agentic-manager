@@ -354,6 +354,7 @@ impl Reader {
                 ))
             })?;
             found.push(ConfigNote {
+                seq: row.seq,
                 actor,
                 file,
                 args: text_args(&row)?,
@@ -580,6 +581,9 @@ mod tests {
 /// A note a committed config intent wrote ([`Reader::config_note_args`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfigNote {
+    /// The entry's place in the audit chain (its `seq`): later notes, of
+    /// any action, have a higher one.
+    pub seq: i64,
     /// Who confirmed the change: the intent's Actor.
     pub actor: Actor,
     /// The file of the History entry the note was written with.

@@ -33,14 +33,58 @@ pub const RUNTIME_BASE_NAME: &str = "agentic-manager-projects";
 /// The app data dir's folder name inside the OS app-data folder.
 pub const APP_DATA_NAME: &str = "agentic-manager";
 
-/// This Mac's random id, in the app data dir.
-pub const MAC_ID_FILE: &str = "mac-id";
+/// Every path in the app data dir (AD-17, AD-32): this Mac's id, the folder
+/// of running servers, the user Accounts file, the user store, its lock and
+/// its pre-migration backups. Nothing else spells them (`cargo xtask
+/// runtime-paths`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppDataLayout {
+    dir: PathBuf,
+}
 
-/// The folder, in the app data dir, where every running `agentic serve`
-/// records the port it listens on: one owner-only file per process, named
-/// by its process id (story 2.2, AD-12).
-pub fn serving_dir(app_data: &Path) -> PathBuf {
-    app_data.join("serving")
+impl AppDataLayout {
+    /// The layout of the app data dir at `dir` (already resolved).
+    pub fn new(dir: PathBuf) -> AppDataLayout {
+        AppDataLayout { dir }
+    }
+
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
+    /// The user Accounts file (AD-17): only am-config reads and writes it.
+    pub fn accounts_file(&self) -> PathBuf {
+        self.dir.join("accounts.yaml")
+    }
+
+    /// The user store (AD-6, AD-17).
+    pub fn user_db(&self) -> PathBuf {
+        self.dir.join("user.db")
+    }
+
+    /// The user store's lock: a process writes the user store only while it
+    /// holds it (AD-6).
+    pub fn user_lock(&self) -> PathBuf {
+        self.dir.join("user.lock")
+    }
+
+    /// `VACUUM INTO` copies of the user store taken before a migration; the
+    /// three newest kept (AD-7).
+    pub fn backups_pre_migration(&self) -> PathBuf {
+        self.dir.join("backups").join("pre-migration")
+    }
+
+    /// This Mac's random id.
+    pub fn mac_id(&self) -> PathBuf {
+        self.dir.join("mac-id")
+    }
+
+    /// The folder where every running `agentic serve` records the port it
+    /// listens on: one owner-only file per process, named by its process id
+    /// (story 2.2, AD-12).
+    pub fn serving_dir(&self) -> PathBuf {
+        self.dir.join("serving")
+    }
 }
 
 /// A project's id (UUIDv7), kept as `project_id` in `company.yaml`.

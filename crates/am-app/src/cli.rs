@@ -97,10 +97,27 @@ pub fn validate(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> i3
     }
     let project = rest.first().map(|s| s.as_str()).unwrap_or(".");
     let root = Path::new(project);
+    // A project names Accounts by id only (story 2.12, AD-17): it is
+    // checked against this Mac's user list (an empty one when the Mac has
+    // none), whose own findings are reported too. A template is checked for
+    // form only and never reads the app data dir.
+    let mut user_findings = Vec::new();
     let opts = if template {
         am_config::LoadOptions::template(root)
     } else {
-        project_load_options(crate::runtime::Places::from_env().ok().as_ref(), root)
+        let places = crate::runtime::Places::from_env().ok();
+        let list = match &places {
+            Some(places) => {
+                let loaded = am_config::user_accounts::load(&places.user.accounts_file());
+                user_findings = loaded.findings;
+                loaded.accounts
+            }
+            None => am_config::UserAccounts::default(),
+        };
+        am_config::LoadOptions {
+            user_accounts: Some(list),
+            ..project_load_options(places.as_ref(), root)
+        }
     };
     let loaded = match am_config::load_in(root, opts) {
         Ok(l) => l,
@@ -109,16 +126,21 @@ pub fn validate(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> i3
             return EXIT_USAGE;
         }
     };
-    for finding in &loaded.findings {
+    for finding in user_findings.iter().chain(&loaded.findings) {
         let _ = writeln!(out, "{finding}");
     }
-    let errors = loaded.error_count();
+    let user_errors = user_findings
+        .iter()
+        .filter(|f| f.severity == am_config::Severity::Error)
+        .count();
+    let errors = loaded.error_count() + user_errors;
+    let warnings = loaded.warning_count() + user_findings.len() - user_errors;
     let summary = format!(
         "{}, {}",
         plural(errors, "error"),
-        plural(loaded.warning_count(), "warning")
+        plural(warnings, "warning")
     );
-    match &loaded.snapshot {
+    match loaded.snapshot.as_ref().filter(|_| user_errors == 0) {
         Some(snap) => {
             let _ = writeln!(
                 out,

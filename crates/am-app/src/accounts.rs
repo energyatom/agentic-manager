@@ -1,86 +1,71 @@
 //! `agentic accounts add|remove|list|test` (story 2.1): AD-15's interim CLI
 //! Account edit, and the two reads beside it. Story 2.3 adds the providers
-//! `openai` and `openai-compatible` to `add`, `list` and `test`: the add
-//! path is unchanged, and only the provider and the endpoint differ. One
-//! function, [`endpoint_of`], derives an Account's endpoint (scheme, host,
-//! port, base URL) for all three commands.
+//! `openai` and `openai-compatible`; one function, [`endpoint_of`], derives
+//! an Account's endpoint (scheme, host, port, base URL) for every command.
 //!
-//! `add` and `remove` are the only config edits the CLI makes, and they
-//! write only `models/accounts.yaml`, through am-config's writer, as the
-//! owner (`Actor::Human`, the Owner hat). Their checks run in this order,
-//! and the first that fails is what the owner reads; nothing is read from
-//! the terminal, written or stored before all of them passed:
+//! Story 2.12 (AD-17): Accounts belong to this Mac. The commands take no
+//! project and open none: they read and write the user Accounts file,
+//! `<app data dir>/accounts.yaml`, and record in the user store, `user.db`
+//! ([`crate::user`]). References are found in every project of the runtime
+//! base's root records whose root is reachable, read only through
+//! am-config; the projects that could not be reached are named as not
+//! checked.
+//!
+//! `add` and `remove` are the only config edits the CLI makes. They write
+//! only the user Accounts file, through am-config's writer, as the owner
+//! (`Actor::Human`, the Owner hat). Their checks run in this order, holding
+//! no lock, and the first that fails is what the owner reads; nothing is
+//! read from the terminal, written or stored before all of them passed:
 //!
 //! 1. usage (exit 2);
 //! 2. the terminal: stdin and stdout are both a real interactive terminal
 //!    ([`crate::terminal::interactive`], through the `Terminal` port);
-//! 3. the provider and its endpoint (`add`: `anthropic`, `openai`, or
-//!    `openai-compatible` with a `--base-url` in one of the two accepted
-//!    forms);
-//! 4. no stdio MCP server and no Source with `render: true` is enabled
-//!    (children that run as the owner, AD-13);
-//! 5. the project, resolved read-only by AD-32's checks
-//!    ([`crate::runtime::open_project_unchanged`]: no id minted, no legacy
-//!    folder moved, no store migrated, no marker written), with the store's
-//!    lock held from here to the end of the command;
-//! 6. no outside change waits for Reload (AD-16);
-//! 7. the id: not reserved, not already in the file (`add`); in the file
-//!    and named by nothing (`remove`).
+//! 3. the provider and its endpoint (`add`);
+//! 4. the app data dir is owner-only and the user store is this Mac's;
+//! 5. the user file has no outside change (its bytes differ from its latest
+//!    History entry's), naming the file;
+//! 6. the id: not reserved, not already in the list (`add`); in the list
+//!    (`remove`);
+//! 7. the scan: no scanned project enables a stdio MCP server or a Source
+//!    with `render: true` (children that run as the owner, AD-13), naming
+//!    the project; `remove` also refuses an id a reference still names, and
+//!    while a recorded project could not be reached (`--force` lifts only
+//!    that one).
 //!
 //! `add` then prints one sentence naming the Account, its provider, the
-//! endpoint its calls go to and everything that already names the id, and
-//! requires the id typed within 2 minutes. Only then is the key read, with
-//! echo off; an entry the Keychain already holds is reused and never
-//! overwritten, and the sentence says so, and that this key will be sent to
-//! the endpoint, before the id is typed (story 2.3). An entry that appears
-//! or goes away while a prompt waits refuses the add. Once the last prompt has returned, checks 4, 6 and 7 run
-//! again on a fresh read (the file's bytes, the id, what names it, outside
-//! changes): the owner may have taken minutes, and anything that changed
-//! since the sentence was shown refuses the add, to be run again. A Ctrl-C
-//! pressed since the id was typed cancels (exit 130), before the key is
-//! stored and again before the file is written. Then the key is stored,
-//! only in the Keychain through `SecretStore` (the entry is read again
-//! right before: one stored by another process while the key prompt waited
-//! is never overwritten, deleted or used, and the add is refused), and the
-//! file is written last
-//! (a `ConfigCreate` when it is missing; otherwise an edit the writer
-//! applies only while the file holds the bytes it was built on); its
-//! History entry and the `account_added` audit entry commit in one store
-//! transaction. If the write fails, the Keychain entry is deleted when this
-//! command created it. A write counts as landed with its History entry
-//! pending only when the file holds the bytes of this command's pending
-//! intent (its sha256), never because the id is, or is not, in the file.
-//! The key is never an argument, never read from the environment and never
-//! printed.
+//! endpoint its calls go to and every reference found (and the projects not
+//! checked), and requires the id typed within 2 minutes. An entry the
+//! Keychain already holds is reused and never overwritten, and the sentence
+//! says so; when the user store holds no confirmation of that id for this
+//! provider and endpoint, the stored key must also be typed at the hidden
+//! prompt and equal the entry. Otherwise the key is read with echo off.
 //!
-//! The open (5) settles a config write a crash interrupted, as every open
-//! of the writer does, and prints what it did before any refusal; so a
-//! refusal says what this command did not do (no Account added or removed,
-//! no key read or stored), never that nothing was written.
+//! Then `user.lock` is taken (a bounded wait), which settles a write a crash
+//! interrupted (reported), and everything is read again: anything that
+//! changed since the sentence (the file's bytes other than by an app write
+//! that left the id as it was, the id, the references, an outside change, a
+//! child) refuses the command, to be run again. A Ctrl-C pressed since the
+//! id was typed cancels (exit 130), before the key is stored and again
+//! before the file is written. The key is stored only in the Keychain
+//! (never over an entry that appeared meanwhile), then the file is written
+//! with its History entry and the `account_added` record in one user-store
+//! transaction; if the write fails, the Keychain entry is deleted only when
+//! this command created it. `remove` writes `account_removed` with its
+//! History entry and leaves the Keychain entry in place.
 //!
 //! `list` and `test` make no config edit, take no lock and run with any
-//! stdin. `test` calls only an Account the owner confirmed: before any
-//! Keychain read or request it checks, through a read-only store reader,
-//! that `models/accounts.yaml` holds exactly the bytes the app last wrote
-//! and that the latest `account_added` audit note of the Account names the
-//! same provider, scheme, host and port ([`crate::egress::confirmed`], the
-//! check the project's egress directory makes for every caller since story
-//! 2.2); an entry of the file that has an error is not called either. A
-//! key is read only from the Keychain entry named by the Account's own id
-//! (AD-17): a `secret_ref` naming another entry is reported by `list` and
-//! refused by `test`, and never followed. `test` streams one short reply
-//! through an egress client over the project's egress directory
-//! ([`crate::egress::ProjectDirectory`]), which pins the Account to its
-//! endpoint (scheme, host and port); a block the client reports is printed
-//! and said not to be in the audit log, since `test` opens no store.
+//! stdin. `test` calls only an Account [`crate::key_use`] passes, reads its
+//! key, compares the user store's stamp again before anything is sent (a
+//! record that moved drops the key unsent and the check runs again), and
+//! streams one short reply through an egress client over a directory that
+//! pins the Account to its endpoint.
 
 use std::collections::BTreeMap;
 use std::io::Write;
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use am_config::{ACCOUNTS_FILE, AccountUse, ConfigCreate};
+use am_config::{ConfigCreate, USER_ACCOUNTS_FILE};
 use am_domain::{
     AuditEvent, AuditNote, AuditSink, AuthRef, AuthScheme, ChatRequest, ConfigHistory,
     EgressClient, EgressDirectory, EventSink, Instruction, LlmProvider, Message, Part,
@@ -93,7 +78,9 @@ use am_providers::{AnthropicProvider, OpenAiCompatProvider};
 use tokio_util::sync::CancellationToken;
 
 use crate::cli::{EXIT_ERRORS, EXIT_OK, EXIT_USAGE};
+use crate::key_use::{self, Refused};
 use crate::runtime::{Places, owner};
+use crate::user::{Locked, Scan, Standing};
 
 /// The exit code after Ctrl-C at a prompt (128 + SIGINT, as shells report it).
 pub const EXIT_INTERRUPTED: i32 = 130;
@@ -111,7 +98,7 @@ const OPENAI_COMPATIBLE: &str = "openai-compatible";
 const PROVIDERS: &str =
     "`--provider anthropic`, `--provider openai` or `--provider openai-compatible`";
 
-const USAGE: &str = "usage: agentic accounts add <id> --provider anthropic|openai|openai-compatible [--base-url <url>] [--name <text>] [--project <folder>]\n       agentic accounts remove <id> [--project <folder>]\n       agentic accounts list [--project <folder>]\n       agentic accounts test <id> [--model <model>] [--project <folder>]\n       (--base-url is for openai-compatible only: https://<host>[/path], or http://127.0.0.1:<port>[/path] for a server on this Mac;\n        --model is required for an openai or openai-compatible Account; --project defaults to the current folder)";
+const USAGE: &str = "usage: agentic accounts add <id> --provider anthropic|openai|openai-compatible [--base-url <url>] [--name <text>]\n       agentic accounts remove <id> [--force]\n       agentic accounts list\n       agentic accounts test <id> [--model <model>]\n       (Accounts belong to this Mac: no command takes a project;\n        --base-url is for openai-compatible only: https://<host>[/path], or http://127.0.0.1:<port>[/path] for a server on this Mac;\n        --model is required for an openai or openai-compatible Account;\n        --force removes even while a project this Mac knows cannot be reached, never while a reference names the Account)";
 
 /// Builds the egress client over a directory, reporting blocks to a sink.
 pub type EgressFactory = Arc<
@@ -123,12 +110,12 @@ pub type EgressFactory = Arc<
 /// tests pass am-testkit's fakes.
 pub struct AccountsContext {
     pub places: Places,
-    /// Supplies the checks of the read-only resolve and the host recorded
-    /// in the store's lock (AD-32).
+    /// The OS identity adapter: no command here opens a project since story
+    /// 2.12; `accounts migrate` (story 13) resolves one with it.
     pub identity: Arc<dyn ProjectIdentity>,
     pub terminal: Box<dyn Terminal>,
     pub secrets: Arc<dyn SecretStore>,
-    /// Builds the egress client over the project's egress directory,
+    /// Builds the egress client over the directory `test` builds,
     /// reporting blocks to the command's audit sink (story 2.2).
     pub egress: EgressFactory,
 }
@@ -143,6 +130,7 @@ enum Command {
     },
     Remove {
         id: String,
+        force: bool,
     },
     List,
     Test {
@@ -151,7 +139,7 @@ enum Command {
     },
 }
 
-fn parse(args: &[String]) -> Result<(Command, PathBuf), String> {
+fn parse(args: &[String]) -> Result<Command, String> {
     let Some(verb) = args.first().map(String::as_str) else {
         return Err("accounts needs `add`, `remove`, `list` or `test`".into());
     };
@@ -160,14 +148,26 @@ fn parse(args: &[String]) -> Result<(Command, PathBuf), String> {
     }
     let mut positional: Vec<String> = Vec::new();
     let mut flags: BTreeMap<&str, String> = BTreeMap::new();
+    let mut force = false;
     let mut words = args[1..].iter();
     while let Some(word) = words.next() {
         let flag = match (word.as_str(), verb) {
-            ("--project", _) => "--project",
+            ("--force", "remove") => {
+                if force {
+                    return Err("--force is given twice".into());
+                }
+                force = true;
+                continue;
+            }
             ("--provider", "add") => "--provider",
             ("--name", "add") => "--name",
             ("--base-url", "add") => "--base-url",
             ("--model", "test") => "--model",
+            ("--project", _) => {
+                return Err(format!(
+                    "`accounts {verb}` takes no --project: Accounts belong to this Mac, not to a project"
+                ));
+            }
             (w, _) if w.starts_with('-') => {
                 return Err(format!("unknown option `{w}` for `accounts {verb}`"));
             }
@@ -185,13 +185,12 @@ fn parse(args: &[String]) -> Result<(Command, PathBuf), String> {
             _ => return Err(format!("{flag} needs a value")),
         }
     }
-    let project = PathBuf::from(flags.remove("--project").unwrap_or_else(|| ".".into()));
     let one_id = |what: &str| match positional.as_slice() {
         [id] => Ok(id.clone()),
         [] => Err(format!("accounts {verb} needs {what}")),
         _ => Err(format!("accounts {verb} takes one Account id")),
     };
-    let command = match verb {
+    Ok(match verb {
         "add" => {
             let id = one_id("the new Account's id")?;
             let provider = flags
@@ -206,6 +205,7 @@ fn parse(args: &[String]) -> Result<(Command, PathBuf), String> {
         }
         "remove" => Command::Remove {
             id: one_id("the Account's id")?,
+            force,
         },
         "test" => Command::Test {
             id: one_id("the Account's id")?,
@@ -217,8 +217,7 @@ fn parse(args: &[String]) -> Result<(Command, PathBuf), String> {
             }
             Command::List
         }
-    };
-    Ok((command, project))
+    })
 }
 
 /// A refusal: its exit code and its words.
@@ -238,7 +237,7 @@ pub async fn accounts(
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> i32 {
-    let (command, project) = match parse(args) {
+    let command = match parse(args) {
         Ok(parsed) => parsed,
         Err(why) => {
             let _ = writeln!(err, "{USAGE}");
@@ -254,16 +253,15 @@ pub async fn accounts(
             base_url,
         } => add(
             ctx,
-            &project,
             &id,
             &provider,
             name.as_deref(),
             base_url.as_deref(),
             out,
         ),
-        Command::Remove { id } => remove(ctx, &project, &id, out),
-        Command::List => list(&ctx, &project, out),
-        Command::Test { id, model } => test(&ctx, &project, &id, model, out).await,
+        Command::Remove { id, force } => remove(ctx, &id, force, out),
+        Command::List => list(&ctx, out),
+        Command::Test { id, model } => test(&ctx, &id, model, out).await,
     };
     match done {
         Ok(()) => EXIT_OK,
@@ -444,11 +442,11 @@ fn compatible_endpoint(typed: &str) -> Result<AccountEndpoint, String> {
 
 // ------------------------------------------------------------- the edit
 
-/// What a refused `add` did not do, while no key has been read yet. (The
-/// open may have settled an interrupted write, so no refusal says that
+/// What a refused `add` did not do, while no key has been read yet. (Taking
+/// the lock may have settled an interrupted write, so no refusal says that
 /// nothing was written.)
 const NOT_ADDED: &str = "No Account was added and no key was read or stored";
-/// What a refused `add` did not do, once the key was typed.
+/// What a refused `add` did not do, once a key was typed.
 const NOT_ADDED_NOR_STORED: &str = "No Account was added and no key was stored";
 const NOT_REMOVED: &str = "No Account was removed";
 
@@ -458,59 +456,49 @@ fn require_terminal(ctx: &AccountsContext, what: &str, did_not: &str) -> Result<
         return Ok(());
     }
     refuse(format!(
-        "`agentic accounts {what}` runs only in an interactive terminal: stdin and stdout must both be a terminal, not a pipe, a file or another program, because adding or removing an Account changes what this project may call and only you decide that. {did_not}; run the command yourself in a terminal"
+        "`agentic accounts {what}` runs only in an interactive terminal: stdin and stdout must both be a terminal, not a pipe, a file or another program, because adding or removing an Account changes what this Mac's projects may call and only you decide that. {did_not}; run the command yourself in a terminal"
     ))
 }
 
-/// Check 4: no child that runs as the owner is enabled (AD-13, AD-15).
-fn no_owner_child(project: &Path, what: &str, did_not: &str) -> Result<(), Stop> {
-    match am_config::decisions_locked(project) {
-        None => Ok(()),
-        Some(why) => refuse(format!(
-            "`agentic accounts {what}` cannot be used from the command line while {why}: a program that runs as you could type here. {did_not}; remove or disable it first"
-        )),
+/// Checks 4 and 5: the user store can be read and the file has no outside
+/// change; the file is readable as Accounts.
+fn stand(places: &Places, did_not: &str) -> Result<Standing, Stop> {
+    let standing =
+        Standing::read(places).map_err(|why| Stop(EXIT_ERRORS, format!("{why}. {did_not}")))?;
+    if standing.outside_change() {
+        return refuse(crate::user::outside_words(places, did_not));
     }
+    if let Some(problem) = &standing.file.problem {
+        return refuse(format!(
+            "{USER_ACCOUNTS_FILE} ({}) cannot be changed because {problem}; fix the file first (`agentic validate` names the line). {did_not}",
+            places.user.accounts_file().display()
+        ));
+    }
+    Ok(standing)
 }
 
-/// A project open for the edit: the store under its lock, the writer, and
-/// the History adapter the outside-change check reads.
-struct Editing {
-    opened: crate::runtime::OpenedUnchanged,
-    history: am_store::StoreConfigHistory,
+/// Check 7's first half: no scanned project enables a child that runs as
+/// the owner (AD-13, AD-15).
+fn no_owner_child(scan: &Scan, what: &str, did_not: &str) -> Result<(), Stop> {
+    let Some((root, why)) = scan.children.first() else {
+        return Ok(());
+    };
+    refuse(format!(
+        "`agentic accounts {what}` cannot be used from the command line while the project {} has {}: a program that runs as you could type here. {did_not}; remove or disable it first",
+        crate::user::shown(&root.display().to_string()),
+        crate::user::shown(why)
+    ))
 }
 
-impl Editing {
-    /// Check 6: no tracked file differs from what its last History entry
-    /// wrote (an outside change that no Reload has taken in yet, AD-16).
-    fn no_outside_change(&self, did_not: &str) -> Result<(), Stop> {
-        let changed = am_config::outside_changes(&self.opened.root, &self.history)
-            .map_err(|e| Stop(EXIT_ERRORS, format!("{e}. {did_not}")))?;
-        if changed.is_empty() {
-            return Ok(());
-        }
-        refuse(format!(
-            "{} changed on disk outside the app since the app last wrote it, so nothing is written over that change. {did_not}. Put the file back as the app last wrote it (undo your change), then run this command again; Reload, which takes such a change in, arrives with the app's UI",
-            changed.join(", ")
-        ))
+/// The user lock, taken for the fresh re-read and the write; what settling
+/// interrupted writes did is printed at once.
+fn lock(places: &Places, did_not: &str, out: &mut dyn Write) -> Result<Locked, Stop> {
+    let locked =
+        Locked::take(places).map_err(|why| Stop(EXIT_ERRORS, format!("{why}. {did_not}")))?;
+    for line in &locked.lines {
+        let _ = writeln!(out, "agentic: {line}");
     }
-
-    /// After a write of this command failed: whether the file now holds the
-    /// bytes its intent meant to write, with that intent still pending (so
-    /// the next open records the History entry). The file's sha256 is
-    /// compared with the pending intent's; that the Account's id is, or is
-    /// not, in the file would not tell, because an outside edit can do the
-    /// same. `None` when the store cannot be read to tell.
-    fn written_pending(&self) -> Option<bool> {
-        let Some(on_disk) = am_config::accounts_file(&self.opened.root).sha256 else {
-            return Some(false);
-        };
-        let pending = self.history.pending_intents().ok()?;
-        Some(
-            pending
-                .iter()
-                .any(|p| p.intent.file == ACCOUNTS_FILE && p.intent.after_sha256 == on_disk),
-        )
-    }
+    Ok(locked)
 }
 
 /// A writer's refusal in this command's words. The writer words a file
@@ -526,67 +514,24 @@ fn write_words(e: &am_config::WriteError) -> String {
     }
 }
 
-/// Checks 4 to 6 of the module's list: no child that runs as the owner is
-/// enabled, the project opens read-only under the store's lock, and no
-/// outside change waits for Reload. `what` is `add` or `remove`. The open
-/// settles config writes a crash interrupted; what it did is printed here,
-/// before any later refusal.
-fn open_for_edit(
-    ctx: &AccountsContext,
-    project: &Path,
-    what: &str,
-    did_not: &str,
-    out: &mut dyn Write,
-) -> Result<Editing, Stop> {
-    if !project.is_dir() {
-        return refuse(format!(
-            "the project folder {} does not exist. {did_not}",
-            project.display()
-        ));
-    }
-    no_owner_child(project, what, did_not)?;
-    let opened =
-        crate::runtime::open_project_unchanged(&ctx.places, ctx.identity.as_ref(), project)
-            .map_err(|e| {
-                Stop(
-                    EXIT_ERRORS,
-                    format!(
-                        "cannot open the project {}: {e}. {did_not}",
-                        project.display()
-                    ),
-                )
-            })?;
-    for line in &opened.lines {
-        let _ = writeln!(out, "agentic: {line}");
-    }
-    let history = am_store::StoreConfigHistory::new(&opened.store)
-        .map_err(|e| Stop(EXIT_ERRORS, format!("{e}. {did_not}")))?;
-    let editing = Editing { opened, history };
-    editing.no_outside_change(did_not)?;
-    Ok(editing)
-}
-
-/// The Accounts file, when it can be patched.
-fn patchable(root: &Path, did_not: &str) -> Result<am_config::AccountsFile, Stop> {
-    let file = am_config::accounts_file(root);
-    match &file.problem {
-        Some(problem) => refuse(format!(
-            "{ACCOUNTS_FILE} cannot be changed because {problem}; fix the file first (`agentic validate` names the line). {did_not}"
-        )),
-        None => Ok(file),
-    }
+/// After a write of this command failed: whether the file now holds the
+/// bytes its intent meant to write, with that intent still pending (so the
+/// next lock records the History entry). `None` when the store cannot be
+/// read to tell.
+fn written_pending(places: &Places, history: &dyn ConfigHistory) -> Option<bool> {
+    let Some(on_disk) = am_config::accounts_file(places.user.dir()).sha256 else {
+        return Some(false);
+    };
+    let pending = history.pending_intents().ok()?;
+    Some(
+        pending
+            .iter()
+            .any(|p| p.intent.file == USER_ACCOUNTS_FILE && p.intent.after_sha256 == on_disk),
+    )
 }
 
 pub(crate) fn reserved(id: &str) -> bool {
     am_config::reserved_account_ids().iter().any(|r| r == id)
-}
-
-fn uses_words(uses: &[AccountUse]) -> String {
-    if uses.is_empty() {
-        return "nothing".to_string();
-    }
-    let all: Vec<String> = uses.iter().map(AccountUse::to_string).collect();
-    all.join(", ")
 }
 
 /// What a refused `add` says when the Keychain entry of the id is not as
@@ -601,44 +546,65 @@ fn interrupted(did_not: &str) -> Stop {
     Stop(EXIT_INTERRUPTED, format!("interrupted (Ctrl-C). {did_not}"))
 }
 
-/// Everything the add checked before its prompts, checked again on a fresh
-/// read once the last prompt returned: the owner may have taken minutes,
-/// and the edit, the sentence and the audit entry were all built on the
-/// first read. Anything that changed since refuses the add (run it again).
+/// The projects not checked, in words (empty when every one was).
+fn not_checked(scan: &Scan) -> String {
+    if scan.unreachable.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " These projects this Mac knows could not be reached and were not checked: {}.",
+            scan.unreachable_words()
+        )
+    }
+}
+
+/// Everything the edit checked before its prompts, read again under the
+/// lock: the owner may have taken minutes, and the edit, the sentence and
+/// the record were built on the first read. Anything that changed since
+/// refuses the edit (run it again). Returns the fresh read to build on.
+/// What the owner was shown before the prompts: the read of the file and
+/// its records, and the scan.
+struct Shown<'a> {
+    standing: &'a Standing,
+    scan: &'a Scan,
+}
+
 fn nothing_changed_since(
-    editing: &Editing,
+    places: &Places,
+    locked: &Locked,
     id: &str,
-    file: &am_config::AccountsFile,
-    uses: &[AccountUse],
-) -> Result<(), Stop> {
-    let root = &editing.opened.root;
-    let again = format!("{NOT_ADDED_NOR_STORED}; run the command again");
-    no_owner_child(root, "add", NOT_ADDED_NOR_STORED)?;
-    editing.no_outside_change(NOT_ADDED_NOR_STORED)?;
-    let now = am_config::accounts_file(root);
-    if now.problem.is_some()
-        || now.exists != file.exists
-        || now.sha256 != file.sha256
-        || now.has(id)
-    {
+    present: bool,
+    shown: Shown<'_>,
+    what: &str,
+    did_not: &str,
+) -> Result<(Standing, Scan), Stop> {
+    let (before, scan) = (shown.standing, shown.scan);
+    let again = format!("{did_not}; run the command again");
+    let now = locked
+        .standing(places)
+        .map_err(|why| Stop(EXIT_ERRORS, format!("{why}. {did_not}")))?;
+    if now.outside_change() {
+        return refuse(crate::user::outside_words(places, did_not));
+    }
+    if !before.still(&now, id, present) {
         return refuse(format!(
-            "{ACCOUNTS_FILE} changed while this command waited at its prompt, so the add was built on what the file no longer holds. {again}"
+            "{USER_ACCOUNTS_FILE} changed while this command waited at its prompt, so the {what} was built on what the file no longer holds. {again}"
         ));
     }
-    let uses_now = am_config::account_uses(root, id);
-    if uses_now != uses {
+    let scan_now = crate::user::scan(places, id);
+    no_owner_child(&scan_now, what, did_not)?;
+    if scan_now.uses != scan.uses {
         return refuse(format!(
-            "what names the Account '{id}' changed while this command waited at its prompt: it is now named by {}, and the sentence you confirmed said {}. {again}",
-            uses_words(&uses_now),
-            uses_words(uses)
+            "what names the Account '{id}' changed while this command waited: it is now named by {}, and the sentence you saw said {}. {again}",
+            scan_now.uses_words(),
+            scan.uses_words()
         ));
     }
-    Ok(())
+    Ok((now, scan_now))
 }
 
 fn add(
     mut ctx: AccountsContext,
-    project: &Path,
     id: &str,
     provider: &str,
     name: Option<&str>,
@@ -653,17 +619,16 @@ fn add(
     }
     let endpoint = endpoint_of(provider, base_url, "--base-url")
         .map_err(|why| Stop(EXIT_ERRORS, format!("{why}. {NOT_ADDED}")))?;
-    let editing = open_for_edit(&ctx, project, "add", NOT_ADDED, out)?;
-    let root = editing.opened.root.clone();
+    let places = ctx.places.clone();
+    let standing = stand(&places, NOT_ADDED)?;
     if reserved(id) {
         return refuse(format!(
             "'{id}' is a reserved local Account: it is always available and is never added. {NOT_ADDED}"
         ));
     }
-    let file = patchable(&root, NOT_ADDED)?;
-    if file.has(id) {
+    if standing.file.has(id) {
         return refuse(format!(
-            "{ACCOUNTS_FILE} already has an Account '{id}'. {NOT_ADDED}; choose another id"
+            "this Mac already has an Account '{id}' (in {USER_ACCOUNTS_FILE}). {NOT_ADDED}; choose another id"
         ));
     }
     if !am_config::is_config_id(id) {
@@ -671,19 +636,23 @@ fn add(
             "'{id}' is not an Account id: use lowercase letters, digits and single hyphens (kebab-case), for example `cloud-main`. {NOT_ADDED}"
         ));
     }
-    let uses = am_config::account_uses(&root, id);
-    let named = if uses.is_empty() {
-        "Nothing in the project names it yet.".to_string()
+    let scan = crate::user::scan(&places, id);
+    no_owner_child(&scan, "add", NOT_ADDED)?;
+    let named = if scan.uses.is_empty() {
+        "Nothing in the projects this Mac knows names it yet.".to_string()
     } else {
         format!(
             "Already naming it, and brought into force by this add: {}.",
-            uses_words(&uses)
+            scan.uses_words()
         )
     };
+    // Whether the user store confirmed this id for this provider and
+    // endpoint: only then is a held key reused without typing it.
+    let confirmed = key_use::confirmed_destination(&places, id)
+        .map_err(|why| Stop(EXIT_ERRORS, format!("{why}. {NOT_ADDED}")))?
+        .is_some_and(|d| d.names(provider, &endpoint));
     // Whether the Keychain already holds a key for this id (an earlier add,
-    // another project): only that it is there, never its value. That key
-    // would be reused, so the sentence says where it will go before the id
-    // is typed.
+    // the per-project stage): only that it is there, never its value.
     let held = match ctx.secrets.get(id) {
         Ok(key) => key.is_some(),
         Err(e) => {
@@ -691,16 +660,28 @@ fn add(
         }
     };
     let reused = if held {
+        // Where that key was last confirmed, also when a removal followed.
+        let last = match key_use::last_confirmed(&places, id) {
+            Ok(Some(d)) => format!(" It was last confirmed for {}.", d.words()),
+            Ok(None) => " No confirmation of it is recorded on this Mac.".to_string(),
+            Err(why) => return refuse(format!("{why}. {NOT_ADDED}")),
+        };
+        let typed = if confirmed {
+            String::new()
+        } else {
+            " This Mac has no confirmation of that key for this provider and endpoint, so you will type it once more, hidden, to show it is yours.".to_string()
+        };
         format!(
-            " This Mac's Keychain already holds a key for '{id}': that key is reused, and it will be sent to {}.",
+            " This Mac's Keychain already holds a key for '{id}': that key is reused, and it will be sent to {}.{last}{typed}",
             endpoint.base_url
         )
     } else {
         String::new()
     };
     ctx.terminal.show(&format!(
-        "Adding the Account '{id}' (provider {provider}): its calls go to {}, with a key kept only in this Mac's Keychain.{reused} {named}\nTo confirm, type the Account's id ({id}) within 2 minutes: ",
-        endpoint.goes_to()
+        "Adding the Account '{id}' (provider {provider}) on this Mac, for every project: its calls go to {}, with a key kept only in this Mac's Keychain.{reused} {named}{}\nTo confirm, type the Account's id ({id}) within 2 minutes: ",
+        endpoint.goes_to(),
+        not_checked(&scan)
     ));
     let typed = match ctx.terminal.read_line(Some(CONFIRM_WITHIN)) {
         Ok(line) => line,
@@ -723,12 +704,10 @@ fn add(
             "what was typed is not the Account's id '{id}'. {NOT_ADDED}"
         ));
     }
-    // The key: an entry the Keychain already holds for this id is reused
-    // and never overwritten; otherwise it is read with echo off. The
-    // sentence said which of the two it is, so the Keychain is read again
-    // now that the id is typed: an entry that appeared or went away while
-    // the prompt waited refuses the add (the owner confirmed a sentence
-    // that no longer says which key goes to the endpoint).
+    // The key: an entry the Keychain already holds is reused and never
+    // overwritten; otherwise it is read with echo off. The Keychain is read
+    // again now that the id is typed: an entry that appeared or went away
+    // while the prompt waited refuses the add.
     let new_key = match ctx.secrets.get(id) {
         Err(e) => {
             return refuse(format!("the Keychain cannot be read ({e}). {NOT_ADDED}"));
@@ -740,6 +719,33 @@ fn add(
             ctx.terminal.show(&format!(
                 "The Keychain already holds a key for '{id}': reusing it (it is never overwritten).\n"
             ));
+            if !confirmed {
+                ctx.terminal.show(&format!(
+                    "Type the key the Keychain holds for '{id}' (not shown as you type or paste it): "
+                ));
+                let typed = match ctx.terminal.read_secret() {
+                    Ok(key) => key,
+                    Err(TerminalError::Interrupted) => return Err(interrupted(NOT_ADDED)),
+                    Err(e) => {
+                        return refuse(format!("no key was read ({e}). {NOT_ADDED}"));
+                    }
+                };
+                let same = match ctx.secrets.get(id) {
+                    Err(e) => {
+                        return refuse(format!("the Keychain cannot be read ({e}). {NOT_ADDED}"));
+                    }
+                    Ok(None) => {
+                        return refuse(format!("{}. {NOT_ADDED}", entry_changed(id)));
+                    }
+                    Ok(Some(stored)) => stored.expose() == typed.expose().trim(),
+                };
+                drop(typed);
+                if !same {
+                    return refuse(format!(
+                        "the key you typed does not match the key the Keychain holds for '{id}'. {NOT_ADDED}; the Keychain entry is left as it is"
+                    ));
+                }
+            }
             None
         }
         Ok(None) => {
@@ -761,9 +767,42 @@ fn add(
             ))
         }
     };
-    // The last prompt has returned. Before anything is stored: every check
-    // again on a fresh read, and a Ctrl-C pressed since the id was typed.
-    nothing_changed_since(&editing, id, &file, &uses)?;
+    // The last prompt has returned. Under `user.lock`: every check again on
+    // a fresh read, and a Ctrl-C pressed since the id was typed.
+    let before_unreachable = scan.unreachable.clone();
+    let locked = lock(&places, NOT_ADDED_NOR_STORED, out)?;
+    let (now, scan) = nothing_changed_since(
+        &places,
+        &locked,
+        id,
+        false,
+        Shown {
+            standing: &standing,
+            scan: &scan,
+        },
+        "add",
+        NOT_ADDED_NOR_STORED,
+    )?;
+    // What the sentence said and what decided the stored-key prompt must
+    // still hold: the projects not checked, and the confirmation.
+    if scan.unreachable != before_unreachable {
+        return refuse(format!(
+            "the projects this Mac could not reach changed while this command waited (now: {}). {NOT_ADDED_NOR_STORED}; run the command again",
+            if scan.unreachable.is_empty() {
+                "none".to_string()
+            } else {
+                scan.unreachable_words()
+            }
+        ));
+    }
+    let confirmed_now = key_use::confirmed_destination(&places, id)
+        .map_err(|why| Stop(EXIT_ERRORS, format!("{why}. {NOT_ADDED_NOR_STORED}")))?
+        .is_some_and(|d| d.names(provider, &endpoint));
+    if confirmed_now != confirmed {
+        return refuse(format!(
+            "this Mac's confirmation of '{id}' changed while this command waited. {NOT_ADDED_NOR_STORED}; run the command again"
+        ));
+    }
     if ctx.terminal.interrupted() {
         return Err(interrupted(NOT_ADDED_NOR_STORED));
     }
@@ -771,9 +810,7 @@ fn add(
         None => false,
         // The key prompt has no time limit, so the Keychain is read again
         // right before the store: an entry another process stored
-        // meanwhile is never overwritten, never deleted (this command did
-        // not create it) and never used, because the sentence said no key
-        // was held. The typed key is discarded and the add is refused.
+        // meanwhile is never overwritten, deleted or used.
         Some(key) => match ctx.secrets.get(id) {
             Err(e) => {
                 return refuse(format!(
@@ -813,44 +850,43 @@ fn add(
         let key = key_undone(ctx.secrets.as_ref());
         return Err(interrupted(&format!("No Account was added, and {key}")));
     }
-    // The write, with AD-15's widening record in its transaction. An edit
-    // is applied only while the file holds the bytes it was built on.
+    // The write, with AD-15's confirmation record in its transaction. An
+    // edit is applied only while the file holds the bytes it was built on.
+    let references: Vec<String> = scan
+        .uses
+        .iter()
+        .map(|(root, u)| format!("{}:{u}", root.display()))
+        .collect();
     let note = AuditNote {
         action: "config.widened".into(),
         target: id.to_string(),
         args: BTreeMap::from([
             ("kind".to_string(), "account_added".to_string()),
-            ("file".to_string(), ACCOUNTS_FILE.to_string()),
+            ("file".to_string(), USER_ACCOUNTS_FILE.to_string()),
             ("account".to_string(), id.to_string()),
             ("provider".to_string(), provider.to_string()),
             ("scheme".to_string(), endpoint.scheme.to_string()),
             ("host".to_string(), endpoint.host.clone()),
             ("port".to_string(), endpoint.port.to_string()),
-            (
-                "references".to_string(),
-                if uses.is_empty() {
-                    String::new()
-                } else {
-                    uses_words(&uses)
-                },
-            ),
+            ("references".to_string(), references.join(", ")),
+            ("key".to_string(), "stored".to_string()),
             ("confirmation".to_string(), "typed_id".to_string()),
         ]),
     };
-    let writer = &editing.opened.writer;
-    let written = match &file.sha256 {
-        Some(built_on) => writer.apply_with_audit(
+    let writer = &locked.writer;
+    let written = match (&now.file.sha256, now.file.exists) {
+        (Some(built_on), true) => writer.apply_with_audit(
             owner(),
-            am_config::add_account_edit(&file, id, provider, name, endpoint.written()),
+            am_config::add_account_edit(&now.file, id, provider, name, endpoint.written()),
             built_on,
             vec![note],
         ),
-        None => {
+        _ => {
             am_config::new_accounts_file(id, provider, name, endpoint.written()).and_then(|bytes| {
                 writer.create(
                     owner(),
                     ConfigCreate {
-                        file: ACCOUNTS_FILE.into(),
+                        file: USER_ACCOUNTS_FILE.into(),
                         bytes,
                         audit: vec![note],
                     },
@@ -862,23 +898,21 @@ fn add(
         Ok(entry) => entry,
         Err(e) => {
             let why = write_words(&e);
-            return match editing.written_pending() {
+            return match written_pending(&places, locked.history.as_ref()) {
                 // A failure after the file was written (the folder sync,
-                // the History commit): the next start records the entry,
+                // the History commit): the next lock records the entry,
                 // and the key stays.
                 Some(true) => refuse(format!(
-                    "the Account '{id}' was written to {ACCOUNTS_FILE}, but the write did not finish: {why}. Its History entry is recorded the next time the project opens; its key is in the Keychain"
+                    "the Account '{id}' was written to {USER_ACCOUNTS_FILE}, but the write did not finish: {why}. Its History entry is recorded the next time an Account command takes this Mac's Accounts lock; its key is in the Keychain"
                 )),
-                // That the id is in the file would not show it was this
-                // command's write: an outside edit can add the same id.
                 Some(false) => {
                     let key = key_undone(ctx.secrets.as_ref());
                     refuse(format!(
-                        "the Account '{id}' was not added: {why}. This command did not change {ACCOUNTS_FILE}, and {key}"
+                        "the Account '{id}' was not added: {why}. This command did not change {USER_ACCOUNTS_FILE}, and {key}"
                     ))
                 }
                 None => refuse(format!(
-                    "the write of the Account '{id}' stopped ({why}), and the project's store could not be read to tell whether {ACCOUNTS_FILE} was written; `agentic accounts list` shows what it holds. A key this command stored is still in the Keychain"
+                    "the write of the Account '{id}' stopped ({why}), and this Mac's user store could not be read to tell whether {USER_ACCOUNTS_FILE} was written; `agentic accounts list` shows what it holds. A key this command stored is still in the Keychain"
                 )),
             };
         }
@@ -890,76 +924,123 @@ fn add(
     };
     let _ = writeln!(
         out,
-        "agentic: added the Account '{id}' ({provider}, {}) to {ACCOUNTS_FILE} (History entry {}); {key}",
-        endpoint.base_url, entry.id
+        "agentic: added the Account '{id}' ({provider}, {}) to this Mac's Accounts, {} (History entry {}); {key}",
+        endpoint.base_url,
+        places.user.accounts_file().display(),
+        entry.id
     );
     Ok(())
 }
 
 fn remove(
     mut ctx: AccountsContext,
-    project: &Path,
     id: &str,
+    force: bool,
     out: &mut dyn Write,
 ) -> Result<(), Stop> {
     require_terminal(&ctx, "remove", NOT_REMOVED)?;
-    let editing = open_for_edit(&ctx, project, "remove", NOT_REMOVED, out)?;
-    let root = editing.opened.root.clone();
+    let places = ctx.places.clone();
+    let standing = stand(&places, NOT_REMOVED)?;
     if reserved(id) {
         return refuse(format!(
             "'{id}' is a reserved local Account: it is always available and cannot be removed. {NOT_REMOVED}"
         ));
     }
-    let file = patchable(&root, NOT_REMOVED)?;
-    let unknown = || {
-        Stop(
-            EXIT_ERRORS,
-            format!(
-                "there is no Account '{id}' in {ACCOUNTS_FILE} (`agentic accounts list` shows the Accounts). {NOT_REMOVED}"
-            ),
-        )
-    };
-    let Some(built_on) = file.sha256.as_deref().filter(|_| file.has(id)) else {
-        return Err(unknown());
-    };
-    let uses = am_config::account_uses(&root, id);
-    if !uses.is_empty() {
+    if !standing.file.has(id) {
         return refuse(format!(
-            "the Account '{id}' is still named by {}. {NOT_REMOVED}; point each at another Account first, then remove it",
-            uses_words(&uses)
+            "there is no Account '{id}' on this Mac (`agentic accounts list` shows the Accounts). {NOT_REMOVED}"
         ));
     }
-    let Some(edit) = am_config::remove_account_edit(&file, id) else {
-        return Err(unknown());
+    let scan = crate::user::scan(&places, id);
+    no_owner_child(&scan, "remove", NOT_REMOVED)?;
+    let referenced = |scan: &Scan| -> Result<(), Stop> {
+        if scan.uses.is_empty() {
+            return Ok(());
+        }
+        refuse(format!(
+            "the Account '{id}' is still named by {}. {NOT_REMOVED}; point each at another Account first, then remove it",
+            scan.uses_words()
+        ))
     };
+    referenced(&scan)?;
+    if !scan.unreachable.is_empty() && !force {
+        return refuse(format!(
+            "these projects this Mac knows could not be reached, and each might name the Account '{id}': {}. {NOT_REMOVED}; make them reachable and run the command again, or run `agentic accounts remove {id} --force` to remove it without checking them",
+            scan.unreachable_words()
+        ));
+    }
     if ctx.terminal.interrupted() {
         return Err(interrupted(NOT_REMOVED));
     }
+    let locked = lock(&places, NOT_REMOVED, out)?;
+    let (now, scan_now) = nothing_changed_since(
+        &places,
+        &locked,
+        id,
+        true,
+        Shown {
+            standing: &standing,
+            scan: &scan,
+        },
+        "remove",
+        NOT_REMOVED,
+    )?;
+    referenced(&scan_now)?;
+    if !scan_now.unreachable.is_empty() && !force {
+        return refuse(format!(
+            "these projects this Mac knows could not be reached: {}. {NOT_REMOVED}; run the command again",
+            scan_now.unreachable_words()
+        ));
+    }
+    let (Some(built_on), Some(edit)) = (
+        now.file.sha256.as_deref(),
+        am_config::remove_account_edit(&now.file, id),
+    ) else {
+        return refuse(format!(
+            "there is no Account '{id}' on this Mac any more. {NOT_REMOVED}"
+        ));
+    };
+    let note = AuditNote {
+        action: "config.narrowed".into(),
+        target: id.to_string(),
+        args: BTreeMap::from([
+            ("kind".to_string(), "account_removed".to_string()),
+            ("file".to_string(), USER_ACCOUNTS_FILE.to_string()),
+            ("account".to_string(), id.to_string()),
+        ]),
+    };
     // Applied only while the file holds the bytes the edit was built on.
-    let entry = editing
-        .opened
+    let entry = locked
         .writer
-        .apply_with_audit(owner(), edit, built_on, Vec::new())
+        .apply_with_audit(owner(), edit, built_on, vec![note])
         .map_err(|e| {
             let why = write_words(&e);
-            let words = match editing.written_pending() {
+            let words = match written_pending(&places, locked.history.as_ref()) {
                 // A failure after the file was replaced: the Account is
                 // gone from the file, its History entry pending.
                 Some(true) => format!(
-                    "the Account '{id}' was removed from {ACCOUNTS_FILE}, but the write did not finish: {why}. Its History entry is recorded the next time the project opens"
+                    "the Account '{id}' was removed from {USER_ACCOUNTS_FILE}, but the write did not finish: {why}. Its History entry is recorded the next time an Account command takes this Mac's Accounts lock"
                 ),
                 Some(false) => format!(
-                    "the Account '{id}' was not removed: {why}. This command did not change {ACCOUNTS_FILE}"
+                    "the Account '{id}' was not removed: {why}. This command did not change {USER_ACCOUNTS_FILE}"
                 ),
                 None => format!(
-                    "the removal of the Account '{id}' stopped ({why}), and the project's store could not be read to tell whether {ACCOUNTS_FILE} was written; `agentic accounts list` shows what it holds"
+                    "the removal of the Account '{id}' stopped ({why}), and this Mac's user store could not be read to tell whether {USER_ACCOUNTS_FILE} was written; `agentic accounts list` shows what it holds"
                 ),
             };
             Stop(EXIT_ERRORS, words)
         })?;
+    let skipped = if scan_now.unreachable.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " With --force it did not check these projects, which could not be reached: {}.",
+            scan_now.unreachable_words()
+        )
+    };
     let _ = writeln!(
         out,
-        "agentic: removed the Account '{id}' from {ACCOUNTS_FILE}. The change is recorded in History (entry {}) and can be undone from the app's History when the UI ships. Its key stays in the Keychain, because another project may use the same id; delete the entry '{id}' of service agentic-manager in Keychain Access if no project needs it",
+        "agentic: removed the Account '{id}' from this Mac's Accounts. The change is recorded in History (entry {}) and can be undone from the app's History when the UI ships. Its key stays in the Keychain; delete the entry '{id}' of service agentic-manager in Keychain Access if nothing needs it.{skipped}",
         entry.id
     );
     Ok(())
@@ -968,15 +1049,14 @@ fn remove(
 // ------------------------------------------------------------ list, test
 
 /// An Account's `secret_ref` when it names another Keychain entry than the
-/// Account's own id. AD-17 names a key's entry by the Account id, and that
-/// is the only entry `list` and `test` ever read: a `secret_ref` written by
-/// hand is never followed, or a config file could have any `agentic-manager`
-/// Keychain entry shown or sent to a provider.
+/// Account's own id (`am_config::key_ref` gives none for it): never
+/// followed, or a config file could have any `agentic-manager` Keychain
+/// entry shown or sent to a provider.
 fn other_entry(account: &am_config::Account) -> Option<&str> {
-    account
-        .secret_ref
-        .as_deref()
-        .filter(|entry| *entry != account.id)
+    match am_config::key_ref(account) {
+        Some(_) => None,
+        None => account.secret_ref.as_deref(),
+    }
 }
 
 /// A key as `list` shows it: dots, then its last 4 characters; dots only
@@ -1017,36 +1097,46 @@ fn host_of(account: &am_config::Account) -> String {
         .unwrap_or_else(|| "(its provider's host)".to_string())
 }
 
-fn readable(project: &Path) -> Result<am_config::AccountsFile, Stop> {
-    if !project.is_dir() {
+fn list(ctx: &AccountsContext, out: &mut dyn Write) -> Result<(), Stop> {
+    let places = &ctx.places;
+    let standing = Standing::read(places).map_err(|why| Stop(EXIT_ERRORS, why))?;
+    let file = &standing.file;
+    if let Some(problem) = &file.problem {
         return refuse(format!(
-            "the project folder {} does not exist",
-            project.display()
+            "{USER_ACCOUNTS_FILE} ({}) cannot be read as Accounts because {problem} (`agentic validate` names the line)",
+            places.user.accounts_file().display()
         ));
     }
-    let file = am_config::accounts_file(project);
-    match &file.problem {
-        Some(problem) => refuse(format!(
-            "{ACCOUNTS_FILE} cannot be read as Accounts because {problem} (`agentic validate` names the line)"
-        )),
-        None => Ok(file),
-    }
-}
-
-fn list(ctx: &AccountsContext, project: &Path, out: &mut dyn Write) -> Result<(), Stop> {
-    let file = readable(project)?;
     if file.ids.is_empty() {
         let _ = writeln!(
             out,
-            "agentic: no Accounts in {ACCOUNTS_FILE} yet; add one with `agentic accounts add <id>` and {PROVIDERS} (the local Accounts local-lmstudio and local-ollama are always available)"
+            "agentic: no Accounts on this Mac yet; add one with `agentic accounts add <id>` and {PROVIDERS} (the local Accounts local-lmstudio and local-ollama are always available)"
         );
         return Ok(());
     }
-    for id in file.ids.iter().flatten() {
-        let Some(account) = file.accounts.iter().find(|a| &a.id == id) else {
+    // An outside change: each Account's confirmed values are shown beside
+    // the file's, so the owner can put the file back by hand.
+    let outside = standing.outside_change();
+    if outside {
+        let _ = writeln!(
+            out,
+            "agentic: {USER_ACCOUNTS_FILE} ({}) changed on disk outside the app since the app last wrote it; no key is sent until it is put back. Each Account's last confirmed values are shown after `confirmed:`",
+            places.user.accounts_file().display()
+        );
+    }
+    for (n, id) in file.ids.iter().enumerate() {
+        // An invalid entry is named by its line, never by what it holds.
+        let Some(account) = id
+            .as_ref()
+            .and_then(|id| file.accounts.iter().find(|a| &a.id == id))
+        else {
+            let line = file
+                .lines
+                .get(n)
+                .map_or_else(|| format!("number {}", n + 1), |l| format!("at line {l}"));
             let _ = writeln!(
                 out,
-                "{id}  (not a valid Account entry; `agentic validate` names the line)"
+                "the entry {line}  (not a valid Account entry; `agentic validate` names the line)"
             );
             continue;
         };
@@ -1067,7 +1157,20 @@ fn list(ctx: &AccountsContext, project: &Path, out: &mut dyn Write) -> Result<()
         } else {
             "(its entry has an error; `agentic validate` names it)".to_string()
         };
-        let _ = writeln!(out, "{}  {}  {host}  {key}", account.id, account.provider);
+        let confirmed = if outside {
+            match key_use::confirmed_destination(places, &account.id) {
+                Ok(Some(d)) => format!("  confirmed: {}", d.words()),
+                Ok(None) => "  confirmed: nothing".to_string(),
+                Err(why) => format!("  confirmed: unknown ({why})"),
+            }
+        } else {
+            String::new()
+        };
+        let _ = writeln!(
+            out,
+            "{}  {}  {host}  {key}{confirmed}",
+            account.id, account.provider
+        );
     }
     Ok(())
 }
@@ -1085,111 +1188,122 @@ impl EventSink for Forward {
 
 const TEST_PROMPT: &str = "Count from one to three in words, one word per line, and nothing else.";
 
+/// `test`'s refusal of an Account the key-use check refused.
+fn refused_words(id: &str, refused: &Refused, provider: Option<&str>, own: bool) -> String {
+    match refused {
+        Refused::Store(why) => format!("{why}; no key was read and nothing was sent"),
+        Refused::NoAccount => format!(
+            "there is no Account '{id}' on this Mac (`agentic accounts list` shows the Accounts; add it with `agentic accounts add {id}`); nothing was sent"
+        ),
+        Refused::Entry(errors) => format!(
+            "the Account '{id}' is not called: its entry in {USER_ACCOUNTS_FILE} has an error ({}); `agentic validate` names the line and the fix. No key was read and nothing was sent",
+            errors.join("; ")
+        ),
+        Refused::NotModel(provider) => format!(
+            "the Account '{id}' is a {provider} Account, not a model Account (anthropic, openai or openai-compatible), the only kinds `agentic accounts test` calls; nothing was sent"
+        ),
+        Refused::Endpoint(why) => format!(
+            "the Account '{id}' in {USER_ACCOUNTS_FILE} cannot be called: {why}; no key was read and nothing was sent"
+        ),
+        Refused::SecretRef(_) => format!(
+            "the Account '{id}' has a `secret_ref` that names another Keychain entry; a key is only ever read from the entry named by the Account's own id, so no key was read and nothing was sent. Set `secret_ref: {id}` (or remove the line) in {USER_ACCOUNTS_FILE}"
+        ),
+        Refused::Interrupted => format!(
+            "the Account '{id}' is not called: {}. No key was read and nothing was sent",
+            key_use::interrupted_words()
+        ),
+        Refused::NotConfirmed(why) => {
+            let base_url = if own { " --base-url <url>" } else { "" };
+            format!(
+                "the Account '{id}' is not called: it was not confirmed by `agentic accounts add` on this Mac, or {USER_ACCOUNTS_FILE} changed since ({why}). No key was read or sent. If {USER_ACCOUNTS_FILE} was changed by hand, put it back as the app last wrote it; otherwise remove the Account and add it again in a terminal (`agentic accounts remove {id}`, then `agentic accounts add {id} --provider {}{base_url}`)",
+                provider.unwrap_or("<provider>")
+            )
+        }
+    }
+}
+
+/// The key-use check of `id` for `test`, in `test`'s words.
+fn checked(places: &Places, id: &str) -> Result<key_use::Confirmed, Stop> {
+    key_use::check(places, id).map_err(|refused| {
+        // The file's provider and endpoint, for the advice.
+        let file = am_config::accounts_file(places.user.dir());
+        let account = file.accounts.iter().find(|a| a.id == id);
+        let own = account.is_some_and(|a| a.base_url.is_some());
+        Stop(
+            EXIT_ERRORS,
+            refused_words(id, &refused, account.map(|a| a.provider.as_str()), own),
+        )
+    })
+}
+
 async fn test(
     ctx: &AccountsContext,
-    project: &Path,
     id: &str,
     model: Option<String>,
     out: &mut dyn Write,
 ) -> Result<(), Stop> {
-    let file = readable(project)?;
+    let places = &ctx.places;
     if reserved(id) {
         return refuse(format!(
-            "'{id}' is a local Account with no key; `agentic accounts test` calls the cloud Accounts in {ACCOUNTS_FILE}"
+            "'{id}' is a local Account with no key; `agentic accounts test` calls the cloud Accounts on this Mac"
         ));
     }
-    let Some(account) = file.accounts.iter().find(|a| a.id == id) else {
-        return refuse(format!(
-            "there is no Account '{id}' in {ACCOUNTS_FILE} (`agentic accounts list` shows the Accounts); nothing was sent"
-        ));
-    };
-    // An entry with an error is never called: the loader returns what it
-    // could read of it (a `base_url` it refuses reads as none).
-    let errors = file.entry_errors(id);
-    if !errors.is_empty() {
-        return refuse(format!(
-            "the Account '{id}' is not called: its entry in {ACCOUNTS_FILE} has an error ({}); `agentic validate` names the line and the fix. No key was read and nothing was sent",
-            errors.join("; ")
-        ));
-    }
-    if !is_model_provider(&account.provider) {
-        return refuse(format!(
-            "the Account '{id}' is a {} Account, not a model Account (anthropic, openai or openai-compatible), the only kinds `agentic accounts test` calls; nothing was sent",
-            account.provider
-        ));
-    }
-    // The endpoint is derived by the rules `add` applies, whatever a
-    // hand-written file says: a `base_url` outside them is never called.
-    let endpoint = endpoint_of(&account.provider, account.base_url.as_deref(), "base_url")
-        .map_err(|why| {
-            Stop(
-                EXIT_ERRORS,
-                format!(
-                    "the Account '{id}' in {ACCOUNTS_FILE} cannot be called: {why}; no key was read and nothing was sent"
-                ),
-            )
-        })?;
-    if let Some(entry) = other_entry(account) {
-        return refuse(format!(
-            "the Account '{id}' has `secret_ref: {entry}`, which names another Keychain entry; a key is only ever read from the entry named by the Account's own id, so no key was read and nothing was sent. Set `secret_ref: {id}` (or remove the line) in {ACCOUNTS_FILE}"
-        ));
-    }
-    // A key goes only to what the owner confirmed (AD-15, AD-16, AD-48):
-    // before any Keychain read, the file must be as the app last wrote it
-    // and the latest `account_added` note of this Account must name its
-    // provider and endpoint.
-    // The project's egress directory, read now: the client is built over
-    // it, and the app's own port it records (while `agentic serve` runs)
-    // is refused before any Keychain read (AD-12).
-    let directory = crate::egress::ProjectDirectory::open(project, &ctx.places)
-        .map_err(|why| Stop(EXIT_ERRORS, format!("{why}; nothing was sent")))?;
-    if endpoint.loopback && directory.own_ports().contains(&endpoint.port) {
+    // AD-15 Key use: before any Keychain read or request.
+    let mut confirmed = checked(places, id)?;
+    // The app's own ports (every running `agentic serve`, and the one each
+    // runtime folder records): an Account never reaches the app itself.
+    let directory = crate::egress::ProjectDirectory::for_accounts(places);
+    if confirmed.endpoint.loopback && directory.own_ports().contains(&confirmed.endpoint.port) {
         return refuse(format!(
             "the Account '{id}' is not called: {}, and an Account never reaches the app itself. No key was read and nothing was sent",
-            crate::egress::own_server_words(endpoint.port)
-        ));
-    }
-    if let Err(why) = crate::egress::confirmed(&ctx.places, project, &file, account, &endpoint) {
-        let base_url = if endpoint.own {
-            " --base-url <url>"
-        } else {
-            ""
-        };
-        return refuse(format!(
-            "the Account '{id}' is not called: it was not confirmed by `agentic accounts add` on this Mac, or {ACCOUNTS_FILE} changed since ({why}). No key was read or sent. If {ACCOUNTS_FILE} was changed by hand, put it back as the app last wrote it; otherwise remove the Account and add it again in a terminal (`agentic accounts remove {id}`, then `agentic accounts add {id} --provider {}{base_url}`)",
-            account.provider
+            crate::egress::own_server_words(confirmed.endpoint.port)
         ));
     }
     // No default model id is assumed for a provider whose model list this
     // app does not hold.
-    let model = match (model, account.provider.as_str()) {
+    let model = match (model, confirmed.account.provider.as_str()) {
         (Some(model), _) => model,
         (None, ANTHROPIC) => crate::DEFAULT_ANTHROPIC_MODEL.to_string(),
         (None, provider) => {
             return refuse(format!(
                 "`agentic accounts test {id}` needs `--model <model>`: no default model is assumed for an {provider} Account; name one its endpoint ({}) serves. No key was read and nothing was sent",
-                endpoint.base_url
+                confirmed.endpoint.base_url
             ));
         }
     };
-    match ctx.secrets.get(id) {
-        Ok(Some(_)) => {}
-        Ok(None) => {
-            return refuse(format!(
-                "the Account '{id}' has no key in Keychain on this Mac, so nothing was sent. From the command line a key is stored only when an Account is added, and adding '{id}' again needs it removed first, which needs it unreferenced (no seat, fallback, capability or Source naming it); the app's Account card will set a key when it ships"
-            ));
+    // The key read, then the re-check before anything is sent (AD-15, Key
+    // use): a record that moved meanwhile drops the key unsent and the
+    // check runs again.
+    for attempt in 0..2 {
+        match ctx.secrets.get(id) {
+            Ok(Some(key)) => drop(key),
+            Ok(None) => {
+                return refuse(format!(
+                    "the Account '{id}' has no key in Keychain on this Mac, so nothing was sent. From the command line a key is stored only when an Account is added, and adding '{id}' again needs it removed first, which needs it unreferenced (no seat, fallback, capability or Source naming it); the app's Account card will set a key when it ships"
+                ));
+            }
+            Err(e) => {
+                return refuse(format!(
+                    "the Keychain cannot be read ({e}); nothing was sent"
+                ));
+            }
         }
-        Err(e) => {
+        if key_use::stamp(places, id) == Some(confirmed.stamp) {
+            break;
+        }
+        // Moved: the key read is dropped unsent; check again.
+        confirmed = checked(places, id)?;
+        if attempt == 1 {
             return refuse(format!(
-                "the Keychain cannot be read ({e}); nothing was sent"
+                "the Account '{id}' kept changing on this Mac while its key was read, so nothing was sent; run the command again"
             ));
         }
     }
-    // Only the Account's pinned endpoint (AD-12, AD-48): the client asks
-    // the project's egress directory, which answers this Account only while
-    // it is confirmed. `test` opens no store (it works while `serve` holds
-    // the project), so a block is collected and printed, not audited
-    // (owner decision 3, 2026-11-22).
+    let account = confirmed.account.clone();
+    let endpoint = confirmed.endpoint.clone();
+    // Only the Account's pinned endpoint (AD-12, AD-48): the client asks a
+    // directory that answers this Account only while it is confirmed. `test`
+    // opens no store, so a block is collected and printed, not audited.
     let blocks = Arc::new(Blocks::default());
     let egress = (ctx.egress)(Arc::new(directory), blocks.clone());
     // The adapter by provider. OpenAI and compatible Accounts authenticate

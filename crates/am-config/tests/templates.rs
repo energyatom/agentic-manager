@@ -285,8 +285,22 @@ fn sample_validates_and_holds_its_people_and_teams() {
             "{id}: cloud model is the fallback"
         );
     }
-    for account in snap.accounts() {
-        assert!(account.secret_ref.is_some(), "{}: secret_ref", account.id);
+    // Story 2.12 (AD-17): the sample holds no Account definition; its cloud
+    // fallbacks name user-level Accounts by id, which its Accounts fixture
+    // (`fixtures/accounts/sample.yaml`) defines, each keyed by its own id.
+    assert!(!sample().join("models/accounts.yaml").exists());
+    let user = am_config::user_accounts::load(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/accounts/sample.yaml"),
+    );
+    assert!(user.findings.is_empty(), "{:#?}", user.findings);
+    for id in strs(&e["cloud_fallback"]) {
+        let first = &seat(&snap, &id).fallback[0];
+        let account = user
+            .accounts
+            .get(&first.account)
+            .unwrap_or_else(|| panic!("{id}: {} is in the sample's Accounts", first.account));
+        assert_eq!(account.secret_ref.as_deref(), Some(account.id.as_str()));
+        assert_eq!(am_config::key_ref(account), Some(account.id.as_str()));
     }
     assert_eq!(snap.company().currency, s(&e["currency"]));
 }

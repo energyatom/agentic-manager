@@ -139,9 +139,9 @@ fn render_on_a_feed_and_a_remote_plain_http_base_url_are_errors() {
     let f = at(&found, "sources/news.yaml", 9, "render");
     assert_eq!(f.severity, Severity::Error);
     assert!(f.fix.contains("http-reader"), "{}", f.fix);
-    let f = at(&found, "models/accounts.yaml", 5, "base_url");
-    assert_eq!(f.severity, Severity::Error);
-    assert_eq!(errors(&found).len(), 5, "{found:#?}");
+    // Story 2.12: the crawl Account's plain-http `base_url` moved with the
+    // Accounts file to `fixtures/accounts/broken.yaml` (user_accounts.rs).
+    assert_eq!(errors(&found).len(), 4, "{found:#?}");
 }
 
 // Variants.
@@ -167,7 +167,8 @@ fn type_owner_and_account_are_checked() {
         "account: crawly",
         "account: finder",
     );
-    let found = findings(copy.path());
+    // Story 2.12: the Account's kind is known only from the user list.
+    let found = findings_with(copy.path(), "sources");
     let f = at(&found, "sources/site.yaml", 2, "scraper");
     assert!(f.fix.contains("crawler"), "{}", f.fix);
     at(&found, "sources/search.yaml", 3, "unknown seat 'nobody'");
@@ -289,9 +290,5 @@ fn render_is_allowed_on_http_reader_and_crawler() {
     assert!(errors(&findings(copy.path())).is_empty());
 }
 
-#[test]
-fn searxng_remote_on_this_mac_is_a_valid_search_account() {
-    let snap = snapshot(&fixture("sources-ok"));
-    let local = snap.accounts().iter().find(|a| a.id == "local").unwrap();
-    assert_eq!(local.base_url.as_deref(), Some("http://127.0.0.1:8888"));
-}
+// Story 2.12: `searxng_remote_on_this_mac_is_a_valid_search_account` moved to
+// user_accounts.rs with the Accounts file (AD-17).
