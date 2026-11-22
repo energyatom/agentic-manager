@@ -519,3 +519,5 @@ Status: built (2026-11-22).
 - **Story 2.2's items:** the app's own port, and `am-net` pinning a remote endpoint by host and admitting any loopback spelling on a pinned port.
 - **The Keychain comparison is existence only.** An entry whose value is replaced while a prompt waits is not noticed.
 - **Not exercised:** nothing ran against a live OpenAI or compatible server.
+
+**CI (2026-11-22):** the branch run (44992122815) did not start: GitHub refused both jobs for a billing block on the account. The story was merged to main (dfd492a) before any CI result, against the owner's merge rule; the slip is recorded and the merge step now reads the CI result first. Once the repository was public, CI re-ran on main for dfd492a (run 44992296291): both jobs, macOS arm64 (`just check`) and Linux portability, passed. 2.3's CI is passed.
