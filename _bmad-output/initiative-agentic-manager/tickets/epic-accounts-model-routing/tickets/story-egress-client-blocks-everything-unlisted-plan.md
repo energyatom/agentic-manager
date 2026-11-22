@@ -3,7 +3,7 @@ title: 'Egress client blocks everything unlisted'
 type: feature
 ticket: 2
 created: '2026-11-22'
-status: built
+status: done
 baseline_revision: 'afff3b622980c3d01b43a8005419ffc255555bb2'
 route: full
 route_source: auto
