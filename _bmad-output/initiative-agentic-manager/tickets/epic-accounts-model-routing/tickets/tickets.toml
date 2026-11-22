@@ -37,6 +37,17 @@ hitl = false
 risk = "medium"
 
 [[entry]]
+id = 10
+type = "story"
+title = "Keyless Accounts on this Mac"
+description = "Owner decision 2026-11-22 (arch AD-15): an `openai-compatible` Account whose endpoint is `http://127.0.0.1:<port>` (a llama.cpp- or vLLM-style server on this Mac) may be added with no key, so no fake key is typed; a remote endpoint always needs a key. Story 3's add path is otherwise unchanged (interactive terminal, the Account's name typed to confirm, History and the `account_added` audit note): the add's sentence says the calls carry no credential and stay on this Mac, the file holds no `secret_ref` for that Account, the note records `key: none`, and `accounts test` sends no credential once story 3's confirmed check passes; `list` shows the Account as keyless."
+verify = "Written first, failing: on a terminal, adding a compatible Account at `http://127.0.0.1:8080/v1` with no key (the owner's explicit choice at the prompt) writes no `secret_ref`, stores nothing in the Keychain, records `key: none` and names the endpoint as on this Mac with no credential; `accounts test` on it sends a request with no `Authorization` header to that port only; the same choice on an `https://` endpoint is refused in words with nothing written; a hand edit that removes `secret_ref` from a keyed remote Account is refused by the confirmed check; `list` shows the Account as keyless."
+covers = ["R1"]
+after = [3]
+hitl = false
+risk = "medium"
+
+[[entry]]
 id = 4
 type = "story"
 title = "LM Studio and Ollama appear on their own"
@@ -57,6 +68,17 @@ covers = ["R6"]
 after = [2]
 hitl = true
 risk = "high"
+
+[[entry]]
+id = 11
+type = "story"
+title = "OpenAI calls send the output limit the model expects"
+description = "Owner decision 2026-11-22: story 3's OpenAI-chat-compatible adapter sends the spike's `max_tokens`, which newer OpenAI cloud models may refuse in favour of `max_completion_tokens`. For an `openai` Account the adapter sends the output-limit field the model accepts, chosen from the shipped capabilities file (or a refusal answer naming the field, retried once with the other field), and `accounts test` asks for enough output tokens that a reasoning model can answer; compatible endpoints keep `max_tokens` unless their capabilities say otherwise. Proven with a real key once story 5's redaction layer and leak scan exist."
+verify = "Written first, failing: on recorded fixtures, an `openai` request for a model the capabilities file marks as using `max_completion_tokens` carries that field and not `max_tokens`; a recorded refusal naming the field is retried once with the other field and succeeds; a compatible endpoint keeps `max_tokens`; `accounts test` on a reasoning model's recording prints its answer text. The owner runs `accounts test` once against a real OpenAI Account after story 5 and records the result."
+covers = ["R1", "R4"]
+after = [3, 5]
+hitl = false
+risk = "low"
 
 [[entry]]
 id = 6
@@ -98,6 +120,6 @@ title = "Refactor sweep"
 description = "Cleanup only, scoped at its start from the plans and review findings this epic deferred: no new behaviour; scope pushed out of another story becomes a new story."
 verify = "`just check` and CI on main are green, including the rule_09 and rule_12 suites, and every deferred finding from this epic is closed or named in a new story."
 covers = []
-after = [1, 2, 3, 4, 5, 6, 7, 9]
+after = [1, 2, 3, 4, 5, 6, 7, 9, 10, 11]
 hitl = false
 risk = "low"
