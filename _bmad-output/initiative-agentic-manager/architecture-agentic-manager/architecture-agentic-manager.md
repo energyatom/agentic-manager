@@ -510,7 +510,7 @@ stateDiagram-v2
 | dom_smoothie (main-content extraction, AD-39) | 0.19.0 |
 | htmd (HTML to Markdown, AD-39) | 0.5.6 |
 | encoding_rs (charset decoding, AD-39) | 0.8.44 |
-| url (WHATWG URL canonicalisation, AD-39) | 2.5.8 |
+| url (WHATWG URL canonicalisation, AD-39; 2.5.9 for RUSTSEC-2026-0592, amended 2026-11-22, owner) | 2.5.9 |
 | feed-rs (RSS, Atom, JSON Feed, AD-39) | 3.0.0 |
 | quick-xml (sitemaps, AD-39) | 0.42.0 |
 | csv (AD-39) | 1.4.0 |
