@@ -23,7 +23,7 @@ use am_domain::{ConfigHistory, HistoryError};
 use serde_json::{Map, Value, json};
 
 use crate::canon::{self, FileKind};
-use crate::finding::Report;
+use crate::finding::{Report, Severity};
 use crate::node::{Kind, Node};
 use crate::refs::RefKind;
 use crate::writer::sha256_hex;
@@ -68,6 +68,8 @@ pub struct AccountsFile {
     /// `accounts:` holds a list (an item is appended to it); otherwise the
     /// key is absent or empty and is set whole.
     list: bool,
+    /// The loader's errors on each item of `accounts:`, in file order.
+    errors: Vec<Vec<String>>,
 }
 
 impl AccountsFile {
@@ -75,6 +77,40 @@ impl AccountsFile {
     pub fn has(&self, id: &str) -> bool {
         self.ids.iter().any(|i| i.as_deref() == Some(id))
     }
+
+    /// The errors the loader has on the entry (or entries) with this id,
+    /// each as `line N: message`; empty when the entry has none, or there
+    /// is no such entry. The loader still returns such an Account with what
+    /// it could read (a `base_url` it refuses reads as none), so an entry
+    /// with an error is not one to call (story 2.3).
+    pub fn entry_errors(&self, id: &str) -> Vec<String> {
+        self.ids
+            .iter()
+            .zip(&self.errors)
+            .filter(|(i, _)| i.as_deref() == Some(id))
+            .flat_map(|(_, errors)| errors.iter().cloned())
+            .collect()
+    }
+}
+
+/// The first and last line of a node: its own line and those of every key
+/// and value under it.
+fn lines_of(node: &Node) -> (u32, u32) {
+    let mut span = (node.line, node.line);
+    let mut widen = |(first, last): (u32, u32)| {
+        span = (span.0.min(first), span.1.max(last));
+    };
+    match &node.kind {
+        Kind::Seq(items) => items.iter().map(lines_of).for_each(&mut widen),
+        Kind::Map(pairs) => {
+            for (key, value) in pairs {
+                widen((key.line, key.line));
+                widen(lines_of(value));
+            }
+        }
+        _ => {}
+    }
+    span
 }
 
 fn text_of(node: &Node) -> Option<String> {
@@ -101,6 +137,7 @@ pub fn accounts_file(root: &Path) -> AccountsFile {
         ids: Vec::new(),
         accounts: Vec::new(),
         list: false,
+        errors: Vec::new(),
     };
     let bytes = match std::fs::read(root.join(ACCOUNTS_FILE)) {
         Ok(b) => b,
@@ -124,6 +161,7 @@ pub fn accounts_file(root: &Path) -> AccountsFile {
             return out;
         }
     };
+    let mut spans = Vec::new();
     match at(&doc.tree, "accounts").map(|n| &n.kind) {
         None | Some(Kind::Null) => {}
         Some(Kind::Seq(items)) => {
@@ -132,6 +170,7 @@ pub fn accounts_file(root: &Path) -> AccountsFile {
                 .iter()
                 .map(|item| at(item, "id").and_then(text_of))
                 .collect();
+            spans = items.iter().map(lines_of).collect();
         }
         Some(_) => {
             out.problem = Some("its `accounts` is not a list".into());
@@ -140,6 +179,17 @@ pub fn accounts_file(root: &Path) -> AccountsFile {
     }
     let mut rep = Report::new(ACCOUNTS_FILE);
     out.accounts = kinds::accounts(&mut rep, &doc.tree);
+    // Each error of the loader, filed under the entry whose lines hold it.
+    out.errors = spans
+        .iter()
+        .map(|(first, last)| {
+            rep.findings
+                .iter()
+                .filter(|f| f.severity == Severity::Error && (*first..=*last).contains(&f.line))
+                .map(|f| format!("line {}: {}", f.line, f.message))
+                .collect()
+        })
+        .collect();
     out
 }
 
@@ -199,13 +249,17 @@ pub fn account_uses(root: &Path, id: &str) -> Vec<AccountUse> {
 }
 
 /// The Account as its item in the file: `id`, `provider`, the optional
-/// `name`, and `secret_ref` naming the Keychain entry (never a key).
-fn account_item(id: &str, provider: &str, name: Option<&str>) -> Value {
+/// `name`, the `base_url` of an Account whose provider has no fixed endpoint
+/// (story 2.3), and `secret_ref` naming the Keychain entry (never a key).
+fn account_item(id: &str, provider: &str, name: Option<&str>, base_url: Option<&str>) -> Value {
     let mut item = Map::new();
     item.insert("id".into(), json!(id));
     item.insert("provider".into(), json!(provider));
     if let Some(name) = name {
         item.insert("name".into(), json!(name));
+    }
+    if let Some(base_url) = base_url {
+        item.insert("base_url".into(), json!(base_url));
     }
     item.insert("secret_ref".into(), json!(id));
     Value::Object(item)
@@ -213,13 +267,15 @@ fn account_item(id: &str, provider: &str, name: Option<&str>) -> Value {
 
 /// The edit that appends the Account to the existing file `file`. It names
 /// the list by what `file` saw, so it is applied with `file.sha256`.
+/// `base_url` is `None` for a provider with one fixed endpoint.
 pub fn add_account_edit(
     file: &AccountsFile,
     id: &str,
     provider: &str,
     name: Option<&str>,
+    base_url: Option<&str>,
 ) -> ConfigEdit {
-    let item = account_item(id, provider, name);
+    let item = account_item(id, provider, name, base_url);
     let op = if file.list {
         EditOp::Set {
             path: vec!["accounts".into(), file.ids.len().to_string()],
@@ -253,16 +309,18 @@ pub fn remove_account_edit(file: &AccountsFile, id: &str) -> Option<ConfigEdit> 
 }
 
 /// The canonical bytes of a new `models/accounts.yaml` holding one Account,
-/// for a [`crate::ConfigCreate`].
+/// for a [`crate::ConfigCreate`]. `base_url` is `None` for a provider with
+/// one fixed endpoint.
 pub fn new_accounts_file(
     id: &str,
     provider: &str,
     name: Option<&str>,
+    base_url: Option<&str>,
 ) -> Result<Vec<u8>, WriteError> {
     let bad = |e: String| WriteError::BadEdit(format!("{ACCOUNTS_FILE}: {e}"));
     let head = format!("schema_version: {}\n", checks::SCHEMA_VERSION);
     let mut doc = canon::parse(FileKind::Accounts, &head).map_err(bad)?;
-    let list = Value::Array(vec![account_item(id, provider, name)]);
+    let list = Value::Array(vec![account_item(id, provider, name, base_url)]);
     canon::apply(&mut doc.tree, &["accounts".to_string()], Some(&list)).map_err(bad)?;
     canon::emit(&doc).map(String::into_bytes).map_err(bad)
 }

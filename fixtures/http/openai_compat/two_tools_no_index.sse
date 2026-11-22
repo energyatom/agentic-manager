@@ -1,0 +1,14 @@
+: Story 2.3 recording, written by hand in the stream format of an OpenAI-chat-compatible server that omits `index` on tool calls (no live capture; no key, no real host).
+
+data: {"id":"chatcmpl-fixture-compat-noindex","object":"chat.completion.chunk","created":1795000000,"model":"local-tool-model","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-fixture-compat-noindex","object":"chat.completion.chunk","created":1795000000,"model":"local-tool-model","choices":[{"index":0,"delta":{"tool_calls":[{"id":"call_fixture_n1","type":"function","function":{"name":"lookup_word","arguments":"{\"word\": \"wren\"}"}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-fixture-compat-noindex","object":"chat.completion.chunk","created":1795000000,"model":"local-tool-model","choices":[{"index":0,"delta":{"tool_calls":[{"id":"call_fixture_n2","type":"function","function":{"name":"count_letters","arguments":"{\"text\": \"wren\"}"}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-fixture-compat-noindex","object":"chat.completion.chunk","created":1795000000,"model":"local-tool-model","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
+
+data: {"id":"chatcmpl-fixture-compat-noindex","object":"chat.completion.chunk","created":1795000000,"model":"local-tool-model","choices":[],"usage":{"prompt_tokens":150,"completion_tokens":29,"total_tokens":179}}
+
+data: [DONE]
+

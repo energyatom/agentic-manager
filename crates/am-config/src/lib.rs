@@ -44,6 +44,11 @@
 //! [`account_uses`], [`add_account_edit`], [`remove_account_edit`],
 //! [`new_accounts_file`], [`outside_changes`]).
 //!
+//! Story 2.3: [`compatible_base_url`] is the one rule for an
+//! `openai-compatible` Account's `base_url`, applied by the loader and by
+//! `agentic accounts`; [`AccountsFile::entry_errors`] names the errors of
+//! one entry of `models/accounts.yaml`.
+//!
 //! Story 1.9 (R2, AD-16): [`ConfigSession`] holds the accepted bytes of every
 //! file the snapshot is read from and builds the snapshot only from them (an
 //! exact-map load, no disk read of those files); a `notify` watcher announces
@@ -53,6 +58,7 @@
 #![forbid(unsafe_code)]
 
 mod account_edit;
+mod base_url;
 mod canon;
 mod checks;
 mod cron;
@@ -77,6 +83,7 @@ pub use account_edit::{
     ACCOUNTS_FILE, AccountUse, AccountsFile, account_uses, accounts_file, add_account_edit,
     is_config_id, new_accounts_file, outside_changes, remove_account_edit, reserved_account_ids,
 };
+pub use base_url::{COMPATIBLE_BASE_URL_FORMS, CompatibleBaseUrl, compatible_base_url};
 pub use entities::*;
 pub use finding::{Finding, Severity};
 pub use migrate::{MigrationOffer, accept_migrations, migration_offers};

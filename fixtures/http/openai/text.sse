@@ -1,0 +1,22 @@
+: Story 2.3 recording, written by hand in OpenAI's chat-completions stream format (no live capture; no key, no real host).
+
+data: {"id":"chatcmpl-fixture-oa-text","object":"chat.completion.chunk","created":1795000000,"model":"example-model-2026-10-01","service_tier":"default","system_fingerprint":"fp_fixture","choices":[{"index":0,"delta":{"role":"assistant","content":"","refusal":null},"logprobs":null,"finish_reason":null}],"usage":null}
+
+data: {"id":"chatcmpl-fixture-oa-text","object":"chat.completion.chunk","created":1795000000,"model":"example-model-2026-10-01","service_tier":"default","system_fingerprint":"fp_fixture","choices":[{"index":0,"delta":{"content":"one"},"logprobs":null,"finish_reason":null}],"usage":null}
+
+data: {"id":"chatcmpl-fixture-oa-text","object":"chat.completion.chunk","created":1795000000,"model":"example-model-2026-10-01","service_tier":"default","system_fingerprint":"fp_fixture","choices":[{"index":0,"delta":{"content":"\n"},"logprobs":null,"finish_reason":null}],"usage":null}
+
+data: {"id":"chatcmpl-fixture-oa-text","object":"chat.completion.chunk","created":1795000000,"model":"example-model-2026-10-01","service_tier":"default","system_fingerprint":"fp_fixture","choices":[{"index":0,"delta":{"content":"two"},"logprobs":null,"finish_reason":null}],"usage":null}
+
+data: {"id":"chatcmpl-fixture-oa-text","object":"chat.completion.chunk","created":1795000000,"model":"example-model-2026-10-01","service_tier":"default","system_fingerprint":"fp_fixture","choices":[{"index":0,"delta":{"content":"\n"},"logprobs":null,"finish_reason":null}],"usage":null}
+
+data: {"id":"chatcmpl-fixture-oa-text","object":"chat.completion.chunk","created":1795000000,"model":"example-model-2026-10-01","service_tier":"default","system_fingerprint":"fp_fixture","choices":[{"index":0,"delta":{"content":"three"},"logprobs":null,"finish_reason":null}],"usage":null}
+
+data: {"id":"chatcmpl-fixture-oa-text","object":"chat.completion.chunk","created":1795000000,"model":"example-model-2026-10-01","service_tier":"default","system_fingerprint":"fp_fixture","choices":[{"index":0,"delta":{"content":"\n"},"logprobs":null,"finish_reason":null}],"usage":null}
+
+data: {"id":"chatcmpl-fixture-oa-text","object":"chat.completion.chunk","created":1795000000,"model":"example-model-2026-10-01","service_tier":"default","system_fingerprint":"fp_fixture","choices":[{"index":0,"delta":{},"logprobs":null,"finish_reason":"stop"}],"usage":null}
+
+data: {"id":"chatcmpl-fixture-oa-text","object":"chat.completion.chunk","created":1795000000,"model":"example-model-2026-10-01","service_tier":"default","system_fingerprint":"fp_fixture","choices":[],"usage":{"prompt_tokens":24,"completion_tokens":6,"total_tokens":30,"prompt_tokens_details":{"cached_tokens":0,"audio_tokens":0},"completion_tokens_details":{"reasoning_tokens":0,"audio_tokens":0,"accepted_prediction_tokens":0,"rejected_prediction_tokens":0}}}
+
+data: [DONE]
+

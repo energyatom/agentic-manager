@@ -301,6 +301,29 @@ fn web_url(rep: &mut Report, t: &Text, name: &str) -> bool {
     ok
 }
 
+/// The provider whose Account names its own endpoint.
+const OPENAI_COMPATIBLE: &str = "openai-compatible";
+
+/// The two forms of a compatible `base_url`, as a fix gives them.
+const COMPATIBLE_FIX: &str = "https://<host>[/path] (a DNS name, port 443), or http://127.0.0.1:<port>[/path] for a server on this Mac";
+
+/// An openai-compatible Account's `base_url`: one of the two forms
+/// [`crate::compatible_base_url`] accepts. The error does not repeat the
+/// URL (it may hold a password).
+fn compatible_url(rep: &mut Report, t: &Text) -> bool {
+    match crate::compatible_base_url(&t.value) {
+        Ok(_) => true,
+        Err(why) => {
+            rep.error(
+                t.line,
+                format!("'base_url' of an openai-compatible account is not accepted: {why}"),
+                format!("set `base_url:` to {COMPATIBLE_FIX}"),
+            );
+            false
+        }
+    }
+}
+
 /// `company.yaml`. A `project_id` (AD-32) must be a UUIDv7; a template or
 /// fixture (`template`) carries none.
 pub(crate) fn company(
@@ -475,9 +498,18 @@ pub(crate) fn accounts(rep: &mut Report, root: &Node) -> Vec<Account> {
                 format!("add `provider:` with one of: {}", providers.join(", ")),
             );
         }
-        let base_url = a
-            .text(rep, "base_url")
-            .filter(|t| web_url(rep, t, "base_url"));
+        // An openai-compatible Account's endpoint follows its own, stricter
+        // rule (story 2.3): the one `agentic accounts add` applies.
+        let compatible = provider
+            .as_ref()
+            .is_some_and(|p| p.value == OPENAI_COMPATIBLE);
+        let base_url = a.text(rep, "base_url").filter(|t| {
+            if compatible {
+                compatible_url(rep, t)
+            } else {
+                web_url(rep, t, "base_url")
+            }
+        });
         if let Some(p) = &provider
             && capability::provider_needs_base_url(&p.value)
             && base_url.is_none()
@@ -491,7 +523,11 @@ pub(crate) fn accounts(rep: &mut Report, root: &Node) -> Vec<Account> {
             rep.error(
                 a.line,
                 format!("{article} {} account needs 'base_url'", p.value),
-                "add `base_url: https://…` (or http://127.0.0.1:<port> or http://localhost:<port> for a server on this Mac)",
+                if compatible {
+                    format!("add `base_url:` with {COMPATIBLE_FIX}")
+                } else {
+                    "add `base_url: https://…` (or http://127.0.0.1:<port> or http://localhost:<port> for a server on this Mac)".to_string()
+                },
             );
         }
         if let Some(id) = &id {

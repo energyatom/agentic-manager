@@ -201,6 +201,7 @@ version = "0.0.1"
 dependencies = [
  "am-domain",
  "am-net",
+ "am-testkit",
  "base64 0.23.1",
  "serde_json",
  "tokio",

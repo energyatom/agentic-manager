@@ -262,6 +262,39 @@ impl Reader {
         Ok((count, head))
     }
 
+    /// The `args` of every entry of `action` on `target`, oldest first: each
+    /// as its text values by key (what an [`am_domain::AuditNote`] holds). An
+    /// entry without `args` gives an empty map, and a value that is not
+    /// text is left out. Read-only and lock-free, so `agentic accounts
+    /// test` can find what the latest `account_added` note of an Account
+    /// recorded (story 2.3).
+    pub fn audit_args(
+        &self,
+        action: &str,
+        target: &str,
+    ) -> Result<Vec<BTreeMap<String, String>>, StoreError> {
+        migrations::refuse_newer(migrations::user_version(&self.conn)?)?;
+        let mut found = Vec::new();
+        each_row(&self.conn, |row| {
+            if row.action != action || row.target != target {
+                return Ok(());
+            }
+            let mut args = BTreeMap::new();
+            if let Some(text) = &row.args
+                && let Value::Object(map) = stored_json("args", row.seq, text)?
+            {
+                for (key, value) in map {
+                    if let Value::String(value) = value {
+                        args.insert(key, value);
+                    }
+                }
+            }
+            found.push(args);
+            Ok(())
+        })?;
+        Ok(found)
+    }
+
     /// Recompute the stored chain; returns the first broken sequence number.
     pub fn verify_audit_chain(&self) -> Result<Option<i64>, StoreError> {
         let mut prev = GENESIS.to_string();

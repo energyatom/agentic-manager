@@ -1,5 +1,9 @@
 //! `agentic accounts add|remove|list|test` (story 2.1): AD-15's interim CLI
-//! Account edit, and the two reads beside it.
+//! Account edit, and the two reads beside it. Story 2.3 adds the providers
+//! `openai` and `openai-compatible` to `add`, `list` and `test`: the add
+//! path is unchanged, and only the provider and the endpoint differ. One
+//! function, [`endpoint_of`], derives an Account's endpoint (scheme, host,
+//! port, base URL) for all three commands.
 //!
 //! `add` and `remove` are the only config edits the CLI makes, and they
 //! write only `models/accounts.yaml`, through am-config's writer, as the
@@ -10,7 +14,9 @@
 //! 1. usage (exit 2);
 //! 2. the terminal: stdin and stdout are both a real interactive terminal
 //!    ([`crate::terminal::interactive`], through the `Terminal` port);
-//! 3. the provider (`add`: Anthropic only in this story);
+//! 3. the provider and its endpoint (`add`: `anthropic`, `openai`, or
+//!    `openai-compatible` with a `--base-url` in one of the two accepted
+//!    forms);
 //! 4. no stdio MCP server and no Source with `render: true` is enabled
 //!    (children that run as the owner, AD-13);
 //! 5. the project, resolved read-only by AD-32's checks
@@ -25,7 +31,9 @@
 //! endpoint its calls go to and everything that already names the id, and
 //! requires the id typed within 2 minutes. Only then is the key read, with
 //! echo off; an entry the Keychain already holds is reused and never
-//! overwritten. Once the last prompt has returned, checks 4, 6 and 7 run
+//! overwritten, and the sentence says so, and that this key will be sent to
+//! the endpoint, before the id is typed (story 2.3). An entry that appears
+//! or goes away while a prompt waits refuses the add. Once the last prompt has returned, checks 4, 6 and 7 run
 //! again on a fresh read (the file's bytes, the id, what names it, outside
 //! changes): the owner may have taken minutes, and anything that changed
 //! since the sentence was shown refuses the add, to be run again. A Ctrl-C
@@ -33,7 +41,8 @@
 //! stored and again before the file is written. Then the key is stored,
 //! only in the Keychain through `SecretStore` (the entry is read again
 //! right before: one stored by another process while the key prompt waited
-//! is kept and used, never overwritten), and the file is written last
+//! is never overwritten, deleted or used, and the add is refused), and the
+//! file is written last
 //! (a `ConfigCreate` when it is missing; otherwise an edit the writer
 //! applies only while the file holds the bytes it was built on); its
 //! History entry and the `account_added` audit entry commit in one store
@@ -50,11 +59,17 @@
 //! no key read or stored), never that nothing was written.
 //!
 //! `list` and `test` make no config edit, take no lock and run with any
-//! stdin. A key is read only from the Keychain entry named by the Account's
+//! stdin. `test` calls only an Account the owner confirmed: before any
+//! Keychain read or request it checks, through a read-only store reader,
+//! that `models/accounts.yaml` holds exactly the bytes the app last wrote
+//! and that the latest `account_added` audit note of the Account names the
+//! same provider, scheme, host and port ([`confirmed`]); an entry of the
+//! file that has an error is not called either. A key is read only from the Keychain entry named by the Account's
 //! own id (AD-17): a `secret_ref` naming another entry is reported by
 //! `list` and refused by `test`, and never followed. `test` streams one
 //! short reply through an egress client whose policy admits only the
-//! Account's pinned host and no loopback port.
+//! Account's pinned endpoint: its one host over https and no loopback port,
+//! or, for an endpoint on this Mac, its one loopback port and no host.
 
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -64,13 +79,15 @@ use std::time::Duration;
 
 use am_config::{ACCOUNTS_FILE, AccountUse, ConfigCreate};
 use am_domain::{
-    AuditNote, ChatRequest, ConfigHistory, EgressClient, EventSink, Instruction, LlmProvider,
-    Message, Part, ProjectIdentity, Role, SecretStore, StreamEvent, Terminal, TerminalError,
+    AuditNote, AuthRef, AuthScheme, ChatRequest, ConfigHistory, EgressClient, EventSink,
+    Instruction, LlmProvider, Message, Part, ProjectIdentity, Role, SecretStore, StreamEvent,
+    Terminal, TerminalError,
 };
 use am_engine::TokenSignal;
 use am_net::EgressPolicy;
-use am_providers::AnthropicProvider;
 use am_providers::anthropic::ANTHROPIC_HOST;
+use am_providers::openai_compat::{OPENAI_BASE_URL, OPENAI_HOST};
+use am_providers::{AnthropicProvider, OpenAiCompatProvider};
 use tokio_util::sync::CancellationToken;
 
 use crate::cli::{EXIT_ERRORS, EXIT_OK, EXIT_USAGE};
@@ -82,10 +99,17 @@ pub const EXIT_INTERRUPTED: i32 = 130;
 /// How long the owner has to type the Account's id (AD-15).
 pub const CONFIRM_WITHIN: Duration = Duration::from_secs(120);
 
-/// The one provider an Account can be added for in this story.
+/// The model providers an Account can be added for and tested from the
+/// command line.
 const ANTHROPIC: &str = "anthropic";
+const OPENAI: &str = "openai";
+const OPENAI_COMPATIBLE: &str = "openai-compatible";
 
-const USAGE: &str = "usage: agentic accounts add <id> --provider anthropic [--name <text>] [--project <folder>]\n       agentic accounts remove <id> [--project <folder>]\n       agentic accounts list [--project <folder>]\n       agentic accounts test <id> [--model <model>] [--project <folder>]\n       (--project defaults to the current folder)";
+/// The three providers as a refusal or a hint names them.
+const PROVIDERS: &str =
+    "`--provider anthropic`, `--provider openai` or `--provider openai-compatible`";
+
+const USAGE: &str = "usage: agentic accounts add <id> --provider anthropic|openai|openai-compatible [--base-url <url>] [--name <text>] [--project <folder>]\n       agentic accounts remove <id> [--project <folder>]\n       agentic accounts list [--project <folder>]\n       agentic accounts test <id> [--model <model>] [--project <folder>]\n       (--base-url is for openai-compatible only: https://<host>[/path], or http://127.0.0.1:<port>[/path] for a server on this Mac;\n        --model is required for an openai or openai-compatible Account; --project defaults to the current folder)";
 
 /// What `agentic accounts` runs with. `main` builds it with the owner's real
 /// terminal, the Keychain, the OS identity adapter and `am-net`'s client;
@@ -107,6 +131,7 @@ enum Command {
         id: String,
         provider: String,
         name: Option<String>,
+        base_url: Option<String>,
     },
     Remove {
         id: String,
@@ -133,6 +158,7 @@ fn parse(args: &[String]) -> Result<(Command, PathBuf), String> {
             ("--project", _) => "--project",
             ("--provider", "add") => "--provider",
             ("--name", "add") => "--name",
+            ("--base-url", "add") => "--base-url",
             ("--model", "test") => "--model",
             (w, _) if w.starts_with('-') => {
                 return Err(format!("unknown option `{w}` for `accounts {verb}`"));
@@ -162,11 +188,12 @@ fn parse(args: &[String]) -> Result<(Command, PathBuf), String> {
             let id = one_id("the new Account's id")?;
             let provider = flags
                 .remove("--provider")
-                .ok_or("accounts add needs --provider anthropic")?;
+                .ok_or("accounts add needs --provider (anthropic, openai or openai-compatible)")?;
             Command::Add {
                 id,
                 provider,
                 name: flags.remove("--name"),
+                base_url: flags.remove("--base-url"),
             }
         }
         "remove" => Command::Remove {
@@ -212,9 +239,20 @@ pub async fn accounts(
         }
     };
     let done = match command {
-        Command::Add { id, provider, name } => {
-            add(ctx, &project, &id, &provider, name.as_deref(), out)
-        }
+        Command::Add {
+            id,
+            provider,
+            name,
+            base_url,
+        } => add(
+            ctx,
+            &project,
+            &id,
+            &provider,
+            name.as_deref(),
+            base_url.as_deref(),
+            out,
+        ),
         Command::Remove { id } => remove(ctx, &project, &id, out),
         Command::List => list(&ctx, &project, out),
         Command::Test { id, model } => test(&ctx, &project, &id, model, out).await,
@@ -226,6 +264,179 @@ pub async fn accounts(
             code
         }
     }
+}
+
+// --------------------------------------------------------- the endpoint
+
+fn is_model_provider(provider: &str) -> bool {
+    [ANTHROPIC, OPENAI, OPENAI_COMPATIBLE].contains(&provider)
+}
+
+/// Where an Account's calls go (AD-12, AD-48): the one endpoint its egress
+/// policy admits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Endpoint {
+    /// `https`, or `http` for an endpoint on this Mac.
+    scheme: &'static str,
+    /// The DNS name in lowercase, or `127.0.0.1`.
+    host: String,
+    /// 443 for https; the explicit port of an endpoint on this Mac.
+    port: u16,
+    /// The base URL: the provider's fixed one, or a compatible Account's
+    /// `base_url` as typed.
+    base_url: String,
+    /// True for `http://127.0.0.1:<port>`: the calls stay on this Mac.
+    loopback: bool,
+    /// True when the base URL comes from the Account (`base_url` in the
+    /// file), not from its provider.
+    own: bool,
+}
+
+impl Endpoint {
+    fn fixed(host: &str, base_url: &str) -> Endpoint {
+        Endpoint {
+            scheme: "https",
+            host: host.to_string(),
+            port: 443,
+            base_url: base_url.to_string(),
+            loopback: false,
+            own: false,
+        }
+    }
+
+    /// The `base_url` the Accounts file holds for it: none for a provider
+    /// with one fixed endpoint.
+    fn written(&self) -> Option<&str> {
+        self.own.then_some(self.base_url.as_str())
+    }
+
+    /// The endpoint as the add's sentence names it.
+    fn goes_to(&self) -> String {
+        if self.loopback {
+            format!(
+                "{} and stay on this Mac, on port {}",
+                self.base_url, self.port
+            )
+        } else {
+            self.base_url.clone()
+        }
+    }
+
+    /// The host as `list` shows it, with the port for an endpoint on this Mac.
+    fn host_shown(&self) -> String {
+        if self.loopback {
+            format!("{}:{}", self.host, self.port)
+        } else {
+            self.host.clone()
+        }
+    }
+
+    /// The base URL the adapter appends its path to.
+    fn call_base(&self) -> &str {
+        self.base_url.trim_end_matches('/')
+    }
+
+    /// The egress policy of a call to this endpoint and nothing else: the
+    /// one host over https and no loopback port, or the one loopback port
+    /// and no host.
+    fn policy(&self) -> EgressPolicy {
+        if self.loopback {
+            EgressPolicy {
+                allowed_hosts: Vec::new(),
+                loopback_ports: vec![self.port],
+                ..EgressPolicy::default()
+            }
+        } else {
+            EgressPolicy {
+                allowed_hosts: vec![self.host.clone()],
+                loopback_ports: Vec::new(),
+                ..EgressPolicy::default()
+            }
+        }
+    }
+}
+
+/// The endpoint of an Account of `provider` with the optional `base_url`:
+/// the one function `add`, `list` and `test` derive it with (AD-12, AD-48).
+///
+/// - `anthropic`: `https://api.anthropic.com`, port 443; no base URL.
+/// - `openai`: `https://api.openai.com/v1`, port 443; no base URL.
+/// - `openai-compatible`: the base URL is required, in one of two forms:
+///   `https://<DNS name>[/path]` on port 443, or
+///   `http://127.0.0.1:<port>[/path]` with an explicit port, for a server on
+///   this Mac.
+///
+/// Everything else is refused in words; `flag` is how the refusal names the
+/// base URL (`--base-url` on the command line, `base_url` in the file).
+fn endpoint_of(provider: &str, base_url: Option<&str>, flag: &str) -> Result<Endpoint, String> {
+    let fixed = |host: &str, url: &str| match base_url {
+        None => Ok(Endpoint::fixed(host, url)),
+        Some(_) => Err(format!(
+            "`{flag}` is not accepted for an {provider} Account: its calls go only to {url}. For another endpoint use an {OPENAI_COMPATIBLE} Account (`--provider {OPENAI_COMPATIBLE} --base-url <url>`)"
+        )),
+    };
+    match provider {
+        ANTHROPIC => fixed(ANTHROPIC_HOST, &format!("https://{ANTHROPIC_HOST}")),
+        OPENAI => fixed(OPENAI_HOST, OPENAI_BASE_URL),
+        OPENAI_COMPATIBLE => {
+            let Some(typed) = base_url else {
+                return Err(format!(
+                    "an {OPENAI_COMPATIBLE} Account needs `{flag}`, the endpoint its calls go to: give {ACCEPTED_FORMS}"
+                ));
+            };
+            // What a refusal calls the URL. It is repeated only when it is
+            // plain text with no user name, password or query in it: a key
+            // someone put in a URL is never printed, and neither is a
+            // control character from a hand-written file.
+            let plain = typed
+                .chars()
+                .all(|c| c.is_ascii_graphic() && !['@', '?', '#', '\\', '`'].contains(&c));
+            let said = if plain {
+                format!("`{flag} {typed}`")
+            } else {
+                format!("the `{flag}` given")
+            };
+            let endpoint = compatible_endpoint(typed)
+                .map_err(|why| format!("{said} is not accepted: {why}"))?;
+            // The check the egress client makes at call time must read the
+            // URL as the same endpoint, or it is not one.
+            let call = format!("{}/chat/completions", endpoint.call_base());
+            match am_net::check_url(&endpoint.policy(), &call) {
+                Ok((host, port, loopback))
+                    if host == endpoint.host
+                        && port == endpoint.port
+                        && loopback == endpoint.loopback =>
+                {
+                    Ok(endpoint)
+                }
+                Ok(_) => Err(format!(
+                    "{said} is not accepted: the app's network check reads another host or port in it than the one written; give {ACCEPTED_FORMS}"
+                )),
+                Err(e) => Err(format!(
+                    "{said} is not accepted: the app's network check refuses it ({e}); give {ACCEPTED_FORMS}"
+                )),
+            }
+        }
+        other => Err(format!("'{other}' is not a model provider ({PROVIDERS})")),
+    }
+}
+
+/// The two forms a compatible Account's base URL takes.
+const ACCEPTED_FORMS: &str = am_config::COMPATIBLE_BASE_URL_FORMS;
+
+/// A compatible Account's base URL, read by the one rule the loader applies
+/// too ([`am_config::compatible_base_url`]): only the two accepted forms
+/// pass, and the reason is given for everything else.
+fn compatible_endpoint(typed: &str) -> Result<Endpoint, String> {
+    let accepted = am_config::compatible_base_url(typed)?;
+    Ok(Endpoint {
+        scheme: if accepted.loopback { "http" } else { "https" },
+        host: accepted.host,
+        port: accepted.port,
+        base_url: typed.to_string(),
+        loopback: accepted.loopback,
+        own: true,
+    })
 }
 
 // ------------------------------------------------------------- the edit
@@ -375,6 +586,14 @@ fn uses_words(uses: &[AccountUse]) -> String {
     all.join(", ")
 }
 
+/// What a refused `add` says when the Keychain entry of the id is not as
+/// the sentence said (held, or not held) once a prompt has returned.
+fn entry_changed(id: &str) -> String {
+    format!(
+        "the Keychain entry for '{id}' changed while you typed; run the command again (the entry is left as it is now: this command neither stored nor deleted it)"
+    )
+}
+
 fn interrupted(did_not: &str) -> Stop {
     Stop(EXIT_INTERRUPTED, format!("interrupted (Ctrl-C). {did_not}"))
 }
@@ -420,14 +639,17 @@ fn add(
     id: &str,
     provider: &str,
     name: Option<&str>,
+    base_url: Option<&str>,
     out: &mut dyn Write,
 ) -> Result<(), Stop> {
     require_terminal(&ctx, "add", NOT_ADDED)?;
-    if provider != ANTHROPIC {
+    if !is_model_provider(provider) {
         return refuse(format!(
-            "only an Anthropic Account can be added from the command line in this version (`--provider {ANTHROPIC}`), not '{provider}'. {NOT_ADDED}"
+            "an Account can be added from the command line for a model provider only ({PROVIDERS}), not '{provider}'. {NOT_ADDED}"
         ));
     }
+    let endpoint = endpoint_of(provider, base_url, "--base-url")
+        .map_err(|why| Stop(EXIT_ERRORS, format!("{why}. {NOT_ADDED}")))?;
     let editing = open_for_edit(&ctx, project, "add", NOT_ADDED, out)?;
     let root = editing.opened.root.clone();
     if reserved(id) {
@@ -447,7 +669,6 @@ fn add(
         ));
     }
     let uses = am_config::account_uses(&root, id);
-    let endpoint = format!("https://{ANTHROPIC_HOST}");
     let named = if uses.is_empty() {
         "Nothing in the project names it yet.".to_string()
     } else {
@@ -456,8 +677,27 @@ fn add(
             uses_words(&uses)
         )
     };
+    // Whether the Keychain already holds a key for this id (an earlier add,
+    // another project): only that it is there, never its value. That key
+    // would be reused, so the sentence says where it will go before the id
+    // is typed.
+    let held = match ctx.secrets.get(id) {
+        Ok(key) => key.is_some(),
+        Err(e) => {
+            return refuse(format!("the Keychain cannot be read ({e}). {NOT_ADDED}"));
+        }
+    };
+    let reused = if held {
+        format!(
+            " This Mac's Keychain already holds a key for '{id}': that key is reused, and it will be sent to {}.",
+            endpoint.base_url
+        )
+    } else {
+        String::new()
+    };
     ctx.terminal.show(&format!(
-        "Adding the Account '{id}' (provider {provider}): its calls go to {endpoint}, with a key kept only in this Mac's Keychain. {named}\nTo confirm, type the Account's id ({id}) within 2 minutes: "
+        "Adding the Account '{id}' (provider {provider}): its calls go to {}, with a key kept only in this Mac's Keychain.{reused} {named}\nTo confirm, type the Account's id ({id}) within 2 minutes: ",
+        endpoint.goes_to()
     ));
     let typed = match ctx.terminal.read_line(Some(CONFIRM_WITHIN)) {
         Ok(line) => line,
@@ -481,10 +721,17 @@ fn add(
         ));
     }
     // The key: an entry the Keychain already holds for this id is reused
-    // and never overwritten; otherwise it is read with echo off.
+    // and never overwritten; otherwise it is read with echo off. The
+    // sentence said which of the two it is, so the Keychain is read again
+    // now that the id is typed: an entry that appeared or went away while
+    // the prompt waited refuses the add (the owner confirmed a sentence
+    // that no longer says which key goes to the endpoint).
     let new_key = match ctx.secrets.get(id) {
         Err(e) => {
             return refuse(format!("the Keychain cannot be read ({e}). {NOT_ADDED}"));
+        }
+        Ok(now) if now.is_some() != held => {
+            return refuse(format!("{}. {NOT_ADDED}", entry_changed(id)));
         }
         Ok(Some(_)) => {
             ctx.terminal.show(&format!(
@@ -521,8 +768,9 @@ fn add(
         None => false,
         // The key prompt has no time limit, so the Keychain is read again
         // right before the store: an entry another process stored
-        // meanwhile is never overwritten (and so never deleted below). The
-        // typed key is discarded and the add goes on as a reuse.
+        // meanwhile is never overwritten, never deleted (this command did
+        // not create it) and never used, because the sentence said no key
+        // was held. The typed key is discarded and the add is refused.
         Some(key) => match ctx.secrets.get(id) {
             Err(e) => {
                 return refuse(format!(
@@ -531,10 +779,10 @@ fn add(
             }
             Ok(Some(_)) => {
                 drop(key);
-                ctx.terminal.show(&format!(
-                    "The Keychain now holds a key for '{id}', stored while this command waited: that entry is kept and used (it is never overwritten), and the key you typed was discarded.\n"
+                return refuse(format!(
+                    "{}; the key you typed was discarded. {NOT_ADDED_NOR_STORED}",
+                    entry_changed(id)
                 ));
-                false
             }
             Ok(None) => {
                 if let Err(e) = ctx.secrets.set(id, key) {
@@ -572,9 +820,9 @@ fn add(
             ("file".to_string(), ACCOUNTS_FILE.to_string()),
             ("account".to_string(), id.to_string()),
             ("provider".to_string(), provider.to_string()),
-            ("scheme".to_string(), "https".to_string()),
-            ("host".to_string(), ANTHROPIC_HOST.to_string()),
-            ("port".to_string(), "443".to_string()),
+            ("scheme".to_string(), endpoint.scheme.to_string()),
+            ("host".to_string(), endpoint.host.clone()),
+            ("port".to_string(), endpoint.port.to_string()),
             (
                 "references".to_string(),
                 if uses.is_empty() {
@@ -590,20 +838,22 @@ fn add(
     let written = match &file.sha256 {
         Some(built_on) => writer.apply_with_audit(
             owner(),
-            am_config::add_account_edit(&file, id, provider, name),
+            am_config::add_account_edit(&file, id, provider, name, endpoint.written()),
             built_on,
             vec![note],
         ),
-        None => am_config::new_accounts_file(id, provider, name).and_then(|bytes| {
-            writer.create(
-                owner(),
-                ConfigCreate {
-                    file: ACCOUNTS_FILE.into(),
-                    bytes,
-                    audit: vec![note],
-                },
-            )
-        }),
+        None => {
+            am_config::new_accounts_file(id, provider, name, endpoint.written()).and_then(|bytes| {
+                writer.create(
+                    owner(),
+                    ConfigCreate {
+                        file: ACCOUNTS_FILE.into(),
+                        bytes,
+                        audit: vec![note],
+                    },
+                )
+            })
+        }
     };
     let entry = match written {
         Ok(entry) => entry,
@@ -637,8 +887,8 @@ fn add(
     };
     let _ = writeln!(
         out,
-        "agentic: added the Account '{id}' ({provider}, {endpoint}) to {ACCOUNTS_FILE} (History entry {}); {key}",
-        entry.id
+        "agentic: added the Account '{id}' ({provider}, {}) to {ACCOUNTS_FILE} (History entry {}); {key}",
+        endpoint.base_url, entry.id
     );
     Ok(())
 }
@@ -738,10 +988,17 @@ fn masked(key: &str) -> String {
     format!("{DOTS}{tail}")
 }
 
-/// The host an Account's calls go to, when this version knows it.
+/// The host an Account's calls go to, as `list` shows it: the endpoint's
+/// host, with its port for an endpoint on this Mac. A model Account whose
+/// `base_url` is not an endpoint this version calls says so, and names no
+/// host. For another kind of Account (search, crawl) it is the host of its
+/// `base_url`, when it has one.
 fn host_of(account: &am_config::Account) -> String {
-    if account.provider == ANTHROPIC && account.base_url.is_none() {
-        return ANTHROPIC_HOST.to_string();
+    if is_model_provider(&account.provider) {
+        return match endpoint_of(&account.provider, account.base_url.as_deref(), "base_url") {
+            Ok(endpoint) => endpoint.host_shown(),
+            Err(_) => "(base_url not accepted; `agentic accounts test` says why)".to_string(),
+        };
     }
     account
         .base_url
@@ -778,7 +1035,7 @@ fn list(ctx: &AccountsContext, project: &Path, out: &mut dyn Write) -> Result<()
     if file.ids.is_empty() {
         let _ = writeln!(
             out,
-            "agentic: no Accounts in {ACCOUNTS_FILE} yet; add one with `agentic accounts add <id> --provider {ANTHROPIC}` (the local Accounts local-lmstudio and local-ollama are always available)"
+            "agentic: no Accounts in {ACCOUNTS_FILE} yet; add one with `agentic accounts add <id>` and {PROVIDERS} (the local Accounts local-lmstudio and local-ollama are always available)"
         );
         return Ok(());
     }
@@ -800,13 +1057,14 @@ fn list(ctx: &AccountsContext, project: &Path, out: &mut dyn Write) -> Result<()
                 Err(e) => format!("the Keychain cannot be read: {e}"),
             }
         };
-        let _ = writeln!(
-            out,
-            "{}  {}  {}  {key}",
-            account.id,
-            account.provider,
+        // An entry with an error is shown with no host: what the loader
+        // could read of it is not what would be called.
+        let host = if file.entry_errors(&account.id).is_empty() {
             host_of(account)
-        );
+        } else {
+            "(its entry has an error; `agentic validate` names it)".to_string()
+        };
+        let _ = writeln!(out, "{}  {}  {host}  {key}", account.id, account.provider);
     }
     Ok(())
 }
@@ -820,6 +1078,88 @@ impl EventSink for Forward {
             let _ = self.0.send(text);
         }
     }
+}
+
+/// Whether `account` is one the owner confirmed with `agentic accounts
+/// add` on this Mac, and nothing changed since (AD-15, AD-16, AD-48). Both
+/// must hold, or the reason is given in words:
+///
+/// 1. `models/accounts.yaml` holds exactly the bytes the app last wrote
+///    (`file` is the read the endpoint was derived from, so the bytes
+///    checked are the bytes used);
+/// 2. the latest `account_added` audit note of the Account names the same
+///    provider, scheme, host and port.
+///
+/// Read-only and without the project's lock, as `agentic status` reads:
+/// the runtime folder is found, never made, and the database is never
+/// migrated. No runtime folder, no database, an older database, no History
+/// entry of the file and no note each mean "not confirmed".
+fn confirmed(
+    ctx: &AccountsContext,
+    project: &Path,
+    file: &am_config::AccountsFile,
+    account: &am_config::Account,
+    endpoint: &Endpoint,
+) -> Result<(), String> {
+    let layout = crate::runtime::find_runtime(&ctx.places, project).map_err(|e| e.to_string())?;
+    let db = layout.state_db();
+    if !db.is_file() {
+        return Err("this project has no database on this Mac yet".into());
+    }
+    am_store::check_database(&db).map_err(|e| e.to_string())?;
+    let reader = am_store::Reader::open(&db).map_err(|e| e.to_string())?;
+    let found = reader.schema_version().map_err(|e| e.to_string())?;
+    if found < am_store::SCHEMA_VERSION {
+        return Err(format!(
+            "the project's database is at version {found}, older than this app's version {}, and `agentic accounts test` never migrates it",
+            am_store::SCHEMA_VERSION
+        ));
+    }
+    let history = reader
+        .config_history(Some(ACCOUNTS_FILE))
+        .map_err(|e| e.to_string())?;
+    let Some(last) = history.last() else {
+        return Err(format!(
+            "the app has never written {ACCOUNTS_FILE} in this project"
+        ));
+    };
+    if file.sha256.as_deref() != Some(last.after_sha256.as_str()) {
+        return Err(format!(
+            "{ACCOUNTS_FILE} was changed on disk outside the app since the app last wrote it"
+        ));
+    }
+    let notes = reader
+        .audit_args("config.widened", &account.id)
+        .map_err(|e| e.to_string())?;
+    let Some(note) = notes
+        .iter()
+        .rfind(|args| args.get("kind").map(String::as_str) == Some("account_added"))
+    else {
+        return Err(format!(
+            "no `agentic accounts add` of '{}' is recorded for this project",
+            account.id
+        ));
+    };
+    let recorded = |key: &str| note.get(key).map(String::as_str);
+    let port = endpoint.port.to_string();
+    if recorded("provider") != Some(account.provider.as_str())
+        || recorded("scheme") != Some(endpoint.scheme)
+        || recorded("host") != Some(endpoint.host.as_str())
+        || recorded("port") != Some(port.as_str())
+    {
+        return Err(format!(
+            "the last `agentic accounts add` of '{}' recorded provider {} at {}://{}:{}, and {ACCOUNTS_FILE} now holds provider {} at {}://{}:{port}",
+            account.id,
+            recorded("provider").unwrap_or("(none)"),
+            recorded("scheme").unwrap_or("?"),
+            recorded("host").unwrap_or("?"),
+            recorded("port").unwrap_or("?"),
+            account.provider,
+            endpoint.scheme,
+            endpoint.host,
+        ));
+    }
+    Ok(())
 }
 
 const TEST_PROMPT: &str = "Count from one to three in words, one word per line, and nothing else.";
@@ -842,16 +1182,64 @@ async fn test(
             "there is no Account '{id}' in {ACCOUNTS_FILE} (`agentic accounts list` shows the Accounts); nothing was sent"
         ));
     };
-    if account.provider != ANTHROPIC || account.base_url.is_some() {
+    // An entry with an error is never called: the loader returns what it
+    // could read of it (a `base_url` it refuses reads as none).
+    let errors = file.entry_errors(id);
+    if !errors.is_empty() {
         return refuse(format!(
-            "the Account '{id}' is not a plain Anthropic Account, the only kind this version can test; nothing was sent"
+            "the Account '{id}' is not called: its entry in {ACCOUNTS_FILE} has an error ({}); `agentic validate` names the line and the fix. No key was read and nothing was sent",
+            errors.join("; ")
         ));
     }
+    if !is_model_provider(&account.provider) {
+        return refuse(format!(
+            "the Account '{id}' is a {} Account, not a model Account (anthropic, openai or openai-compatible), the only kinds `agentic accounts test` calls; nothing was sent",
+            account.provider
+        ));
+    }
+    // The endpoint is derived by the rules `add` applies, whatever a
+    // hand-written file says: a `base_url` outside them is never called.
+    let endpoint = endpoint_of(&account.provider, account.base_url.as_deref(), "base_url")
+        .map_err(|why| {
+            Stop(
+                EXIT_ERRORS,
+                format!(
+                    "the Account '{id}' in {ACCOUNTS_FILE} cannot be called: {why}; no key was read and nothing was sent"
+                ),
+            )
+        })?;
     if let Some(entry) = other_entry(account) {
         return refuse(format!(
             "the Account '{id}' has `secret_ref: {entry}`, which names another Keychain entry; a key is only ever read from the entry named by the Account's own id, so no key was read and nothing was sent. Set `secret_ref: {id}` (or remove the line) in {ACCOUNTS_FILE}"
         ));
     }
+    // A key goes only to what the owner confirmed (AD-15, AD-16, AD-48):
+    // before any Keychain read, the file must be as the app last wrote it
+    // and the latest `account_added` note of this Account must name its
+    // provider and endpoint.
+    if let Err(why) = confirmed(ctx, project, &file, account, &endpoint) {
+        let base_url = if endpoint.own {
+            " --base-url <url>"
+        } else {
+            ""
+        };
+        return refuse(format!(
+            "the Account '{id}' is not called: it was not confirmed by `agentic accounts add` on this Mac, or {ACCOUNTS_FILE} changed since ({why}). No key was read or sent. If {ACCOUNTS_FILE} was changed by hand, put it back as the app last wrote it; otherwise remove the Account and add it again in a terminal (`agentic accounts remove {id}`, then `agentic accounts add {id} --provider {}{base_url}`)",
+            account.provider
+        ));
+    }
+    // No default model id is assumed for a provider whose model list this
+    // app does not hold.
+    let model = match (model, account.provider.as_str()) {
+        (Some(model), _) => model,
+        (None, ANTHROPIC) => crate::DEFAULT_ANTHROPIC_MODEL.to_string(),
+        (None, provider) => {
+            return refuse(format!(
+                "`agentic accounts test {id}` needs `--model <model>`: no default model is assumed for an {provider} Account; name one its endpoint ({}) serves. No key was read and nothing was sent",
+                endpoint.base_url
+            ));
+        }
+    };
     match ctx.secrets.get(id) {
         Ok(Some(_)) => {}
         Ok(None) => {
@@ -865,16 +1253,21 @@ async fn test(
             ));
         }
     }
-    // Only the Account's pinned endpoint: its host over https, no loopback
-    // port (AD-12, AD-48).
-    let policy = EgressPolicy {
-        allowed_hosts: vec![ANTHROPIC_HOST.to_string()],
-        loopback_ports: Vec::new(),
-        ..EgressPolicy::default()
+    // Only the Account's pinned endpoint (AD-12, AD-48): its host over
+    // https and no loopback port, or its one loopback port and no host.
+    let egress = (ctx.egress)(endpoint.policy());
+    // The adapter by provider. OpenAI and compatible Accounts authenticate
+    // with `Bearer` from the Keychain entry named by the Account's id.
+    let provider: Box<dyn LlmProvider> = if account.provider == ANTHROPIC {
+        Box::new(AnthropicProvider::new(egress, id))
+    } else {
+        Box::new(
+            OpenAiCompatProvider::new(egress, id, endpoint.call_base()).with_auth(AuthRef {
+                scheme: AuthScheme::Bearer,
+                account_id: id.to_string(),
+            }),
+        )
     };
-    let egress = (ctx.egress)(policy);
-    let provider = AnthropicProvider::new(egress, id);
-    let model = model.unwrap_or_else(|| crate::DEFAULT_ANTHROPIC_MODEL.to_string());
     let request = ChatRequest {
         model: model.clone(),
         system: Vec::new(),
@@ -921,12 +1314,118 @@ async fn test(
             };
             let _ = writeln!(
                 out,
-                "agentic: the Account '{id}' answered from https://{ANTHROPIC_HOST} (model {model}, {tokens})"
+                "agentic: the Account '{id}' answered from {} (model {model}, {tokens})",
+                endpoint.base_url
             );
             Ok(())
         }
         Err(e) => refuse(format!(
             "the test call of the Account '{id}' (model {model}) failed: {e}"
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn compatible(url: &str) -> Result<Endpoint, String> {
+        endpoint_of(OPENAI_COMPATIBLE, Some(url), "--base-url")
+    }
+
+    /// The two accepted forms, and what each pins.
+    #[test]
+    fn the_two_accepted_forms_give_their_scheme_host_and_port() {
+        let remote = compatible("https://Relay.Example/api/v1/").unwrap();
+        assert_eq!(
+            (remote.scheme, remote.host.as_str(), remote.port),
+            ("https", "relay.example", 443)
+        );
+        assert_eq!(remote.base_url, "https://Relay.Example/api/v1/", "as typed");
+        assert_eq!(remote.call_base(), "https://Relay.Example/api/v1");
+        assert_eq!(remote.policy().allowed_hosts, vec!["relay.example"]);
+        assert!(remote.policy().loopback_ports.is_empty());
+        assert_eq!(compatible("https://relay.example:443").unwrap().port, 443);
+
+        let local = compatible("http://127.0.0.1:80").unwrap();
+        assert_eq!(
+            (
+                local.scheme,
+                local.host.as_str(),
+                local.port,
+                local.loopback
+            ),
+            ("http", "127.0.0.1", 80, true)
+        );
+        assert!(local.policy().allowed_hosts.is_empty());
+        assert_eq!(local.policy().loopback_ports, vec![80]);
+        assert_eq!(local.host_shown(), "127.0.0.1:80");
+    }
+
+    /// No spelling of an address passes as a DNS name, and nothing that the
+    /// egress check would read as another host or port is accepted.
+    #[test]
+    fn an_address_in_any_spelling_and_an_odd_url_are_refused() {
+        for url in [
+            "https://2130706433/v1",
+            "https://0x7f.0.0.1/v1",
+            "https://127.1/v1",
+            "https://[fd00::1]/v1",
+            "https://[::ffff:10.0.0.5]/v1",
+            "https://localhost/v1",
+            "https://api.localhost/v1",
+            "http://127.0.0.2:8080/v1",
+            "http://0.0.0.0:8080/v1",
+            "http://127.0.0.1:0/v1",
+            "http://127.0.0.1:99999/v1",
+            "http://127.0.0.1:+80/v1",
+            "https://relay.example:/v1",
+            "https://relay.example.:443/v1",
+            "https://relay.example\\@other.example/v1",
+            "https://relay.example /v1",
+            "https://réseau.example/v1",
+            "HTTPS://relay.example/v1",
+            "ftp://relay.example/v1",
+            "relay.example/v1",
+            "https:///v1",
+            "",
+        ] {
+            assert!(compatible(url).is_err(), "{url} was accepted");
+        }
+    }
+
+    /// A refusal never repeats a URL that holds a user name, a password or a
+    /// query: a key someone put in a URL is not printed.
+    #[test]
+    fn a_refusal_never_repeats_a_url_that_could_hold_a_key() {
+        for url in [
+            "https://someone:sk-canary-in-a-url@relay.example/v1",
+            "https://relay.example/v1?key=sk-canary-in-a-url",
+            "http://192.168.1.4:8080/v1#sk-canary-in-a-url",
+        ] {
+            let why = compatible(url).unwrap_err();
+            assert!(!why.contains("sk-canary-in-a-url"), "{why}");
+            assert!(why.contains("--base-url"), "{why}");
+        }
+    }
+
+    /// The fixed providers take no base URL; another provider has no endpoint.
+    #[test]
+    fn a_fixed_provider_has_one_endpoint_and_takes_no_base_url() {
+        let anthropic = endpoint_of(ANTHROPIC, None, "base_url").unwrap();
+        assert_eq!(anthropic.base_url, "https://api.anthropic.com");
+        assert_eq!(anthropic.written(), None);
+        let openai = endpoint_of(OPENAI, None, "base_url").unwrap();
+        assert_eq!(
+            (openai.scheme, openai.host.as_str(), openai.port),
+            ("https", "api.openai.com", 443)
+        );
+        assert_eq!(openai.base_url, "https://api.openai.com/v1");
+        assert_eq!(openai.written(), None);
+        for provider in [ANTHROPIC, OPENAI] {
+            assert!(endpoint_of(provider, Some("https://relay.example/v1"), "base_url").is_err());
+        }
+        assert!(endpoint_of(OPENAI_COMPATIBLE, None, "base_url").is_err());
+        assert!(endpoint_of("brave", None, "base_url").is_err());
     }
 }

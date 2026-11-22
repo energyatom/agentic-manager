@@ -610,6 +610,9 @@ fn a_secret_in_a_block_scalar_is_reported_at_its_own_line() {
     assert_eq!(secret_lines, vec![23], "{found:#?}");
 }
 
+/// The general `base_url` rule (every provider but `openai-compatible`,
+/// which has its own stricter rule since story 2.3): https, or plain http
+/// only to this Mac, never with a user name or password.
 #[test]
 fn plain_http_is_only_for_this_mac_and_never_with_userinfo() {
     let copy = valid_copy();
@@ -618,11 +621,11 @@ fn plain_http_is_only_for_this_mac_and_never_with_userinfo() {
         copy.path(),
         "models/accounts.yaml",
         &format!(
-            "{text}  - id: tricky\n    provider: openai-compatible\n    base_url: http://127.0.0.1:80@remote.example/\n\
-             \x20 - id: lan\n    provider: openai-compatible\n    base_url: http://192.168.1.5:8080/v1\n\
-             \x20 - id: creds\n    provider: openai-compatible\n    base_url: https://user:pw@example.org/v1\n\
-             \x20 - id: box\n    provider: openai-compatible\n    base_url: http://localhost:1234/v1\n\
-             \x20 - id: loop\n    provider: openai-compatible\n    base_url: http://127.0.0.1:1234/v1\n"
+            "{text}  - id: tricky\n    provider: firecrawl\n    base_url: http://127.0.0.1:80@remote.example/\n\
+             \x20 - id: lan\n    provider: firecrawl\n    base_url: http://192.168.1.5:8080/v1\n\
+             \x20 - id: creds\n    provider: firecrawl\n    base_url: https://user:pw@example.org/v1\n\
+             \x20 - id: box\n    provider: firecrawl\n    base_url: http://localhost:1234/v1\n\
+             \x20 - id: loop\n    provider: firecrawl\n    base_url: http://127.0.0.1:1234/v1\n"
         ),
     );
     let found = findings(copy.path());
@@ -634,6 +637,89 @@ fn plain_http_is_only_for_this_mac_and_never_with_userinfo() {
         );
     }
     assert_eq!(errors(&found).len(), 3, "{found:#?}");
+}
+
+/// Story 2.3 (review): one rule for an `openai-compatible` Account's
+/// `base_url`, the same one `agentic accounts add` applies. Only
+/// `https://<DNS name>[/path]` on port 443 and
+/// `http://127.0.0.1:<port>[/path]` are accepted; `localhost`, an IP
+/// literal, another https port, https to this Mac, a loopback URL without a
+/// port, plain http elsewhere, a user name or password and a query are each
+/// an error at the `base_url` line, whose fix gives the two forms (and no
+/// longer suggests `localhost`). A password in the URL is never repeated.
+#[test]
+fn a_compatible_base_url_takes_only_the_two_accepted_forms() {
+    let refused = [
+        "http://localhost:1234/v1",
+        "https://10.0.0.5/v1",
+        "https://relay.example:8443/v1",
+        "http://127.0.0.1/v1",
+        "https://127.0.0.1:8080/v1",
+        "http://192.168.1.5:8080/v1",
+        "https://someone:hunter2canary@example.org/v1",
+        "https://relay.example/v1?tier=a",
+        "http://example.org/v1",
+        "https://2130706433/v1",
+    ];
+    let accepted = ["https://relay.example/api/v1", "http://127.0.0.1:1234/v1"];
+    let copy = valid_copy();
+    let mut text = std::fs::read_to_string(copy.path().join("models/accounts.yaml")).unwrap();
+    let first = text.lines().count() as u32 + 3;
+    for (n, url) in refused.iter().chain(&accepted).enumerate() {
+        text.push_str(&format!(
+            "  - id: box{n}\n    provider: openai-compatible\n    base_url: {url}\n"
+        ));
+    }
+    write(copy.path(), "models/accounts.yaml", &text);
+
+    let found = findings(copy.path());
+    for (n, url) in refused.iter().enumerate() {
+        let f = at(
+            &found,
+            "models/accounts.yaml",
+            first + 3 * n as u32,
+            "base_url",
+        );
+        assert_eq!(f.severity, Severity::Error, "{url}: {f:?}");
+        assert!(
+            f.fix.contains("https://<host>") && f.fix.contains("http://127.0.0.1:<port>"),
+            "{url}: the fix gives the two forms: {f:?}"
+        );
+        assert!(
+            !f.fix.contains("localhost"),
+            "{url}: the fix does not suggest localhost: {f:?}"
+        );
+        assert!(
+            !format!("{f:?}").contains("hunter2canary"),
+            "{url}: a password is never repeated: {f:?}"
+        );
+    }
+    assert_eq!(
+        errors(&found).len(),
+        refused.len(),
+        "the two accepted forms are no error: {found:#?}"
+    );
+}
+
+/// A compatible Account with no `base_url` is told the two forms too.
+#[test]
+fn a_compatible_account_without_a_base_url_is_told_the_two_forms() {
+    let copy = valid_copy();
+    let text = std::fs::read_to_string(copy.path().join("models/accounts.yaml")).unwrap();
+    let line = text.lines().count() as u32 + 1;
+    write(
+        copy.path(),
+        "models/accounts.yaml",
+        &format!("{text}  - id: box\n    provider: openai-compatible\n"),
+    );
+    let found = findings(copy.path());
+    let f = at(&found, "models/accounts.yaml", line, "needs 'base_url'");
+    assert!(
+        f.fix.contains("https://<host>") && f.fix.contains("http://127.0.0.1:<port>"),
+        "{f:?}"
+    );
+    assert!(!f.fix.contains("localhost"), "{f:?}");
+    assert_eq!(errors(&found).len(), 1, "{found:#?}");
 }
 
 #[test]

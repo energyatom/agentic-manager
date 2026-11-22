@@ -752,3 +752,54 @@ fn config_history_refuses_an_empty_audit_note() {
     assert!(history.pending_intents().unwrap().is_empty());
     assert_eq!(audit(&store).len(), before);
 }
+
+/// Story 2.3 (review): a lock-free reader gives the args of every audit
+/// entry of one action on one target, oldest first, so `agentic accounts
+/// test` can read the endpoint the latest `account_added` note of an
+/// Account recorded. Entries of another action or another target are left
+/// out, and a note that was never committed is not there.
+#[test]
+fn a_reader_gives_the_args_of_the_audit_entries_of_one_action_and_target() {
+    let (_dir, store, history) = open();
+    let first = account_added("cloud2");
+    let mut second = account_added("cloud2");
+    second
+        .args
+        .insert("host".to_string(), "relay.example".to_string());
+    let other = account_added("cloud3");
+    for (file, note) in [
+        ("models/accounts.yaml", first.clone()),
+        ("models/prices.yaml", other),
+        ("models/capabilities.yaml", second.clone()),
+    ] {
+        let id = history
+            .begin_intent(reviewer(), created(file, ACCOUNTS, vec![note]))
+            .unwrap();
+        history.commit_entry(reviewer(), id).unwrap();
+    }
+    // Opened and never committed: its note is not in the log.
+    let mut pending = account_added("cloud2");
+    pending
+        .args
+        .insert("host".to_string(), "pending.example".to_string());
+    history
+        .begin_intent(
+            reviewer(),
+            created("models/tools.yaml", ACCOUNTS, vec![pending]),
+        )
+        .unwrap();
+
+    let reader = store.reader().unwrap();
+    assert_eq!(
+        reader.audit_args("config.widened", "cloud2").unwrap(),
+        vec![first.args, second.args]
+    );
+    assert_eq!(
+        reader.audit_args("config.widened", "cloud4").unwrap(),
+        Vec::new()
+    );
+    assert_eq!(
+        reader.audit_args("config.created", "cloud2").unwrap(),
+        Vec::new()
+    );
+}

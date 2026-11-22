@@ -1,12 +1,22 @@
-//! OpenAI-chat-compatible adapter (`/v1/chat/completions`, streaming SSE):
-//! LM Studio (`local-lmstudio`, 127.0.0.1:1234), Ollama (`local-ollama`,
-//! 127.0.0.1:11434) and compatible endpoints.
+//! OpenAI-chat-compatible adapter (`{base_url}/chat/completions`, streaming
+//! SSE): OpenAI's cloud, LM Studio (`local-lmstudio`, 127.0.0.1:1234), Ollama
+//! (`local-ollama`, 127.0.0.1:11434) and compatible endpoints.
+//!
+//! The stream (story 2.3):
+//! - text is `delta.content` only; a reasoning model's thinking
+//!   (`delta.reasoning_content`, `delta.reasoning`) is never read, so it
+//!   reaches neither a text delta nor the answer (spike finding 8);
+//! - tool calls are assembled by `index`, or by `id` when a server omits the
+//!   index, and two calls are never merged into one (a function name on a
+//!   call that already has one starts another call);
+//! - usage is asked for with `stream_options.include_usage`;
+//! - a cancel returns `StopReason::Cancelled` with no tool call: a call the
+//!   server had not finished is not a call.
 //!
 //! File parts (AD-31): local servers read images only, and only with a vision
 //! model loaded (LM Studio: JPEG, PNG, WebP; Ollama: base64 images). Neither
 //! documents a file or PDF part, so every other type is refused.
 
-use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use am_domain::{
@@ -20,6 +30,12 @@ use serde_json::{Value, json};
 use crate::common::{drive_sse, file_label, render_untrusted_text, send_cancellable};
 
 const IMAGE_TYPES: [&str; 3] = ["image/jpeg", "image/png", "image/webp"];
+
+/// The host of an OpenAI Account's one endpoint (AD-48).
+pub const OPENAI_HOST: &str = "api.openai.com";
+/// The base URL of an OpenAI Account: its calls go to
+/// `{OPENAI_BASE_URL}/chat/completions` and nowhere else.
+pub const OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
 
 pub struct OpenAiCompatProvider {
     egress: Arc<dyn EgressClient>,
@@ -179,13 +195,67 @@ impl OpenAiCompatProvider {
     }
 }
 
+/// One tool call while its fragments arrive.
+#[derive(Default)]
+struct PendingCall {
+    /// The `index` its fragments carry; `None` when the server sends none.
+    index: Option<u64>,
+    id: String,
+    name: String,
+    arguments: String,
+}
+
 #[derive(Default)]
 struct StreamState {
     text: String,
-    /// index -> (id, name, arguments)
-    calls: BTreeMap<u64, (String, String, String)>,
+    /// The tool calls, in the order each first appeared.
+    calls: Vec<PendingCall>,
     usage: Option<Usage>,
     finish: Option<String>,
+}
+
+impl StreamState {
+    /// The call a tool-call fragment belongs to, started when it is new.
+    ///
+    /// - With an `index`: the call of that index. A fragment that brings a
+    ///   function name while that call already has one starts another
+    ///   call, whatever the ids say (a server that numbers every call 0 and
+    ///   sends each whole, with or without ids); a fragment without a name
+    ///   continues the call (also when it brings another id: a server that
+    ///   stamps a fresh id on every fragment).
+    /// - Without an `index`: the call of the fragment's `id`. A fragment
+    ///   with neither continues the call before it, unless it brings a
+    ///   function name and that call already has one.
+    ///
+    /// Two calls are never merged: no fragment is filed under a default
+    /// index, and no call is given a second name.
+    fn call_for(&mut self, index: Option<u64>, id: Option<&str>, named: bool) -> &mut PendingCall {
+        let another_name = |call: &PendingCall| named && !call.name.is_empty();
+        let found = match (index, id) {
+            (Some(index), _) => self
+                .calls
+                .iter()
+                .rposition(|c| c.index == Some(index))
+                .filter(|at| !another_name(&self.calls[*at])),
+            (None, Some(id)) => self.calls.iter().rposition(|c| c.id == id),
+            (None, None) => self
+                .calls
+                .len()
+                .checked_sub(1)
+                .filter(|at| !another_name(&self.calls[*at])),
+        };
+        let at = match found {
+            Some(at) => at,
+            None => {
+                self.calls.push(PendingCall {
+                    index,
+                    ..PendingCall::default()
+                });
+                self.calls.len() - 1
+            }
+        };
+        &mut self.calls[at]
+    }
 }
 
 fn on_data(
@@ -218,6 +288,7 @@ fn on_data(
     }
     if let Some(choice) = v["choices"].get(0) {
         let delta = &choice["delta"];
+        // Only `content` is the answer; `reasoning_content` is never read.
         if let Some(t) = delta["content"].as_str()
             && !t.is_empty()
         {
@@ -226,16 +297,20 @@ fn on_data(
         }
         if let Some(calls) = delta["tool_calls"].as_array() {
             for c in calls {
-                let idx = c["index"].as_u64().unwrap_or(0);
-                let entry = st.calls.entry(idx).or_default();
-                if let Some(id) = c["id"].as_str() {
-                    entry.0 = id.to_string();
+                let id = c["id"].as_str().filter(|id| !id.is_empty());
+                let name = c["function"]["name"].as_str().filter(|n| !n.is_empty());
+                let call = st.call_for(c["index"].as_u64(), id, name.is_some());
+                // A call keeps the first id it was given.
+                if let Some(id) = id
+                    && call.id.is_empty()
+                {
+                    call.id = id.to_string();
                 }
-                if let Some(name) = c["function"]["name"].as_str() {
-                    entry.1.push_str(name);
+                if let Some(name) = name {
+                    call.name.push_str(name);
                 }
                 if let Some(args) = c["function"]["arguments"].as_str() {
-                    entry.2.push_str(args);
+                    call.arguments.push_str(args);
                 }
             }
         }
@@ -328,23 +403,28 @@ impl LlmProvider for OpenAiCompatProvider {
 }
 
 fn finish(st: StreamState, sink: &Arc<dyn EventSink>, cancelled: bool) -> ChatOutcome {
-    let tool_calls: Vec<ToolCall> = st
-        .calls
-        .into_values()
-        .map(|(id, name, args)| ToolCall {
-            id,
-            name,
-            arguments_json: if args.trim().is_empty() {
+    // A cancelled stream gives no tool call, to the sink or in the outcome:
+    // the server had not finished them.
+    let mut calls = if cancelled { Vec::new() } else { st.calls };
+    // Calls that all carry an index are given in index order (the sort is
+    // stable, so calls that share an index keep the order they came in).
+    if calls.iter().all(|c| c.index.is_some()) {
+        calls.sort_by_key(|c| c.index);
+    }
+    let tool_calls: Vec<ToolCall> = calls
+        .into_iter()
+        .map(|c| ToolCall {
+            id: c.id,
+            name: c.name,
+            arguments_json: if c.arguments.trim().is_empty() {
                 "{}".into()
             } else {
-                args
+                c.arguments
             },
         })
         .collect();
-    if !cancelled {
-        for c in &tool_calls {
-            sink.on_event(StreamEvent::ToolCall(c.clone()));
-        }
+    for c in &tool_calls {
+        sink.on_event(StreamEvent::ToolCall(c.clone()));
     }
     let stop = if cancelled {
         StopReason::Cancelled
@@ -362,5 +442,132 @@ fn finish(st: StreamState, sink: &Arc<dyn EventSink>, cancelled: bool) -> ChatOu
         tool_calls,
         usage: st.usage,
         stop,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct NoSink;
+
+    impl EventSink for NoSink {
+        fn on_event(&self, _event: StreamEvent) {}
+    }
+
+    /// One tool-call fragment, as a stream chunk through `on_data`.
+    fn fragment(
+        st: &mut StreamState,
+        index: Option<u64>,
+        id: Option<&str>,
+        name: Option<&str>,
+        arguments: &str,
+    ) {
+        let mut call = json!({"function": {"arguments": arguments}});
+        if let Some(index) = index {
+            call["index"] = json!(index);
+        }
+        if let Some(id) = id {
+            call["id"] = json!(id);
+        }
+        if let Some(name) = name {
+            call["function"]["name"] = json!(name);
+        }
+        let chunk = json!({"choices": [{"index": 0, "delta": {"tool_calls": [call]}}]});
+        let sink: Arc<dyn EventSink> = Arc::new(NoSink);
+        let done = on_data(st, &sink, &chunk.to_string()).unwrap();
+        assert!(!done);
+    }
+
+    fn calls(st: &StreamState) -> Vec<(&str, &str, &str)> {
+        st.calls
+            .iter()
+            .map(|c| (c.id.as_str(), c.name.as_str(), c.arguments.as_str()))
+            .collect()
+    }
+
+    /// Fragments by index: the id and the name come once, the rest follow
+    /// the index.
+    #[test]
+    fn fragments_with_an_index_join_the_call_of_that_index() {
+        let mut st = StreamState::default();
+        fragment(&mut st, Some(0), Some("a"), Some("one"), "{\"x\":");
+        fragment(&mut st, Some(1), Some("b"), Some("two"), "{\"y\":");
+        fragment(&mut st, Some(0), None, None, "1}");
+        fragment(&mut st, Some(1), Some(""), Some(""), "2}");
+        assert_eq!(
+            calls(&st),
+            [("a", "one", "{\"x\":1}"), ("b", "two", "{\"y\":2}")]
+        );
+    }
+
+    /// A server that numbers every call 0: another id with a function name
+    /// is another call, and what follows without a name continues it.
+    #[test]
+    fn another_id_with_a_name_on_the_same_index_is_another_call() {
+        let mut st = StreamState::default();
+        fragment(&mut st, Some(0), Some("a"), Some("one"), "{}");
+        fragment(&mut st, Some(0), Some("b"), Some("two"), "{\"y\":");
+        fragment(&mut st, Some(0), None, None, "2}");
+        assert_eq!(calls(&st), [("a", "one", "{}"), ("b", "two", "{\"y\":2}")]);
+    }
+
+    /// A server that stamps a fresh id on every fragment: another id with no
+    /// function name continues the call at that index, which keeps its
+    /// first id.
+    #[test]
+    fn another_id_without_a_name_continues_the_call_at_that_index() {
+        let mut st = StreamState::default();
+        fragment(&mut st, Some(0), Some("a"), Some("one"), "{\"x\":");
+        fragment(&mut st, Some(0), Some("b"), None, "1");
+        fragment(&mut st, Some(0), Some("c"), Some(""), "}");
+        assert_eq!(calls(&st), [("a", "one", "{\"x\":1}")]);
+    }
+
+    /// Two whole calls at the same index with no ids, and two with neither
+    /// an index nor an id: a second function name is another call.
+    #[test]
+    fn a_second_function_name_is_another_call_whatever_the_ids_say() {
+        let mut st = StreamState::default();
+        fragment(&mut st, Some(0), None, Some("one"), "{\"x\":1}");
+        fragment(&mut st, Some(0), None, Some("two"), "{\"y\":");
+        fragment(&mut st, Some(0), None, None, "2}");
+        assert_eq!(
+            calls(&st),
+            [("", "one", "{\"x\":1}"), ("", "two", "{\"y\":2}")]
+        );
+
+        let mut st = StreamState::default();
+        fragment(&mut st, None, None, Some("one"), "{\"x\":");
+        fragment(&mut st, None, None, None, "1}");
+        fragment(&mut st, None, None, Some("two"), "{}");
+        assert_eq!(calls(&st), [("", "one", "{\"x\":1}"), ("", "two", "{}")]);
+
+        // The same id with the name again: another call at that index.
+        let mut st = StreamState::default();
+        fragment(&mut st, Some(0), Some("a"), Some("one"), "{}");
+        fragment(&mut st, Some(0), Some("a"), Some("two"), "{}");
+        assert_eq!(calls(&st), [("a", "one", "{}"), ("a", "two", "{}")]);
+
+        // A name that arrives after the id fills the call in.
+        let mut st = StreamState::default();
+        fragment(&mut st, Some(0), Some("a"), None, "");
+        fragment(&mut st, Some(0), Some("b"), Some("one"), "{}");
+        assert_eq!(calls(&st), [("a", "one", "{}")]);
+    }
+
+    /// No index: calls are told apart by id, and a fragment with neither
+    /// continues the call before it.
+    #[test]
+    fn fragments_without_an_index_follow_their_id() {
+        let mut st = StreamState::default();
+        fragment(&mut st, None, Some("a"), Some("one"), "{\"x\":");
+        fragment(&mut st, None, None, None, "1}");
+        fragment(&mut st, None, Some("b"), Some("two"), "{\"y\":");
+        fragment(&mut st, None, Some("b"), None, "2}");
+        assert_eq!(
+            calls(&st),
+            [("a", "one", "{\"x\":1}"), ("b", "two", "{\"y\":2}")]
+        );
     }
 }

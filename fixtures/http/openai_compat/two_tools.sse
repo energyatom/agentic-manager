@@ -1,0 +1,20 @@
+: Story 2.3 recording, written by hand in the stream format of an OpenAI-chat-compatible server (no live capture; no key, no real host).
+
+data: {"id":"chatcmpl-fixture-compat-tools","object":"chat.completion.chunk","created":1795000000,"model":"local-tool-model","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-fixture-compat-tools","object":"chat.completion.chunk","created":1795000000,"model":"local-tool-model","choices":[{"index":0,"delta":{"content":"Looking both up."},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-fixture-compat-tools","object":"chat.completion.chunk","created":1795000000,"model":"local-tool-model","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_fixture_c1","type":"function","function":{"name":"lookup_word","arguments":""}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-fixture-compat-tools","object":"chat.completion.chunk","created":1795000000,"model":"local-tool-model","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"word\""}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-fixture-compat-tools","object":"chat.completion.chunk","created":1795000000,"model":"local-tool-model","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":": \"heron\"}"}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-fixture-compat-tools","object":"chat.completion.chunk","created":1795000000,"model":"local-tool-model","choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"id":"call_fixture_c2","type":"function","function":{"name":"count_letters","arguments":"{\"text\": \"heron\"}"}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-fixture-compat-tools","object":"chat.completion.chunk","created":1795000000,"model":"local-tool-model","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
+
+data: {"id":"chatcmpl-fixture-compat-tools","object":"chat.completion.chunk","created":1795000000,"model":"local-tool-model","choices":[],"usage":{"prompt_tokens":203,"completion_tokens":37,"total_tokens":240}}
+
+data: [DONE]
+

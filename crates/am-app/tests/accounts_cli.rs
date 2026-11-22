@@ -9,6 +9,16 @@
 //! `crates/am-config/tests/create.rs` and the dependency guard in
 //! `xtask/tests/release_deps.rs`. Canary keys only; no network, no Keychain.
 //! Written before the command exists.
+//!
+//! Story 2.3 (the last section): the same commands for the providers
+//! `openai` and `openai-compatible`. The add path is story 2.1's, unchanged;
+//! what differs is the provider and the endpoint (`--base-url`, in the two
+//! accepted forms), which the sentence, the audit entry, `list` and `test`'s
+//! egress policy all name. One test per row of that story's I/O matrix that
+//! the CLI owns; the adapter's rows are in
+//! `crates/am-providers/tests/openai_compat.rs` and the edit's in
+//! `crates/am-config/tests/account_edit.rs`. Written before the providers
+//! were accepted.
 #![forbid(unsafe_code)]
 #![cfg(unix)]
 
@@ -580,23 +590,42 @@ async fn add_refuses_a_reserved_or_existing_id() {
     assert!(env.history(&root).is_empty());
 }
 
-/// Only Anthropic Accounts in this story (OpenAI is story 3).
+/// A provider that is not a model provider (a search provider, or a word
+/// that is no provider at all) is refused naming the three an Account can be
+/// added for, before anything is read. (Story 2.1 refused every provider but
+/// Anthropic; story 2.3 adds OpenAI and OpenAI-compatible Accounts.)
 #[tokio::test]
-async fn add_refuses_a_provider_other_than_anthropic() {
+async fn add_refuses_a_provider_that_is_not_a_model_provider() {
     let env = env();
     let root = env.usual(&[]);
-    let kit = Kit::new(FakeTerminal::new());
-    kit.term.line("cloud2");
-    kit.term.line(CANARY);
+    for provider in ["brave", "nope"] {
+        let kit = Kit::new(FakeTerminal::new());
+        kit.term.line("cloud2");
+        kit.term.line(CANARY);
 
-    let ran = kit
-        .run(&env, &root, &["add", "cloud2", "--provider", "openai"])
-        .await;
+        let ran = kit
+            .run(&env, &root, &["add", "cloud2", "--provider", provider])
+            .await;
 
-    assert_ne!(ran.code, 0, "{}", ran.all());
-    assert!(ran.all().contains("anthropic"), "{}", ran.all());
-    assert_eq!(kit.term.reads(), 0);
+        assert_ne!(ran.code, 0, "{provider}: {}", ran.all());
+        let said = ran.all().to_lowercase();
+        let named: Vec<&str> = said
+            .split(|c: char| !c.is_ascii_alphanumeric() && c != '-')
+            .collect();
+        for model_provider in ["anthropic", "openai", "openai-compatible"] {
+            assert!(
+                named.contains(&model_provider),
+                "{provider}: the refusal names {model_provider}: {}",
+                ran.all()
+            );
+        }
+        assert!(ran.all().contains(provider), "{provider}: {}", ran.all());
+        assert_eq!(kit.term.reads(), 0, "{provider}: nothing is read");
+        assert!(ran.shown.is_empty(), "{provider}: no prompt: {}", ran.shown);
+        assert_eq!(kit.key("cloud2"), None);
+    }
     assert!(!root.join(ACCOUNTS_FILE).exists());
+    assert!(env.history(&root).is_empty());
 }
 
 /// Reuse key: a keychain entry already held for the id is reused, never
@@ -737,12 +766,16 @@ async fn list_masks_keys_and_names_missing_ones() {
 /// Test: one short reply streamed through an egress client whose policy
 /// admits only the Account's host (no loopback port); the request names the
 /// Account in its `AuthRef`; a host outside the pin is refused by
-/// `check_url`; any stdin; no edit.
+/// `check_url`; any stdin; no edit. (Rewritten in story 2.3's review: the
+/// Account is added through the command first, because `test` calls only an
+/// Account that `agentic accounts add` confirmed on this Mac.)
 #[tokio::test]
 async fn test_streams_a_reply_through_the_accounts_pinned_host() {
     let env = env();
-    let root = env.usual(&[(ACCOUNTS_FILE, accounts_yaml(&["cloud", "cloud2"]))]);
+    let root = plain(&env);
+    add_account(&env, &root, "cloud", "anthropic", None, CANARY).await;
     let before = read(&root, ACCOUNTS_FILE);
+    let recorded = env.history(&root).len();
     let kit = Kit::new(FakeTerminal::piped()).with_key("cloud", CANARY);
     kit.egress
         .replay("api.anthropic.com", "anthropic/c1_count_stream.sse");
@@ -789,16 +822,19 @@ async fn test_streams_a_reply_through_the_accounts_pinned_host() {
     }
 
     assert_eq!(read(&root, ACCOUNTS_FILE), before);
-    assert!(env.history(&root).is_empty());
+    assert_eq!(env.history(&root).len(), recorded, "no edit");
     assert!(!ran.all().contains(CANARY));
 }
 
 /// Test of an Account with no key, or of an unknown id: refused in words,
-/// nothing sent.
+/// nothing sent. (Rewritten in story 2.3's review: the Account is added
+/// through the command first; the `test` then runs with a Keychain that
+/// holds no key for it.)
 #[tokio::test]
 async fn test_without_a_key_or_of_an_unknown_id_sends_nothing() {
     let env = env();
-    let root = env.usual(&[(ACCOUNTS_FILE, accounts_yaml(&["cloud2"]))]);
+    let root = env.usual(&[]);
+    add_account(&env, &root, "cloud2", "anthropic", None, CANARY).await;
     let kit = Kit::new(FakeTerminal::piped());
     kit.egress
         .replay("api.anthropic.com", "anthropic/c1_count_stream.sse");
@@ -1353,14 +1389,73 @@ impl SecretStore for BeforeSet {
     }
 }
 
-/// The Keychain gains an entry for the id while the key prompt waits
-/// (another process stored one): it is never overwritten. The typed key is
-/// discarded, the add says the existing entry is kept and used, and a write
-/// that then fails leaves that entry in place (this add did not create it).
+/// The Keychain entry of the id changes while a prompt waits (another
+/// process stores one during the id prompt or the key prompt, or deletes
+/// the one the sentence said would be reused): the sentence the owner
+/// confirmed no longer says which key goes to the endpoint, so the add is
+/// refused, to be run again. Nothing is written or recorded, the typed key
+/// is not stored, and an entry this command did not create is never
+/// overwritten or deleted. (Rewritten in story 2.3's second review: story
+/// 2.1 kept and used an entry that appeared during the key prompt.)
 #[tokio::test]
-async fn a_keychain_entry_that_appears_during_the_key_prompt_is_kept() {
+async fn a_keychain_entry_that_changes_while_a_prompt_waits_refuses_the_add() {
     const THEIRS: &str = "sk-ant-stored-by-another-process-7777";
+    let refused = |ran: &Ran, when: &str| {
+        assert_ne!(ran.code, 0, "{when}: {}", ran.all());
+        for words in [
+            "the Keychain entry for 'cloud2' changed while you typed",
+            "run the command again",
+        ] {
+            assert!(
+                ran.all().contains(words),
+                "{when}: it says \"{words}\": {}",
+                ran.all()
+            );
+        }
+        for key in [THEIRS, CANARY] {
+            assert!(!ran.all().contains(key), "{when}: a key was printed");
+        }
+    };
+    let nothing_written = |env: &Env, root: &Path, when: &str| {
+        assert!(!root.join(ACCOUNTS_FILE).exists(), "{when}: no file");
+        assert!(env.history(root).is_empty(), "{when}: no History entry");
+        assert!(
+            audit_line_of_kind(&env.audit(root), "account_added").is_empty(),
+            "{when}: no audit note"
+        );
+    };
+    let args = ["add", "cloud2", "--provider", "anthropic"];
+
+    // An entry appears while the id prompt waits: the sentence said no key
+    // was held, so the entry is not reused and no key is asked for.
     let env = env();
+    let root = env.usual(&[]);
+    let kit = Kit::new(FakeTerminal::new());
+    let store = kit.secrets.clone();
+    kit.term.line_and("cloud2", move || {
+        store
+            .set("cloud2", am_domain::SecretString::new(THEIRS.into()))
+            .unwrap();
+    });
+    kit.term.line(CANARY);
+    let ran = kit.run(&env, &root, &args).await;
+    refused(&ran, "during the id prompt");
+    assert!(
+        !ran.shown.contains("already holds"),
+        "the sentence said no key was held: {}",
+        ran.shown
+    );
+    assert_eq!(kit.term.reads(), 1, "the key is not asked for");
+    assert_eq!(
+        kit.key("cloud2").as_deref(),
+        Some(THEIRS),
+        "the entry that appeared is neither overwritten nor deleted"
+    );
+    nothing_written(&env, &root, "during the id prompt");
+
+    // An entry appears while the key prompt waits: the typed key is
+    // discarded and the entry stays as it is.
+    let env = self::env();
     let root = env.usual(&[]);
     let kit = Kit::new(FakeTerminal::new());
     kit.term.line("cloud2");
@@ -1370,55 +1465,32 @@ async fn a_keychain_entry_that_appears_during_the_key_prompt_is_kept() {
             .set("cloud2", am_domain::SecretString::new(THEIRS.into()))
             .unwrap();
     });
-
-    let ran = kit
-        .run(&env, &root, &["add", "cloud2", "--provider", "anthropic"])
-        .await;
-
-    assert_eq!(ran.code, 0, "{}", ran.all());
+    let ran = kit.run(&env, &root, &args).await;
+    refused(&ran, "during the key prompt");
     assert_eq!(kit.term.reads(), 2, "the id, then the key");
     assert_eq!(
         kit.key("cloud2").as_deref(),
         Some(THEIRS),
-        "the entry that appeared is not overwritten"
+        "the entry that appeared is neither overwritten nor deleted"
     );
-    assert!(ran.all().contains("kept"), "it says so: {}", ran.all());
-    assert_eq!(loaded_accounts(&root).len(), 1);
-    assert!(!ran.all().contains(THEIRS));
-    assert_no_key_leaked(&env, &root, &ran);
+    nothing_written(&env, &root, "during the key prompt");
 
-    // The same, with a write that fails: the entry stays.
-    let other = env.project(
-        "q",
-        &[
-            ("company.yaml", COMPANY.to_string()),
-            (ACCOUNTS_FILE, accounts_yaml(&["cloud"])),
-        ],
-    );
-    let models = other.join("models");
-    if !read_only(&models) {
-        writable(&models);
-        eprintln!("skipped: running as a user who can write a read-only folder");
-        return;
-    }
-    let kit = Kit::new(FakeTerminal::new());
-    kit.term.line("cloud2");
+    // The entry the sentence said would be reused is deleted while the id
+    // prompt waits: no key is asked for in its place.
+    let env = self::env();
+    let root = env.usual(&[]);
+    let kit = Kit::new(FakeTerminal::new()).with_key("cloud2", THEIRS);
     let store = kit.secrets.clone();
-    kit.term.line_and(CANARY, move || {
-        store
-            .set("cloud2", am_domain::SecretString::new(THEIRS.into()))
-            .unwrap();
+    kit.term.line_and("cloud2", move || {
+        store.delete("cloud2").unwrap();
     });
-    let ran = kit
-        .run(&env, &other, &["add", "cloud2", "--provider", "anthropic"])
-        .await;
-    writable(&models);
-    assert_ne!(ran.code, 0, "{}", ran.all());
-    assert_eq!(
-        kit.key("cloud2").as_deref(),
-        Some(THEIRS),
-        "an entry this add did not create is never deleted"
-    );
+    kit.term.line(CANARY);
+    let ran = kit.run(&env, &root, &args).await;
+    refused(&ran, "deleted during the id prompt");
+    assert!(ran.shown.contains("already holds"), "{}", ran.shown);
+    assert_eq!(kit.term.reads(), 1, "the key is not asked for");
+    assert_eq!(kit.key("cloud2"), None, "nothing is stored");
+    nothing_written(&env, &root, "deleted during the id prompt");
 }
 
 /// The file gains the same id from outside in the gap between the last
@@ -1540,4 +1612,1470 @@ async fn a_remove_that_fails_after_the_file_was_written_says_it_was_removed() {
         ran.all()
     );
     assert_eq!(env.history(&root).len(), 1);
+}
+
+// ------------------------------- OpenAI and compatible Accounts (story 2.3)
+
+/// The key typed for an OpenAI Account, and the keys of the compatible ones.
+const OA_CANARY: &str = "sk-proj-canary-9f8e7d6c5b4a-OAOA";
+const ROUTER_CANARY: &str = "sk-or-canary-1a2b3c4d5e6f-RTRT";
+const LLAMA_CANARY: &str = "any-text-canary-for-a-local-server-LLMA";
+
+const OPENAI_URL: &str = "https://api.openai.com/v1";
+const REMOTE_URL: &str = "https://openrouter.example/api/v1";
+const LOOPBACK_URL: &str = "http://127.0.0.1:8080/v1";
+
+/// `models/accounts.yaml` with one Account of each kind: Anthropic, OpenAI,
+/// a compatible endpoint that is remote and one on this Mac.
+fn four_kinds() -> String {
+    format!(
+        "{}  - id: oa\n    provider: openai\n    secret_ref: oa\n  - id: router\n    provider: openai-compatible\n    base_url: {REMOTE_URL}\n    secret_ref: router\n  - id: llama\n    provider: openai-compatible\n    base_url: {LOOPBACK_URL}\n    secret_ref: llama\n",
+        accounts_yaml(&["cloud"])
+    )
+}
+
+/// Adds an Account through the command, as the owner does: on an
+/// interactive terminal, the id typed to confirm, then the key. `test`
+/// calls only an Account added this way (its endpoint and provider are in
+/// the `account_added` audit note, and the file is as the app wrote it).
+async fn add_account(
+    env: &Env,
+    root: &Path,
+    id: &str,
+    provider: &str,
+    base_url: Option<&str>,
+    key: &str,
+) {
+    let mut args = vec!["add", id, "--provider", provider];
+    if let Some(url) = base_url {
+        args.extend(["--base-url", url]);
+    }
+    let kit = Kit::new(FakeTerminal::new());
+    kit.term.line(id);
+    kit.term.line(key);
+    let ran = kit.run(env, root, &args).await;
+    assert_eq!(ran.code, 0, "add {id}: {}", ran.all());
+}
+
+/// A valid project that names no cloud Account yet (its one seat runs on
+/// the reserved local Accounts), opened once on this Mac: any Account can be
+/// added to it, and removed again.
+fn plain(env: &Env) -> PathBuf {
+    env.project(
+        "p",
+        &[
+            ("company.yaml", COMPANY.to_string()),
+            ("seats/alpha.md", alpha("local-ollama")),
+        ],
+    )
+}
+
+/// The plain project with one Account of each kind, each added through the
+/// command: `cloud` (Anthropic), `oa` (OpenAI), `router` (a compatible
+/// endpoint that is remote) and `llama` (one on this Mac).
+async fn four_kinds_added(env: &Env) -> PathBuf {
+    let root = plain(env);
+    add_account(env, &root, "cloud", "anthropic", None, CANARY).await;
+    add_account(env, &root, "oa", "openai", None, OA_CANARY).await;
+    add_account(
+        env,
+        &root,
+        "router",
+        "openai-compatible",
+        Some(REMOTE_URL),
+        ROUTER_CANARY,
+    )
+    .await;
+    add_account(
+        env,
+        &root,
+        "llama",
+        "openai-compatible",
+        Some(LOOPBACK_URL),
+        LLAMA_CANARY,
+    )
+    .await;
+    root
+}
+
+/// A `test` that must be refused before anything is read or sent: run with
+/// a Keychain that holds a key for `id` and counts its reads, and an egress
+/// that would answer any host. Returns what was printed, after checking
+/// that the command failed, read no key, asked for no egress policy and
+/// sent nothing.
+async fn refused_test(env: &Env, root: &Path, id: &str) -> Ran {
+    let kit = Kit::new(FakeTerminal::piped()).with_key(id, ROUTER_CANARY);
+    kit.egress.replay("", "openai_compat/reasoning.sse");
+    let counting = Arc::new(CountingStore {
+        inner: kit.secrets.clone(),
+        gets: AtomicUsize::new(0),
+    });
+    let ran = kit
+        .run_with(env, root, &["test", id, "--model", "m"], counting.clone())
+        .await;
+    assert_ne!(ran.code, 0, "{id}: {}", ran.all());
+    assert_eq!(
+        counting.gets.load(Ordering::SeqCst),
+        0,
+        "{id}: refused before any Keychain read: {}",
+        ran.all()
+    );
+    assert!(
+        kit.egress.requests().is_empty(),
+        "{id}: nothing sent: {}",
+        ran.all()
+    );
+    assert!(
+        kit.policies().is_empty(),
+        "{id}: no egress client is built: {:?}",
+        kit.policies()
+    );
+    assert!(!ran.all().contains(ROUTER_CANARY), "{id}: {}", ran.all());
+    ran
+}
+
+/// What the refusal of an Account that `agentic accounts add` did not
+/// confirm says: that, that no key was read or sent, and what to do.
+fn assert_says_not_confirmed(ran: &Ran, id: &str) {
+    let said = ran.all();
+    for words in [
+        "not confirmed by `agentic accounts add` on this Mac",
+        "No key was read or sent",
+        "agentic accounts remove",
+    ] {
+        assert!(said.contains(words), "{id}: it says \"{words}\": {said}");
+    }
+    assert!(said.contains(id), "{id}: {said}");
+}
+
+/// One Account as the project's config holds it: (id, provider, name,
+/// base_url, secret_ref).
+type Held = (
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
+
+fn held(id: &str, provider: &str, name: Option<&str>, base_url: Option<&str>) -> Held {
+    (
+        id.to_string(),
+        provider.to_string(),
+        name.map(str::to_string),
+        base_url.map(str::to_string),
+        Some(id.to_string()),
+    )
+}
+
+/// The Accounts of the project's config now. The project must load without
+/// an error: what the add wrote is valid config.
+fn held_accounts(root: &Path) -> Vec<Held> {
+    let loaded = am_config::load(root).unwrap();
+    let snap = loaded
+        .snapshot
+        .unwrap_or_else(|| panic!("{:#?}", loaded.findings));
+    snap.accounts()
+        .iter()
+        .map(|a| {
+            (
+                a.id.clone(),
+                a.provider.clone(),
+                a.name.clone(),
+                a.base_url.clone(),
+                a.secret_ref.clone(),
+            )
+        })
+        .collect()
+}
+
+/// The one `account_added` audit line, checked for what every add records
+/// (AD-15) and for the endpoint's scheme, host and port.
+fn assert_added_audit(
+    env: &Env,
+    root: &Path,
+    account: &str,
+    provider: &str,
+    scheme: &str,
+    host: &str,
+    port: &str,
+) {
+    let audit = env.audit(root);
+    let added = audit_line_of_kind(&audit, "account_added");
+    assert_eq!(added.len(), 1, "{audit}");
+    let line = &added[0];
+    assert!(has(line, "file", ACCOUNTS_FILE), "{line}");
+    assert!(has(line, "account", account), "{line}");
+    assert!(has(line, "provider", provider), "{line}");
+    assert!(has(line, "scheme", scheme), "{line}");
+    assert!(has(line, "host", host), "{line}");
+    assert!(
+        has(line, "port", port) || line.contains(&format!("\"port\":{port}")),
+        "port {port}: {line}"
+    );
+    assert!(has(line, "confirmation", "typed_id"), "{line}");
+}
+
+/// Add OpenAI: the sentence names the Account, its provider and
+/// `https://api.openai.com/v1`; the id is typed within 2 minutes and the key
+/// is read with echo off, as for every add; the file gains the Account with
+/// `secret_ref` and no `base_url`; the audit entry carries `https`,
+/// `api.openai.com` and 443; the key is only in the (fake) Keychain; no
+/// seat file changes.
+#[tokio::test]
+async fn add_an_openai_account_names_its_endpoint_and_records_it() {
+    let env = env();
+    let root = env.project(
+        "p",
+        &[
+            ("company.yaml", COMPANY.to_string()),
+            ("seats/alpha.md", alpha("oa")),
+        ],
+    );
+    let seat = read(&root, "seats/alpha.md");
+    let kit = Kit::new(FakeTerminal::new());
+    kit.term.line("oa");
+    kit.term.line(OA_CANARY);
+
+    let ran = kit
+        .run(&env, &root, &["add", "oa", "--provider", "openai"])
+        .await;
+
+    assert_eq!(ran.code, 0, "{}", ran.all());
+    for word in ["'oa'", "openai", OPENAI_URL, "alpha", "Keychain"] {
+        assert!(
+            ran.shown.contains(word),
+            "the sentence names {word}: {}",
+            ran.shown
+        );
+    }
+    assert!(
+        !ran.shown.contains("stay on this Mac"),
+        "a cloud endpoint is not on this Mac: {}",
+        ran.shown
+    );
+    assert_eq!(
+        kit.term.echo_reads(),
+        vec![true, false],
+        "id echoed, key not"
+    );
+    assert!(kit.term.echo(), "echo is on again");
+    assert_eq!(
+        kit.term.timeouts().first().copied().flatten(),
+        Some(Duration::from_secs(120)),
+        "the id is asked within 2 minutes"
+    );
+    assert_eq!(kit.key("oa").as_deref(), Some(OA_CANARY));
+
+    assert_eq!(held_accounts(&root), vec![held("oa", "openai", None, None)]);
+    let text = read(&root, ACCOUNTS_FILE).unwrap();
+    assert!(!text.contains("base_url"), "{text}");
+    let history = env.history(&root);
+    assert_eq!(history.len(), 1, "{history:#?}");
+    assert_eq!(history[0].file, ACCOUNTS_FILE);
+    assert_eq!(history[0].kind, HistoryKind::Create);
+    assert_eq!(history[0].actor, owner());
+    assert_added_audit(
+        &env,
+        &root,
+        "oa",
+        "openai",
+        "https",
+        "api.openai.com",
+        "443",
+    );
+
+    assert_eq!(read(&root, "seats/alpha.md"), seat, "no seat is changed");
+    assert!(!open_marker(&root).exists(), "no marker is written");
+    for leak in [&ran.all(), &text, &env.audit(&root)] {
+        assert!(!leak.contains(OA_CANARY), "the key left the Keychain");
+    }
+    for e in env.history(&root) {
+        assert!(
+            !format!("{e:?}").contains(OA_CANARY),
+            "the key reached History"
+        );
+        assert!(!String::from_utf8_lossy(&e.after).contains(OA_CANARY));
+    }
+}
+
+/// Add compatible, remote: `--base-url https://<host>/<path>` is named in
+/// the sentence as typed; the Account is appended to the existing file with
+/// its `base_url` and `secret_ref` (an `edit`); the audit entry carries
+/// `https`, the host and 443.
+#[tokio::test]
+async fn add_a_compatible_account_at_a_remote_url_pins_that_host() {
+    let env = env();
+    let root = env.project(
+        "p",
+        &[
+            ("company.yaml", COMPANY.to_string()),
+            ("seats/alpha.md", alpha("router")),
+            ("seats/beta.md", beta("cloud")),
+            (ACCOUNTS_FILE, accounts_yaml(&["cloud"])),
+        ],
+    );
+    let seats = (read(&root, "seats/alpha.md"), read(&root, "seats/beta.md"));
+    let kit = Kit::new(FakeTerminal::new());
+    kit.term.line("router");
+    kit.term.line(ROUTER_CANARY);
+
+    let ran = kit
+        .run(
+            &env,
+            &root,
+            &[
+                "add",
+                "router",
+                "--provider",
+                "openai-compatible",
+                "--base-url",
+                REMOTE_URL,
+                "--name",
+                "Router",
+            ],
+        )
+        .await;
+
+    assert_eq!(ran.code, 0, "{}", ran.all());
+    for word in ["'router'", "openai-compatible", REMOTE_URL, "alpha"] {
+        assert!(
+            ran.shown.contains(word),
+            "the sentence names {word}: {}",
+            ran.shown
+        );
+    }
+    assert!(
+        !ran.shown.contains("stay on this Mac"),
+        "a remote endpoint is not on this Mac: {}",
+        ran.shown
+    );
+    assert_eq!(kit.term.echo_reads(), vec![true, false]);
+    assert_eq!(kit.key("router").as_deref(), Some(ROUTER_CANARY));
+
+    assert_eq!(
+        held_accounts(&root),
+        vec![
+            held("cloud", "anthropic", None, None),
+            held(
+                "router",
+                "openai-compatible",
+                Some("Router"),
+                Some(REMOTE_URL)
+            ),
+        ]
+    );
+    let history = env.history(&root);
+    assert_eq!(history.len(), 1, "{history:#?}");
+    assert_eq!(history[0].kind, HistoryKind::Edit);
+    assert_eq!(history[0].actor, owner());
+    assert_added_audit(
+        &env,
+        &root,
+        "router",
+        "openai-compatible",
+        "https",
+        "openrouter.example",
+        "443",
+    );
+
+    assert_eq!(
+        (read(&root, "seats/alpha.md"), read(&root, "seats/beta.md")),
+        seats,
+        "no seat is changed"
+    );
+    let text = read(&root, ACCOUNTS_FILE).unwrap();
+    for leak in [&ran.all(), &text, &env.audit(&root)] {
+        assert!(!leak.contains(ROUTER_CANARY), "the key left the Keychain");
+    }
+}
+
+/// Add compatible, loopback: `--base-url http://127.0.0.1:<port>/<path>` is
+/// accepted for a server on this Mac; the sentence says the calls stay on
+/// this Mac, on that port; the new file holds the `base_url`; the audit
+/// entry carries `http`, `127.0.0.1` and the port. A key is read and stored
+/// as for every Account (there is no keyless Account).
+#[tokio::test]
+async fn add_a_compatible_account_on_this_mac_says_its_calls_stay_here() {
+    let env = env();
+    let root = env.project(
+        "p",
+        &[
+            ("company.yaml", COMPANY.to_string()),
+            ("seats/alpha.md", alpha("llama")),
+        ],
+    );
+    let kit = Kit::new(FakeTerminal::new());
+    kit.term.line("llama");
+    kit.term.line(LLAMA_CANARY);
+
+    let ran = kit
+        .run(
+            &env,
+            &root,
+            &[
+                "add",
+                "llama",
+                "--provider",
+                "openai-compatible",
+                "--base-url",
+                LOOPBACK_URL,
+            ],
+        )
+        .await;
+
+    assert_eq!(ran.code, 0, "{}", ran.all());
+    for word in [
+        "'llama'",
+        "openai-compatible",
+        LOOPBACK_URL,
+        "stay on this Mac",
+        "port 8080",
+    ] {
+        assert!(
+            ran.shown.contains(word),
+            "the sentence says {word}: {}",
+            ran.shown
+        );
+    }
+    assert_eq!(
+        kit.term.echo_reads(),
+        vec![true, false],
+        "the key is read, echo off"
+    );
+    assert_eq!(kit.key("llama").as_deref(), Some(LLAMA_CANARY));
+
+    assert_eq!(
+        held_accounts(&root),
+        vec![held("llama", "openai-compatible", None, Some(LOOPBACK_URL))]
+    );
+    let history = env.history(&root);
+    assert_eq!(history.len(), 1, "{history:#?}");
+    assert_eq!(history[0].kind, HistoryKind::Create);
+    assert_added_audit(
+        &env,
+        &root,
+        "llama",
+        "openai-compatible",
+        "http",
+        "127.0.0.1",
+        "8080",
+    );
+    let text = read(&root, ACCOUNTS_FILE).unwrap();
+    for leak in [&ran.all(), &text, &env.audit(&root)] {
+        assert!(!leak.contains(LLAMA_CANARY), "the key left the Keychain");
+    }
+}
+
+/// Refused URLs: a compatible Account without `--base-url`, a `--base-url`
+/// outside the two accepted forms (`https://<DNS name>[/path]` on port 443,
+/// `http://127.0.0.1:<port>[/path]`), and a `--base-url` for a provider
+/// with one fixed endpoint. Each is refused in words that name `--base-url`
+/// and the reason, before any prompt: nothing is shown on the terminal,
+/// read, written or stored.
+#[tokio::test]
+async fn add_refuses_a_base_url_outside_the_two_accepted_forms() {
+    const COMPATIBLE: &str = "openai-compatible";
+    // (provider, --base-url, words of which the refusal holds at least one)
+    let cases: [(&str, Option<&str>, &[&str]); 16] = [
+        (COMPATIBLE, None, &["openai-compatible"]),
+        // Plain http to anything but this Mac.
+        (COMPATIBLE, Some("http://example.org"), &["https"]),
+        // An IP literal: private, LAN, link-local (metadata) or public.
+        (COMPATIBLE, Some("https://10.0.0.5/v1"), &["address"]),
+        (
+            COMPATIBLE,
+            Some("http://192.168.1.4:8080"),
+            &["address", "127.0.0.1"],
+        ),
+        (COMPATIBLE, Some("https://169.254.169.254/v1"), &["address"]),
+        (COMPATIBLE, Some("https://203.0.113.9/v1"), &["address"]),
+        // This Mac, but not as `http://127.0.0.1:<port>`.
+        (COMPATIBLE, Some("http://localhost:8080"), &["127.0.0.1"]),
+        (COMPATIBLE, Some("http://127.0.0.1/v1"), &["port"]),
+        (
+            COMPATIBLE,
+            Some("https://127.0.0.1:8080/v1"),
+            &["http://127.0.0.1", "this mac", "address"],
+        ),
+        (
+            COMPATIBLE,
+            Some("http://[::1]:8080/v1"),
+            &["127.0.0.1", "address"],
+        ),
+        // A remote port other than 443, userinfo, a query, a fragment.
+        (COMPATIBLE, Some("https://x.org:8443"), &["port"]),
+        (
+            COMPATIBLE,
+            Some("https://someone:something@relay.example/v1"),
+            &[
+                "user name",
+                "username",
+                "password",
+                "userinfo",
+                "credential",
+            ],
+        ),
+        (
+            COMPATIBLE,
+            Some("https://relay.example/v1?tier=a"),
+            &["query"],
+        ),
+        (
+            COMPATIBLE,
+            Some("https://relay.example/v1#part"),
+            &["fragment"],
+        ),
+        // One fixed endpoint: no `--base-url`.
+        (
+            "openai",
+            Some(REMOTE_URL),
+            &["api.openai.com", "openai-compatible"],
+        ),
+        (
+            "anthropic",
+            Some(REMOTE_URL),
+            &["api.anthropic.com", "openai-compatible"],
+        ),
+    ];
+    let env = env();
+    let root = env.usual(&[]);
+    for (provider, base_url, reasons) in cases {
+        let mut args = vec!["add", "cloud2", "--provider", provider];
+        if let Some(url) = base_url {
+            args.extend(["--base-url", url]);
+        }
+        let kit = Kit::new(FakeTerminal::new());
+        kit.term.line("cloud2");
+        kit.term.line(CANARY);
+
+        let ran = kit.run(&env, &root, &args).await;
+
+        let case = format!("{provider} {base_url:?}");
+        assert_ne!(ran.code, 0, "{case}: {}", ran.all());
+        assert!(
+            !ran.all().contains("unknown option"),
+            "{case}: `--base-url` is an option of `accounts add`: {}",
+            ran.all()
+        );
+        assert!(
+            ran.all().contains("--base-url"),
+            "{case}: the refusal names --base-url: {}",
+            ran.all()
+        );
+        let said = ran.all().to_lowercase();
+        assert!(
+            reasons.iter().any(|word| said.contains(word)),
+            "{case}: the refusal gives its reason (one of {reasons:?}): {}",
+            ran.all()
+        );
+        assert!(
+            ran.shown.is_empty(),
+            "{case}: refused before any prompt: {}",
+            ran.shown
+        );
+        assert_eq!(kit.term.reads(), 0, "{case}: nothing is read");
+        assert_eq!(kit.key("cloud2"), None, "{case}: nothing is stored");
+        assert!(
+            !root.join(ACCOUNTS_FILE).exists(),
+            "{case}: nothing is written"
+        );
+    }
+    assert!(env.history(&root).is_empty());
+    assert!(audit_line_of_kind(&env.audit(&root), "account_added").is_empty());
+}
+
+/// The 2.1 terminal rule holds for the new providers: with a stdin that is
+/// not a terminal an OpenAI or compatible add is refused naming the rule,
+/// and nothing is read, written or stored.
+#[tokio::test]
+async fn add_of_an_openai_or_compatible_account_needs_a_terminal() {
+    let env = env();
+    let root = env.usual(&[]);
+    for args in [
+        vec!["add", "cloud2", "--provider", "openai"],
+        vec![
+            "add",
+            "cloud2",
+            "--provider",
+            "openai-compatible",
+            "--base-url",
+            LOOPBACK_URL,
+        ],
+    ] {
+        let kit = Kit::new(FakeTerminal::piped());
+        kit.term.line("cloud2");
+        kit.term.line(CANARY);
+        let ran = kit.run(&env, &root, &args).await;
+        assert_ne!(ran.code, 0, "{args:?}: {}", ran.all());
+        assert!(ran.all().contains("terminal"), "{args:?}: {}", ran.all());
+        assert_eq!(kit.term.reads(), 0, "{args:?}: nothing is read");
+        assert_eq!(kit.key("cloud2"), None);
+    }
+    assert!(!root.join(ACCOUNTS_FILE).exists());
+    assert!(env.history(&root).is_empty());
+}
+
+/// The usage text names the three providers and `--base-url`; a
+/// `--base-url` with no value is bad usage (exit 2), not an unknown option.
+#[tokio::test]
+async fn usage_names_the_three_providers_and_the_base_url() {
+    let env = env();
+    let root = env.usual(&[]);
+    let kit = Kit::new(FakeTerminal::new());
+
+    let ran = kit.run(&env, &root, &["add"]).await;
+    assert_eq!(ran.code, 2, "{}", ran.all());
+    for word in ["anthropic", "openai", "openai-compatible", "--base-url"] {
+        assert!(ran.err.contains(word), "usage names {word}: {}", ran.err);
+    }
+
+    let ran = kit
+        .run(
+            &env,
+            &root,
+            &[
+                "add",
+                "cloud2",
+                "--provider",
+                "openai-compatible",
+                "--base-url",
+            ],
+        )
+        .await;
+    assert_eq!(ran.code, 2, "{}", ran.all());
+    assert!(ran.err.contains("usage: agentic accounts"), "{}", ran.err);
+    assert!(
+        !ran.err.contains("unknown option"),
+        "`--base-url` is an option of `accounts add`: {}",
+        ran.err
+    );
+    assert_eq!(kit.term.reads(), 0);
+}
+
+/// The line of `accounts list` for the Account `id`, as whitespace-separated
+/// columns.
+fn list_columns(out: &str, id: &str) -> Vec<String> {
+    out.lines()
+        .map(|l| l.split_whitespace().map(str::to_string).collect::<Vec<_>>())
+        .find(|columns| columns.first().is_some_and(|c| c == id))
+        .unwrap_or_else(|| panic!("no line for {id}: {out}"))
+}
+
+/// List: one Account of each kind shows its provider and its endpoint's
+/// host (`api.anthropic.com`, `api.openai.com`, the compatible endpoint's
+/// host, and `127.0.0.1:<port>` for one on this Mac), with each key masked
+/// as before; any stdin; no edit.
+#[tokio::test]
+async fn list_shows_the_endpoint_host_of_each_kind_of_account() {
+    let env = env();
+    let root = env.usual(&[(ACCOUNTS_FILE, four_kinds())]);
+    let before = read(&root, ACCOUNTS_FILE);
+    let kit = Kit::new(FakeTerminal::piped()).with_key("cloud", CANARY);
+    for (id, key) in [
+        ("oa", OA_CANARY),
+        ("router", ROUTER_CANARY),
+        ("llama", LLAMA_CANARY),
+    ] {
+        kit.secrets
+            .set(id, am_domain::SecretString::new(key.to_string()))
+            .unwrap();
+    }
+
+    let ran = kit.run(&env, &root, &["list"]).await;
+
+    assert_eq!(ran.code, 0, "{}", ran.all());
+    for (id, provider, host, tail) in [
+        ("cloud", "anthropic", "api.anthropic.com", "WXYZ"),
+        ("oa", "openai", "api.openai.com", "OAOA"),
+        ("router", "openai-compatible", "openrouter.example", "RTRT"),
+        ("llama", "openai-compatible", "127.0.0.1:8080", "LLMA"),
+    ] {
+        let columns = list_columns(&ran.out, id);
+        assert!(
+            columns.iter().any(|c| c == provider),
+            "{id}: its provider {provider}: {columns:?}"
+        );
+        assert!(
+            columns.iter().any(|c| c == host),
+            "{id}: its endpoint host {host}: {columns:?}"
+        );
+        assert!(
+            columns
+                .iter()
+                .any(|c| c.starts_with('•') && c.ends_with(tail)),
+            "{id}: its key masked: {columns:?}"
+        );
+    }
+    for key in [CANARY, OA_CANARY, ROUTER_CANARY, LLAMA_CANARY] {
+        assert!(!ran.all().contains(key), "a key was printed: {}", ran.all());
+        assert!(
+            !ran.all().contains(&key[..12]),
+            "the head of a key was printed: {}",
+            ran.all()
+        );
+    }
+    assert_eq!(kit.term.reads(), 0);
+    assert_eq!(read(&root, ACCOUNTS_FILE), before);
+    assert!(env.history(&root).is_empty());
+    assert!(kit.egress.requests().is_empty(), "list calls nothing");
+}
+
+/// Test OpenAI: with `--model`, one short reply is streamed from the
+/// recorded OpenAI stream; the one request goes to
+/// `https://api.openai.com/v1/chat/completions` with a `Bearer` reference
+/// naming the Account; the egress policy admits only that host and no
+/// loopback port; any stdin; no edit.
+#[tokio::test]
+async fn test_of_an_openai_account_streams_through_its_pinned_host() {
+    let env = env();
+    let root = four_kinds_added(&env).await;
+    let before = read(&root, ACCOUNTS_FILE);
+    let recorded = env.history(&root).len();
+    let kit = Kit::new(FakeTerminal::piped()).with_key("oa", OA_CANARY);
+    kit.egress.replay("api.openai.com", "openai/text.sse");
+
+    let ran = kit.run(&env, &root, &["test", "oa", "--model", "m"]).await;
+
+    assert_eq!(ran.code, 0, "{}", ran.all());
+    for word in ["one", "two", "three"] {
+        assert!(ran.out.contains(word), "streamed text: {}", ran.out);
+    }
+    assert!(
+        ran.out.contains("api.openai.com"),
+        "the result names the endpoint: {}",
+        ran.out
+    );
+    let requests = kit.egress.requests();
+    assert_eq!(requests.len(), 1, "one short reply");
+    assert_eq!(
+        requests[0].url,
+        format!("{OPENAI_URL}/chat/completions"),
+        "the request goes to the Account's endpoint"
+    );
+    assert_eq!(
+        requests[0].auth,
+        Some(AuthRef {
+            scheme: AuthScheme::Bearer,
+            account_id: "oa".into()
+        })
+    );
+    let body = String::from_utf8_lossy(&requests[0].body).to_string();
+    assert!(!body.contains(OA_CANARY));
+    assert!(
+        body.contains("\"model\":\"m\""),
+        "the model asked for: {body}"
+    );
+
+    let policies = kit.policies();
+    assert_eq!(policies.len(), 1, "{policies:?}");
+    let pinned = &policies[0];
+    assert_eq!(pinned.allowed_hosts, vec!["api.openai.com".to_string()]);
+    assert!(pinned.loopback_ports.is_empty(), "no loopback port");
+    assert!(check_url(pinned, &requests[0].url).is_ok());
+    for outside in [
+        "https://api.anthropic.com/v1/messages",
+        "https://openrouter.example/api/v1/chat/completions",
+        "https://api.openai.com.example.org/v1/chat/completions",
+        "http://127.0.0.1:1234/v1/chat/completions",
+        "http://127.0.0.1:11434/v1/chat/completions",
+        "http://127.0.0.1:8080/v1/chat/completions",
+        "http://api.openai.com/v1/chat/completions",
+    ] {
+        assert!(
+            check_url(pinned, outside).is_err(),
+            "{outside} is outside the pin"
+        );
+    }
+
+    assert_eq!(read(&root, ACCOUNTS_FILE), before);
+    assert_eq!(env.history(&root).len(), recorded, "no edit");
+    assert!(!ran.all().contains(OA_CANARY));
+}
+
+/// `--model` is required for an OpenAI or compatible Account (no default
+/// model id is assumed): without it the test is refused naming `--model`,
+/// no key is read and nothing is sent.
+#[tokio::test]
+async fn test_of_an_openai_or_compatible_account_needs_a_model() {
+    let env = env();
+    let root = four_kinds_added(&env).await;
+    for (id, key, host, fixture) in [
+        ("oa", OA_CANARY, "api.openai.com", "openai/text.sse"),
+        (
+            "router",
+            ROUTER_CANARY,
+            "openrouter.example",
+            "openai_compat/reasoning.sse",
+        ),
+        (
+            "llama",
+            LLAMA_CANARY,
+            "127.0.0.1:8080",
+            "openai_compat/reasoning.sse",
+        ),
+    ] {
+        let kit = Kit::new(FakeTerminal::piped()).with_key(id, key);
+        kit.egress.replay(host, fixture);
+        let counting = Arc::new(CountingStore {
+            inner: kit.secrets.clone(),
+            gets: AtomicUsize::new(0),
+        });
+
+        let ran = kit
+            .run_with(&env, &root, &["test", id], counting.clone())
+            .await;
+
+        assert_ne!(ran.code, 0, "{id}: {}", ran.all());
+        assert!(
+            ran.all().contains("--model"),
+            "{id}: the refusal names --model: {}",
+            ran.all()
+        );
+        assert_eq!(
+            counting.gets.load(Ordering::SeqCst),
+            0,
+            "{id}: refused before any Keychain read"
+        );
+        assert!(kit.egress.requests().is_empty(), "{id}: nothing sent");
+        assert!(!ran.all().contains(key));
+    }
+}
+
+/// Test compatible, remote and on this Mac, each added through the command
+/// first (its endpoint confirmed): the one request goes to
+/// `{base_url}/chat/completions` with a `Bearer` reference naming the
+/// Account, and only the content is printed (a reasoning model's thinking is
+/// not). The remote policy admits only that host; the loopback policy admits
+/// only that port and no host, and `check_url` refuses any other host or
+/// port.
+#[tokio::test]
+async fn test_of_a_compatible_account_calls_only_its_base_url() {
+    let env = env();
+    let root = four_kinds_added(&env).await;
+    let before = read(&root, ACCOUNTS_FILE);
+    let recorded = env.history(&root).len();
+
+    // Remote.
+    let kit = Kit::new(FakeTerminal::piped()).with_key("router", ROUTER_CANARY);
+    kit.egress
+        .replay("openrouter.example", "openai_compat/reasoning.sse");
+    let ran = kit
+        .run(&env, &root, &["test", "router", "--model", "m"])
+        .await;
+    assert_eq!(ran.code, 0, "{}", ran.all());
+    assert!(ran.out.contains("The answer is 4."), "{}", ran.out);
+    assert!(!ran.all().contains("The question asks"), "{}", ran.all());
+    assert!(ran.out.contains("openrouter.example"), "{}", ran.out);
+    let requests = kit.egress.requests();
+    assert_eq!(requests.len(), 1, "one short reply");
+    assert_eq!(requests[0].url, format!("{REMOTE_URL}/chat/completions"));
+    assert_eq!(
+        requests[0].auth,
+        Some(AuthRef {
+            scheme: AuthScheme::Bearer,
+            account_id: "router".into()
+        })
+    );
+    assert!(!String::from_utf8_lossy(&requests[0].body).contains(ROUTER_CANARY));
+    let policies = kit.policies();
+    assert_eq!(policies.len(), 1, "{policies:?}");
+    let pinned = &policies[0];
+    assert_eq!(pinned.allowed_hosts, vec!["openrouter.example".to_string()]);
+    assert!(pinned.loopback_ports.is_empty(), "no loopback port");
+    assert!(check_url(pinned, &requests[0].url).is_ok());
+    for outside in [
+        "https://api.openai.com/v1/chat/completions",
+        "https://example.org/api/v1/chat/completions",
+        "https://openrouter.example.example.org/api/v1/chat/completions",
+        "http://127.0.0.1:1234/v1/chat/completions",
+        "http://127.0.0.1:8080/v1/chat/completions",
+        "http://openrouter.example/api/v1/chat/completions",
+    ] {
+        assert!(
+            check_url(pinned, outside).is_err(),
+            "{outside} is outside the pin"
+        );
+    }
+    assert!(!ran.all().contains(ROUTER_CANARY));
+
+    // On this Mac.
+    let kit = Kit::new(FakeTerminal::piped()).with_key("llama", LLAMA_CANARY);
+    kit.egress
+        .replay("127.0.0.1:8080", "openai_compat/reasoning.sse");
+    let ran = kit
+        .run(&env, &root, &["test", "llama", "--model", "m"])
+        .await;
+    assert_eq!(ran.code, 0, "{}", ran.all());
+    assert!(ran.out.contains("The answer is 4."), "{}", ran.out);
+    assert!(ran.out.contains("127.0.0.1:8080"), "{}", ran.out);
+    let requests = kit.egress.requests();
+    assert_eq!(requests.len(), 1, "one short reply");
+    assert_eq!(requests[0].url, format!("{LOOPBACK_URL}/chat/completions"));
+    assert_eq!(
+        requests[0].auth,
+        Some(AuthRef {
+            scheme: AuthScheme::Bearer,
+            account_id: "llama".into()
+        })
+    );
+    assert!(!String::from_utf8_lossy(&requests[0].body).contains(LLAMA_CANARY));
+    let policies = kit.policies();
+    assert_eq!(policies.len(), 1, "{policies:?}");
+    let pinned = &policies[0];
+    assert!(
+        pinned.allowed_hosts.is_empty(),
+        "no host: {:?}",
+        pinned.allowed_hosts
+    );
+    assert_eq!(pinned.loopback_ports, vec![8080], "only that port");
+    assert!(check_url(pinned, &requests[0].url).is_ok());
+    for outside in [
+        "http://127.0.0.1:1234/v1/chat/completions",
+        "http://127.0.0.1:11434/v1/chat/completions",
+        "http://127.0.0.1:8081/v1/chat/completions",
+        "http://127.0.0.1/v1/chat/completions",
+        "https://api.openai.com/v1/chat/completions",
+        "https://openrouter.example/api/v1/chat/completions",
+        "https://example.org/v1/chat/completions",
+    ] {
+        assert!(
+            check_url(pinned, outside).is_err(),
+            "{outside} is outside the pin"
+        );
+    }
+    assert!(!ran.all().contains(LLAMA_CANARY));
+
+    assert_eq!(read(&root, ACCOUNTS_FILE), before);
+    assert_eq!(env.history(&root).len(), recorded, "no edit");
+}
+
+/// There is no keyless Account: a compatible Account (added through the
+/// command) whose Keychain entry is missing on this run is refused as an
+/// Anthropic one is, and nothing is sent.
+#[tokio::test]
+async fn test_of_a_compatible_account_without_a_key_sends_nothing() {
+    let env = env();
+    let root = four_kinds_added(&env).await;
+    for (id, host) in [
+        ("oa", "api.openai.com"),
+        ("router", "openrouter.example"),
+        ("llama", "127.0.0.1:8080"),
+    ] {
+        let kit = Kit::new(FakeTerminal::piped());
+        kit.egress.replay(host, "openai_compat/reasoning.sse");
+
+        let ran = kit.run(&env, &root, &["test", id, "--model", "m"]).await;
+
+        assert_ne!(ran.code, 0, "{id}: {}", ran.all());
+        assert!(
+            ran.all().contains("no key in Keychain"),
+            "{id}: {}",
+            ran.all()
+        );
+        assert!(kit.egress.requests().is_empty(), "{id}: nothing sent");
+    }
+}
+
+/// An Account's calls go only to its own endpoint (AD-48), whatever is
+/// written into the file by hand. Each Account is added through the command
+/// first, then its `base_url` is edited in the file: an OpenAI Account given
+/// a `base_url` is refused for that `base_url` (its calls go only to
+/// `api.openai.com`), and a compatible Account whose `base_url` becomes a
+/// private or LAN address (which `add` refuses) is refused for that
+/// `base_url` too. The endpoint rules come before the confirmed check, so
+/// these refusals name the `base_url`; no key is read, no egress policy is
+/// asked for and nothing is sent.
+#[tokio::test]
+async fn test_never_follows_a_hand_written_base_url_outside_the_endpoint_rules() {
+    let env = env();
+    let root = four_kinds_added(&env).await;
+    let written = read(&root, ACCOUNTS_FILE).unwrap();
+
+    // An OpenAI Account with a `base_url` line added under its provider.
+    let provider_line = written
+        .lines()
+        .find(|l| l.trim() == "provider: openai")
+        .expect("the OpenAI Account's provider line");
+    let indent = &provider_line[..provider_line.len() - provider_line.trim_start().len()];
+    let edited = written.replacen(
+        &format!("{provider_line}\n"),
+        &format!("{provider_line}\n{indent}base_url: https://elsewhere.example/v1\n"),
+        1,
+    );
+    assert_ne!(edited, written);
+    std::fs::write(root.join(ACCOUNTS_FILE), &edited).unwrap();
+    assert!(
+        file_accounts(&root)
+            .iter()
+            .any(|a| a.0 == "oa" && a.3.as_deref() == Some("https://elsewhere.example/v1")),
+        "the loader reads the hand-written base_url: {edited}"
+    );
+    let ran = refused_test(&env, &root, "oa").await;
+    for words in ["`base_url`", "api.openai.com"] {
+        assert!(
+            ran.all().contains(words),
+            "oa: the refusal gives the base_url reason ({words}): {}",
+            ran.all()
+        );
+    }
+    assert!(
+        !ran.all().contains("elsewhere.example"),
+        "oa: the other host is not named as an endpoint: {}",
+        ran.all()
+    );
+
+    // A compatible Account whose `base_url` becomes a private or LAN
+    // address.
+    for (id, from, to) in [
+        ("router", REMOTE_URL, "https://10.0.0.5/v1"),
+        ("llama", LOOPBACK_URL, "http://192.168.1.4:8080/v1"),
+    ] {
+        let edited = written.replace(from, to);
+        assert_ne!(edited, written, "{id}");
+        std::fs::write(root.join(ACCOUNTS_FILE), &edited).unwrap();
+        let ran = refused_test(&env, &root, id).await;
+        assert!(
+            ran.all().contains("base_url"),
+            "{id}: the refusal gives the base_url reason: {}",
+            ran.all()
+        );
+        assert!(
+            ran.all().contains("address"),
+            "{id}: it says an address is not called: {}",
+            ran.all()
+        );
+    }
+}
+
+// ----------------------------------- review of story 2.3: confirmed only
+//
+// A key goes only to what the owner confirmed (AD-15, AD-16, AD-48). Before
+// any Keychain read or request, `accounts test` checks, read-only and
+// without the project's lock, that `models/accounts.yaml` holds exactly the
+// bytes the app last wrote and that the latest `account_added` audit note
+// of the Account names the same provider, scheme, host and port. It still
+// runs from any stdin.
+
+/// The History entries of `models/accounts.yaml` the commands made, oldest
+/// first.
+fn accounts_history(env: &Env, root: &Path) -> Vec<HistoryEntry> {
+    env.history(root)
+        .into_iter()
+        .filter(|e| e.file == ACCOUNTS_FILE)
+        .collect()
+}
+
+/// The Accounts the file holds now, as its loader reads them (the project
+/// around it need not be valid).
+fn file_accounts(root: &Path) -> Vec<Held> {
+    let file = am_config::accounts_file(root);
+    assert_eq!(file.problem, None);
+    file.accounts
+        .into_iter()
+        .map(|a| (a.id, a.provider, a.name, a.base_url, a.secret_ref))
+        .collect()
+}
+
+/// Writes an older entry's bytes back through the app's writer (History's
+/// Restore): a write the app made, which carries no `account_added` note.
+fn restore(env: &Env, root: &Path, entry: &HistoryEntry) {
+    let (store, _) = am_store::open_runtime(&env.layout(root), "Test Mac".into()).unwrap();
+    let writer =
+        am_config::ConfigWriter::open(root, Arc::new(StoreConfigHistory::new(&store).unwrap()))
+            .unwrap();
+    writer.restore(owner(), &entry.id).unwrap();
+}
+
+async fn remove_account(env: &Env, root: &Path, id: &str) {
+    let ran = Kit::new(FakeTerminal::new())
+        .run(env, root, &["remove", id])
+        .await;
+    assert_eq!(ran.code, 0, "remove {id}: {}", ran.all());
+}
+
+/// A `base_url` edited by hand after a confirmed add (well-formed, another
+/// host; then another port on this Mac): the file no longer holds what the
+/// app wrote, so no Account in it is called. No key is read, nothing is
+/// sent, and the refusal says the endpoint was not confirmed and what to
+/// do. With the file put back byte for byte, the Account answers again.
+#[tokio::test]
+async fn test_refuses_a_base_url_edited_by_hand_after_the_add() {
+    let env = env();
+    let root = four_kinds_added(&env).await;
+    let written = read(&root, ACCOUNTS_FILE).unwrap();
+
+    for (id, from, to) in [
+        ("router", "openrouter.example", "elsewhere.example"),
+        ("llama", "127.0.0.1:8080", "127.0.0.1:9090"),
+    ] {
+        let edited = written.replace(from, to);
+        assert_ne!(edited, written, "{id}: the edit changes the file");
+        std::fs::write(root.join(ACCOUNTS_FILE), &edited).unwrap();
+        assert!(
+            file_accounts(&root)
+                .iter()
+                .any(|a| a.0 == id && a.3.as_deref().is_some_and(|u| u.contains(to))),
+            "{id}: the edited file is valid config naming {to}"
+        );
+
+        let ran = refused_test(&env, &root, id).await;
+        assert_says_not_confirmed(&ran, id);
+        assert!(
+            ran.all().contains(ACCOUNTS_FILE),
+            "{id}: it names the file: {}",
+            ran.all()
+        );
+        // Every Account of the edited file is refused, not only the one
+        // whose line changed.
+        for other in ["cloud", "oa", "router", "llama"] {
+            refused_test(&env, &root, other).await;
+        }
+    }
+
+    std::fs::write(root.join(ACCOUNTS_FILE), &written).unwrap();
+    let kit = Kit::new(FakeTerminal::piped()).with_key("router", ROUTER_CANARY);
+    kit.egress
+        .replay("openrouter.example", "openai_compat/reasoning.sse");
+    let ran = kit
+        .run(&env, &root, &["test", "router", "--model", "m"])
+        .await;
+    assert_eq!(
+        ran.code,
+        0,
+        "the file is as the app wrote it: {}",
+        ran.all()
+    );
+    assert_eq!(kit.egress.requests().len(), 1);
+}
+
+/// A provider edited by hand after a confirmed add (Anthropic to OpenAI,
+/// and OpenAI to Anthropic): the Account's key would go to a provider the
+/// owner never confirmed for it, so `test` refuses, reads no key and sends
+/// nothing.
+#[tokio::test]
+async fn test_refuses_a_provider_edited_by_hand_after_the_add() {
+    let env = env();
+    let root = four_kinds_added(&env).await;
+    let written = read(&root, ACCOUNTS_FILE).unwrap();
+
+    for (id, from, to) in [
+        ("cloud", "provider: anthropic", "provider: openai"),
+        ("oa", "provider: openai\n", "provider: anthropic\n"),
+    ] {
+        let edited = written.replacen(from, to, 1);
+        assert_ne!(edited, written, "{id}: the edit changes the file");
+        std::fs::write(root.join(ACCOUNTS_FILE), &edited).unwrap();
+        let provider = to.trim().trim_start_matches("provider: ");
+        assert!(
+            file_accounts(&root)
+                .iter()
+                .any(|a| a.0 == id && a.1 == provider),
+            "{id}: the edited file is valid config with provider {provider}"
+        );
+
+        let ran = refused_test(&env, &root, id).await;
+        assert_says_not_confirmed(&ran, id);
+    }
+}
+
+/// An Account written into the file by hand and never added (Anthropic,
+/// OpenAI, compatible): refused the same way, in a project the app has
+/// opened, in one it never opened on this Mac, and in one whose database
+/// this version has not migrated.
+#[tokio::test]
+async fn test_refuses_an_account_that_was_never_added() {
+    // Opened on this Mac; the file was never written by the app.
+    let env = env();
+    let root = env.usual(&[(ACCOUNTS_FILE, four_kinds())]);
+    for id in ["cloud", "oa", "router", "llama"] {
+        let ran = refused_test(&env, &root, id).await;
+        assert_says_not_confirmed(&ran, id);
+    }
+    assert!(env.history(&root).is_empty(), "nothing was written");
+
+    // Never opened on this Mac: no project id, no runtime folder.
+    let fresh = self::env();
+    let folder = fresh.folder(
+        "p",
+        &[
+            ("company.yaml", COMPANY.to_string()),
+            (ACCOUNTS_FILE, four_kinds()),
+        ],
+    );
+    for id in ["cloud", "oa", "router", "llama"] {
+        let ran = refused_test(&fresh, &folder, id).await;
+        assert_says_not_confirmed(&ran, id);
+    }
+    assert!(!fresh.places.base.dir().exists(), "no runtime folder made");
+    assert!(!open_marker(&folder).exists(), "no marker is written");
+
+    // Added, but the database is older than this version: it is not read
+    // (and never migrated by `test`).
+    let older = self::env();
+    let root = four_kinds_added(&older).await;
+    let db = older.layout(&root).state_db();
+    std::fs::remove_file(&db).unwrap();
+    am_store::testing::database_at_version(&db, SCHEMA_VERSION - 1).unwrap();
+    let db_before = std::fs::read(&db).unwrap();
+    for id in ["cloud", "router"] {
+        let ran = refused_test(&older, &root, id).await;
+        assert_says_not_confirmed(&ran, id);
+    }
+    assert_eq!(std::fs::read(&db).unwrap(), db_before, "not migrated");
+}
+
+/// An Account added, then removed, then put back into the file by hand
+/// (the very bytes the add wrote): the app's last write was the removal, so
+/// the file holds an outside change and the Account is not called.
+#[tokio::test]
+async fn test_refuses_an_account_removed_and_put_back_by_hand() {
+    let env = env();
+    let root = four_kinds_added(&env).await;
+    let with_router = read(&root, ACCOUNTS_FILE).unwrap();
+    remove_account(&env, &root, "router").await;
+    assert!(!read(&root, ACCOUNTS_FILE).unwrap().contains("router"));
+    std::fs::write(root.join(ACCOUNTS_FILE), &with_router).unwrap();
+
+    let ran = refused_test(&env, &root, "router").await;
+    assert_says_not_confirmed(&ran, "router");
+    refused_test(&env, &root, "cloud").await;
+}
+
+/// The file is as the app last wrote it, but that write was not the add
+/// the latest `account_added` note records (an older History entry was
+/// restored): the endpoint in the file, or its provider alone, is not the
+/// one confirmed last, so the Account is not called.
+#[tokio::test]
+async fn test_refuses_what_the_latest_add_of_the_account_did_not_record() {
+    // Another host: added at one URL, removed, added at another, and the
+    // first add's bytes restored.
+    let env = env();
+    let root = plain(&env);
+    add_account(
+        &env,
+        &root,
+        "router",
+        "openai-compatible",
+        Some(REMOTE_URL),
+        ROUTER_CANARY,
+    )
+    .await;
+    remove_account(&env, &root, "router").await;
+    add_account(
+        &env,
+        &root,
+        "router",
+        "openai-compatible",
+        Some("https://second.example/v1"),
+        ROUTER_CANARY,
+    )
+    .await;
+    let first_add = accounts_history(&env, &root).remove(0);
+    restore(&env, &root, &first_add);
+    assert_eq!(
+        file_accounts(&root),
+        vec![held("router", "openai-compatible", None, Some(REMOTE_URL))],
+        "the app wrote the first endpoint back"
+    );
+    let ran = refused_test(&env, &root, "router").await;
+    assert_says_not_confirmed(&ran, "router");
+
+    // The provider alone: the same scheme, host and port, confirmed last
+    // for an OpenAI Account, held in the file as a compatible one.
+    let env = self::env();
+    let root = plain(&env);
+    add_account(
+        &env,
+        &root,
+        "oa",
+        "openai-compatible",
+        Some(OPENAI_URL),
+        OA_CANARY,
+    )
+    .await;
+    remove_account(&env, &root, "oa").await;
+    add_account(&env, &root, "oa", "openai", None, OA_CANARY).await;
+    let first_add = accounts_history(&env, &root).remove(0);
+    restore(&env, &root, &first_add);
+    assert_eq!(
+        file_accounts(&root),
+        vec![held("oa", "openai-compatible", None, Some(OPENAI_URL))]
+    );
+    let ran = refused_test(&env, &root, "oa").await;
+    assert_says_not_confirmed(&ran, "oa");
+}
+
+// --------------------------------------- review of story 2.3: reused key
+
+/// The Keychain already holds a key for the id (an earlier add, another
+/// project): the sentence says so, and says that key will be sent to the
+/// endpoint, before the id is typed. The key itself is never shown, and it
+/// is reused and never overwritten, as before. With no such entry the
+/// sentence says nothing of the kind.
+#[tokio::test]
+async fn add_says_before_the_id_is_typed_that_a_held_key_will_go_to_the_endpoint() {
+    const EARLIER: &str = "sk-earlier-canary-5e6f7a8b-HELD";
+    let cases: [(&str, &str, Option<&str>, &str); 3] = [
+        ("router", "openai-compatible", Some(REMOTE_URL), REMOTE_URL),
+        (
+            "llama",
+            "openai-compatible",
+            Some(LOOPBACK_URL),
+            LOOPBACK_URL,
+        ),
+        ("cloud2", "anthropic", None, "https://api.anthropic.com"),
+    ];
+    for (id, provider, base_url, endpoint) in cases {
+        let mut args = vec!["add", id, "--provider", provider];
+        if let Some(url) = base_url {
+            args.extend(["--base-url", url]);
+        }
+
+        // Held: said in the sentence, before the prompt for the id.
+        let env = env();
+        let root = plain(&env);
+        let kit = Kit::new(FakeTerminal::new()).with_key(id, EARLIER);
+        kit.term.line(id);
+        let ran = kit.run(&env, &root, &args).await;
+        assert_eq!(ran.code, 0, "{id}: {}", ran.all());
+        let prompt = ran
+            .shown
+            .find("To confirm")
+            .unwrap_or_else(|| panic!("{id}: no prompt: {}", ran.shown));
+        let sentence = &ran.shown[..prompt];
+        for words in [
+            format!("already holds a key for '{id}'"),
+            format!("will be sent to {endpoint}"),
+        ] {
+            assert!(
+                sentence.contains(&words),
+                "{id}: before the id is typed, the sentence says \"{words}\": {sentence}"
+            );
+        }
+        assert_eq!(kit.term.reads(), 1, "{id}: only the id is read");
+        assert_eq!(kit.key(id).as_deref(), Some(EARLIER), "never overwritten");
+        assert!(!ran.all().contains(EARLIER), "{id}: the key is never shown");
+        assert!(!ran.all().contains(&EARLIER[..12]), "{id}: nor its head");
+
+        // Not held: the sentence is the one of every add.
+        let env = self::env();
+        let root = plain(&env);
+        let kit = Kit::new(FakeTerminal::new());
+        kit.term.line(id);
+        kit.term.line(CANARY);
+        let ran = kit.run(&env, &root, &args).await;
+        assert_eq!(ran.code, 0, "{id}: {}", ran.all());
+        for words in ["already holds", "will be sent"] {
+            assert!(
+                !ran.shown.contains(words),
+                "{id}: no key was held: {}",
+                ran.shown
+            );
+        }
+    }
+}
+
+// ------------------------------- review of story 2.3: an entry with an error
+
+/// An Account whose entry in the file has an error (`agentic validate`
+/// names it) is never called and never shown with a host: a `base_url` the
+/// loader refuses reads as no `base_url`, which must not turn an OpenAI
+/// Account into one called at the provider's host, nor a compatible one
+/// into one that "needs `base_url`". `test` refuses before any Keychain
+/// read, pointing at `agentic validate`; `list` says the entry has an
+/// error.
+#[tokio::test]
+async fn test_and_list_of_an_entry_with_an_error_point_at_validate() {
+    let env = env();
+    let yaml = "schema_version: 2\naccounts:\n  - id: cloud\n    provider: anthropic\n    secret_ref: cloud\n  - id: oa\n    provider: openai\n    base_url: http://example.org/v1\n    secret_ref: oa\n  - id: box\n    provider: openai-compatible\n    base_url: http://localhost:8080/v1\n    secret_ref: box\n  - id: odd\n    provider: anthropic\n    surprise: true\n    secret_ref: odd\n";
+    let root = env.usual(&[(ACCOUNTS_FILE, yaml.to_string())]);
+
+    for id in ["oa", "box", "odd"] {
+        let ran = refused_test(&env, &root, id).await;
+        assert!(
+            ran.all().contains("agentic validate"),
+            "{id}: it points at validate: {}",
+            ran.all()
+        );
+        assert!(
+            ran.all().contains("error"),
+            "{id}: it says the entry has an error: {}",
+            ran.all()
+        );
+        assert!(
+            !ran.all().contains("needs `base_url`"),
+            "{id}: the entry has a base_url: {}",
+            ran.all()
+        );
+    }
+
+    let kit = Kit::new(FakeTerminal::piped()).with_key("cloud", CANARY);
+    let ran = kit.run(&env, &root, &["list"]).await;
+    assert_eq!(ran.code, 0, "{}", ran.all());
+    let line_of = |id: &str| {
+        ran.out
+            .lines()
+            .find(|l| l.split_whitespace().next() == Some(id))
+            .unwrap_or_else(|| panic!("no line for {id}: {}", ran.out))
+            .to_string()
+    };
+    for id in ["oa", "box", "odd"] {
+        let line = line_of(id);
+        assert!(line.contains("error"), "{id}: {line}");
+        assert!(line.contains("agentic validate"), "{id}: {line}");
+        for host in [
+            "api.openai.com",
+            "api.anthropic.com",
+            "example.org",
+            "localhost",
+        ] {
+            assert!(!line.contains(host), "{id}: no host is shown: {line}");
+        }
+    }
+    let cloud = line_of("cloud");
+    assert!(cloud.contains("api.anthropic.com"), "{cloud}");
+    assert!(!cloud.contains("error"), "{cloud}");
+    assert!(kit.egress.requests().is_empty(), "list calls nothing");
+}
+
+// ------------------------------- second review of story 2.3: no lock taken
+
+/// `accounts test` takes no lock: while another process holds the project's
+/// store (the app is serving it), a confirmed Account is still read from
+/// the store read-only and answers, on any stdin. The holder keeps its
+/// lock, and nothing is written.
+#[tokio::test]
+async fn test_answers_while_another_process_holds_the_store() {
+    let env = env();
+    let root = four_kinds_added(&env).await;
+    let before = read(&root, ACCOUNTS_FILE);
+    let (held, _) = am_store::open_runtime(&env.layout(&root), "Holder Mac".into()).unwrap();
+
+    let kit = Kit::new(FakeTerminal::piped()).with_key("cloud", CANARY);
+    kit.egress
+        .replay("api.anthropic.com", "anthropic/c1_count_stream.sse");
+    let ran = kit.run(&env, &root, &["test", "cloud"]).await;
+    assert_eq!(ran.code, 0, "{}", ran.all());
+    for word in ["one", "two", "three"] {
+        assert!(ran.out.contains(word), "streamed text: {}", ran.out);
+    }
+    assert_eq!(kit.egress.requests().len(), 1, "one short reply");
+
+    let kit = Kit::new(FakeTerminal::piped()).with_key("llama", LLAMA_CANARY);
+    kit.egress
+        .replay("127.0.0.1:8080", "openai_compat/reasoning.sse");
+    let ran = kit
+        .run(&env, &root, &["test", "llama", "--model", "m"])
+        .await;
+    assert_eq!(ran.code, 0, "{}", ran.all());
+    assert!(ran.out.contains("The answer is 4."), "{}", ran.out);
+    assert_eq!(kit.egress.requests().len(), 1, "one short reply");
+
+    assert!(
+        am_store::lock_is_held(&env.layout(&root)),
+        "the holder still has the lock"
+    );
+    assert_eq!(read(&root, ACCOUNTS_FILE), before);
+    drop(held);
 }

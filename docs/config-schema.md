@@ -53,7 +53,7 @@ accounts:
 | `id` | yes | kebab-case; `local-lmstudio` and `local-ollama` are reserved and always exist |
 | `provider` | yes | decides the Account's kind (below) |
 | `name`, `description` | no | text |
-| `base_url` | for `openai-compatible`, `searxng-remote`, `firecrawl` | `https://…`, or `http://` only to `127.0.0.1` or `localhost`; never a user name or password |
+| `base_url` | for `openai-compatible`, `searxng-remote`, `firecrawl` | `https://…`, or `http://` only to `127.0.0.1` or `localhost`; never a user name or password. For `openai-compatible` only two forms are accepted, the same as `agentic accounts add --base-url`: `https://<host>[/path]` (a DNS name, port 443; no IP address, no other port) or `http://127.0.0.1:<port>[/path]` (an explicit port; not `localhost`), with no query or fragment |
 | `secret_ref` | no | the Keychain entry that holds the key; never the key |
 
 | Kind | Providers |

@@ -4,7 +4,7 @@
 //! - `agentic validate [--template] [<folder>]` (exit 0 no errors, 1 errors, 2 usage or no folder)
 //! - `agentic audit export <project> [--out <file>]`, `agentic audit verify <file>`
 //!   (exit 0 OK, 1 failure or a broken chain, 2 usage)
-//! - `agentic accounts add <id> --provider anthropic [--name <text>]`, `remove <id>`,
+//! - `agentic accounts add <id> --provider anthropic|openai|openai-compatible [--base-url <url>] [--name <text>]`, `remove <id>`,
 //!   `list`, `test <id> [--model M]`, each with `[--project <folder>]` (story
 //!   2.1, AD-15's interim CLI Account edit; add and remove only in a terminal)
 //! - `agentic run <workflow> [--project <folder>]` (epic 3 story 1: one run of
