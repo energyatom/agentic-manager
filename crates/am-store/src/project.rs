@@ -159,6 +159,7 @@ pub fn open_runtime_unchanged(layout: &RuntimeLayout, host: String) -> Result<St
     }
     let found = {
         let conn = crate::open_read_only(&db)?;
+        crate::refuse_other_store(&db, crate::migrations::application_id(&conn)?)?;
         crate::migrations::user_version(&conn)?
     };
     crate::migrations::refuse_newer(found)?;

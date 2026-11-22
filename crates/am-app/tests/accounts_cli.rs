@@ -10,15 +10,34 @@
 //! `xtask/tests/release_deps.rs`. Canary keys only; no network, no Keychain.
 //! Written before the command exists.
 //!
-//! Story 2.3 (the last section): the same commands for the providers
+//! Story 2.3 (the OpenAI section): the same commands for the providers
 //! `openai` and `openai-compatible`. The add path is story 2.1's, unchanged;
 //! what differs is the provider and the endpoint (`--base-url`, in the two
 //! accepted forms), which the sentence, the audit entry, `list` and `test`'s
-//! egress policy all name. One test per row of that story's I/O matrix that
-//! the CLI owns; the adapter's rows are in
-//! `crates/am-providers/tests/openai_compat.rs` and the edit's in
-//! `crates/am-config/tests/account_edit.rs`. Written before the providers
-//! were accepted.
+//! egress policy all name. Written before the providers were accepted.
+//!
+//! Story 2.12 (AD-17, AD-15 *Interim CLI Account edit*): Accounts belong to
+//! this Mac. Every test here was rewritten for it before the change:
+//!
+//! - The commands take no `--project` and open no project: they read and
+//!   write the user Accounts file, `<app data dir>/accounts.yaml`
+//!   (`Places::user`, an `AppDataLayout`), and record in the user store,
+//!   `user.db`, under `user.lock`. The folder a command runs from changes
+//!   nothing (`Kit::run`'s folder is not passed).
+//! - History entries name the file `accounts.yaml`; `account_added` (with
+//!   `key: stored`) and `account_removed` are the user store's audit
+//!   entries. Project stores are never written by these commands.
+//! - References are found in every project of the runtime base's root
+//!   records (each test's projects are opened once on this Mac, so they are
+//!   recorded).
+//! - An Account seeded "by hand" is written straight into the user file,
+//!   owner-only, with no History (as a hand edit would leave it).
+//! - When the Keychain already holds an entry for the id and the user store
+//!   has no confirmation of it for this destination, the add also reads the
+//!   stored key at the hidden prompt and it must equal the entry.
+//!
+//! The new rows of story 2.12 that need several processes, permissions or
+//! the lock are in `user_accounts.rs`.
 #![forbid(unsafe_code)]
 #![cfg(unix)]
 
@@ -36,12 +55,16 @@ use am_domain::{
     RuntimeLayout, SecretStore,
 };
 use am_domain::{AuditEvent, AuditSink, BoxFuture, EgressError, HttpRequest, HttpResponse};
-use am_store::{SCHEMA_VERSION, StoreConfigHistory};
+use am_store::SCHEMA_VERSION;
+use am_store::user::{UserReader, UserStore};
 use am_testkit::{FakeEgress, FakeProjectIdentity, FakeSecretStore, FakeTerminal};
 
 /// The key the owner types: a canary that must never leave the keychain.
 const CANARY: &str = "sk-ant-canary-0a1b2c3d4e5f-WXYZ";
-const ACCOUNTS_FILE: &str = "models/accounts.yaml";
+/// The user Accounts file as History and the audit name it (AD-17).
+const USER_FILE: &str = "accounts.yaml";
+/// The old per-project file: never written or read for a key since 2.12.
+const LEGACY_FILE: &str = "models/accounts.yaml";
 
 const COMPANY: &str = "schema_version: 2\nname: Example\ntimezone: UTC\ncurrency: EUR\nteams:\n  - id: core\n    name: Core team\n";
 
@@ -59,7 +82,7 @@ fn beta(account: &str) -> String {
     )
 }
 
-/// `models/accounts.yaml` with one Anthropic Account per id.
+/// An Accounts file with one Anthropic Account per id.
 fn accounts_yaml(ids: &[&str]) -> String {
     let mut s = String::from("schema_version: 2\naccounts:\n");
     for id in ids {
@@ -105,6 +128,11 @@ fn env() -> Env {
     Env { dir, places }
 }
 
+fn set_mode(path: &Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+}
+
 impl Env {
     /// A project folder `name` holding `files`, not yet opened.
     fn folder(&self, name: &str, files: &[(&str, String)]) -> PathBuf {
@@ -119,7 +147,7 @@ impl Env {
     }
 
     /// A project folder `name` holding `files`, opened once on this Mac (an
-    /// id, a runtime folder and a store) and closed again.
+    /// id, a runtime folder, a store and a root record) and closed again.
     fn project(&self, name: &str, files: &[(&str, String)]) -> PathBuf {
         let root = self.folder(name, files);
         let req = OpenRequest {
@@ -155,27 +183,59 @@ impl Env {
         self.places.base.project(&id)
     }
 
-    /// Every History entry the commands under test made (the store opened
-    /// after the command released it). The setup's own `open_project` mints
-    /// `project_id`, which always leaves one `company.yaml` entry by
-    /// `System(runtime)` (AD-32); that setup entry is left out.
-    fn history(&self, root: &Path) -> Vec<HistoryEntry> {
-        let (store, _) = am_store::open_runtime(&self.layout(root), "Test Mac".into()).unwrap();
-        StoreConfigHistory::new(&store)
+    /// The user Accounts file.
+    fn accounts_path(&self) -> PathBuf {
+        self.places.user.accounts_file()
+    }
+
+    /// Its text now, if it exists.
+    fn user_text(&self) -> Option<String> {
+        std::fs::read_to_string(self.accounts_path()).ok()
+    }
+
+    /// Writes the user Accounts file by hand (no History), owner-only in an
+    /// owner-only app data dir, as the app keeps them.
+    fn write_user_file(&self, text: &str) {
+        let dir = self.places.user.dir();
+        std::fs::create_dir_all(dir).unwrap();
+        set_mode(dir, 0o700);
+        std::fs::write(self.accounts_path(), text).unwrap();
+        set_mode(&self.accounts_path(), 0o600);
+    }
+
+    /// Every History entry of the user store, read-only.
+    fn history(&self) -> Vec<HistoryEntry> {
+        UserReader::open(&self.places.user)
             .unwrap()
-            .entries(None)
+            .config_history(None)
+            .unwrap()
+    }
+
+    /// The user store's audit log as JSON Lines, read-only.
+    fn audit(&self) -> String {
+        let reader = UserReader::open(&self.places.user).unwrap();
+        let mut out = Vec::new();
+        reader.export_audit_jsonl(&mut out).unwrap();
+        String::from_utf8(out).unwrap()
+    }
+
+    /// The History entries the project's own store holds beyond the setup's
+    /// `project_id` mint: the commands never write a project store.
+    fn project_history(&self, root: &Path) -> Vec<HistoryEntry> {
+        am_store::Reader::open(&self.layout(root).state_db())
+            .unwrap()
+            .config_history(None)
             .unwrap()
             .into_iter()
             .filter(|e| !matches!(&e.actor, Actor::System { component } if component == "runtime"))
             .collect()
     }
 
-    /// The audit log as JSON Lines, read-only.
-    fn audit(&self, root: &Path) -> String {
-        let reader = am_store::Reader::open(&self.layout(root).state_db()).unwrap();
-        let mut out = Vec::new();
-        reader.export_audit_jsonl(&mut out).unwrap();
-        String::from_utf8(out).unwrap()
+    /// A writer of the user Accounts file holding the user store's lock, as
+    /// a command holds it (released when the writer drops).
+    fn user_writer(&self) -> am_config::ConfigWriter {
+        let guard = UserStore::locked(&self.places.user, Duration::from_secs(10)).unwrap();
+        am_config::ConfigWriter::for_user_accounts(self.places.user.dir(), Arc::new(guard)).unwrap()
     }
 }
 
@@ -183,16 +243,24 @@ fn read(root: &Path, rel: &str) -> Option<String> {
     std::fs::read_to_string(root.join(rel)).ok()
 }
 
-/// The Accounts the project's config holds now: (id, provider, name,
-/// secret_ref).
-fn loaded_accounts(root: &Path) -> Vec<(String, String, Option<String>, Option<String>)> {
-    let loaded = am_config::load(root).unwrap();
-    let snap = loaded
-        .snapshot
-        .unwrap_or_else(|| panic!("{:#?}", loaded.findings));
-    snap.accounts()
+/// The Accounts the user file holds now: (id, provider, name, secret_ref).
+/// It must load without an error: what the commands wrote is valid.
+fn loaded_accounts(env: &Env) -> Vec<(String, String, Option<String>, Option<String>)> {
+    let loaded = am_config::user_accounts::load(&env.accounts_path());
+    assert!(
+        loaded
+            .findings
+            .iter()
+            .all(|f| f.severity != am_config::Severity::Error),
+        "{:#?}",
+        loaded.findings
+    );
+    loaded
+        .accounts
+        .ids()
         .iter()
-        .map(|a| {
+        .map(|id| {
+            let a = loaded.accounts.get(id).unwrap();
             (
                 a.id.clone(),
                 a.provider.clone(),
@@ -271,16 +339,18 @@ impl Kit {
         self
     }
 
-    /// Runs `agentic accounts <args> --project <root>`.
-    async fn run(&self, env: &Env, root: &Path, args: &[&str]) -> Ran {
-        self.run_with(env, root, args, self.secrets.clone()).await
+    /// Runs `agentic accounts <args>` as the owner does from the folder
+    /// `_cwd`. Since story 2.12 the commands take no project and open none,
+    /// so the folder is not passed: it changes nothing.
+    async fn run(&self, env: &Env, _cwd: &Path, args: &[&str]) -> Ran {
+        self.run_with(env, _cwd, args, self.secrets.clone()).await
     }
 
     /// [`Kit::run`] with another secret store (one that counts its reads).
     async fn run_with(
         &self,
         env: &Env,
-        root: &Path,
+        _cwd: &Path,
         args: &[&str],
         secrets: Arc<dyn SecretStore>,
     ) -> Ran {
@@ -304,9 +374,7 @@ impl Kit {
             secrets,
             egress: factory,
         };
-        let mut argv: Vec<String> = args.iter().map(|s| s.to_string()).collect();
-        argv.push("--project".into());
-        argv.push(root.to_string_lossy().into_owned());
+        let argv: Vec<String> = args.iter().map(|s| s.to_string()).collect();
         let (mut out, mut err) = (Vec::new(), Vec::new());
         let code = accounts(&argv, ctx, &mut out, &mut err).await;
         Ran {
@@ -326,7 +394,7 @@ fn endpoint(scheme: &str, host: &str, port: u16) -> Endpoint {
     }
 }
 
-/// The project's directory knows no id the project does not configure,
+/// The project's directory knows no id this Mac's user list does not hold,
 /// and answers the reserved local Accounts from am-domain's one
 /// definition (story 2.2).
 fn assert_directory_refuses_unknown_ids(directory: &dyn EgressDirectory) {
@@ -392,28 +460,57 @@ impl EgressClient for BlockingEgress {
     }
 }
 
-/// Nothing of the owner's key anywhere: output, config, History, audit.
-fn assert_no_key_leaked(env: &Env, root: &Path, ran: &Ran) {
+/// Every file under `dir`, recursively.
+fn files_under(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(read) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for e in read.flatten() {
+        let path = e.path();
+        match e.file_type() {
+            Ok(t) if t.is_dir() => files_under(&path, out),
+            Ok(t) if t.is_file() => out.push(path),
+            _ => {}
+        }
+    }
+}
+
+/// Nothing of the owner's key anywhere: output, the user file, History,
+/// the audit log, and no byte of any file in the temporary HOME or the
+/// projects (`user.db`, its WAL, every project store, every config file).
+fn assert_no_key_leaked(env: &Env, _root: &Path, ran: &Ran) {
     assert!(
         !ran.all().contains(CANARY),
         "the key was printed: {}",
         ran.all()
     );
-    if let Some(text) = read(root, ACCOUNTS_FILE) {
+    if let Some(text) = env.user_text() {
         assert!(!text.contains(CANARY), "the key reached the file");
     }
-    for e in env.history(root) {
-        for bytes in [e.before.as_slice(), e.after.as_slice(), e.diff.as_bytes()] {
-            assert!(
-                !String::from_utf8_lossy(bytes).contains(CANARY),
-                "the key reached History"
-            );
+    if env.places.user.user_db().exists() {
+        for e in env.history() {
+            for bytes in [e.before.as_slice(), e.after.as_slice(), e.diff.as_bytes()] {
+                assert!(
+                    !String::from_utf8_lossy(bytes).contains(CANARY),
+                    "the key reached History"
+                );
+            }
         }
+        assert!(
+            !env.audit().contains(CANARY),
+            "the key reached the audit log"
+        );
     }
-    assert!(
-        !env.audit(root).contains(CANARY),
-        "the key reached the audit log"
-    );
+    let mut all = Vec::new();
+    files_under(env.dir.path(), &mut all);
+    for file in all {
+        let bytes = std::fs::read(&file).unwrap_or_default();
+        assert!(
+            !bytes.windows(CANARY.len()).any(|w| w == CANARY.as_bytes()),
+            "the key reached {}",
+            file.display()
+        );
+    }
 }
 
 fn audit_line_of_kind(audit: &str, kind: &str) -> Vec<String> {
@@ -434,14 +531,17 @@ fn has(line: &str, key: &str, value: &str) -> bool {
 /// its provider, its endpoint and every seat that already names it; the
 /// typed id is read with echo on and within 2 minutes, then the key with
 /// echo off; the key goes only to the keychain under the Account's id; the
-/// missing `models/accounts.yaml` is created (`create` entry) holding
-/// `secret_ref` and never the key; one `account_added` audit entry carries
-/// the file, the Account, the pinned scheme, host and port, the references
-/// and `confirmation: typed_id`. No marker is written.
+/// missing user Accounts file is created (`create` entry in the user
+/// store) holding `secret_ref` and never the key; one `account_added` audit
+/// entry carries the file, the Account, its provider, the pinned scheme,
+/// host and port, the references, `key: stored` and `confirmation:
+/// typed_id`. No marker is written, and the project (its files and its
+/// store) is not touched.
 #[tokio::test]
 async fn add_creates_the_file_stores_the_key_and_records_history_and_audit() {
     let env = env();
     let root = env.usual(&[]);
+    let seats = (read(&root, "seats/alpha.md"), read(&root, "seats/beta.md"));
     let kit = Kit::new(FakeTerminal::new());
     kit.term.line("cloud2");
     kit.term.line(CANARY);
@@ -475,7 +575,7 @@ async fn add_creates_the_file_stores_the_key_and_records_history_and_audit() {
     assert_eq!(kit.key("cloud2").as_deref(), Some(CANARY));
 
     assert_eq!(
-        loaded_accounts(&root),
+        loaded_accounts(&env),
         vec![(
             "cloud2".to_string(),
             "anthropic".to_string(),
@@ -483,24 +583,26 @@ async fn add_creates_the_file_stores_the_key_and_records_history_and_audit() {
             Some("cloud2".to_string())
         )]
     );
-    let history = env.history(&root);
+    let history = env.history();
     assert_eq!(history.len(), 1, "{history:#?}");
-    assert_eq!(history[0].file, ACCOUNTS_FILE);
+    assert_eq!(history[0].file, USER_FILE);
     assert_eq!(history[0].kind, HistoryKind::Create);
     assert_eq!(history[0].actor, owner());
 
-    let audit = env.audit(&root);
+    let audit = env.audit();
     let added = audit_line_of_kind(&audit, "account_added");
     assert_eq!(added.len(), 1, "{audit}");
     let line = &added[0];
-    assert!(has(line, "file", ACCOUNTS_FILE), "{line}");
+    assert!(has(line, "file", USER_FILE), "{line}");
     assert!(has(line, "account", "cloud2"), "{line}");
+    assert!(has(line, "provider", "anthropic"), "{line}");
     assert!(has(line, "scheme", "https"), "{line}");
     assert!(has(line, "host", "api.anthropic.com"), "{line}");
     assert!(
         line.contains("\"port\":\"443\"") || line.contains("\"port\":443"),
         "{line}"
     );
+    assert!(has(line, "key", "stored"), "{line}");
     assert!(has(line, "confirmation", "typed_id"), "{line}");
     assert!(
         line.contains("alpha") && line.contains("beta"),
@@ -509,6 +611,16 @@ async fn add_creates_the_file_stores_the_key_and_records_history_and_audit() {
     assert!(audit.contains("config.created"), "{audit}");
 
     assert!(!open_marker(&root).exists(), "no marker is written");
+    assert!(!root.join(LEGACY_FILE).exists(), "no project Accounts file");
+    assert_eq!(
+        (read(&root, "seats/alpha.md"), read(&root, "seats/beta.md")),
+        seats,
+        "no project file changes"
+    );
+    assert!(
+        env.project_history(&root).is_empty(),
+        "the project store is not written"
+    );
     assert_no_key_leaked(&env, &root, &ran);
 }
 
@@ -517,7 +629,8 @@ async fn add_creates_the_file_stores_the_key_and_records_history_and_audit() {
 #[tokio::test]
 async fn add_to_an_existing_file_appends_the_account_as_an_edit() {
     let env = env();
-    let root = env.usual(&[(ACCOUNTS_FILE, accounts_yaml(&["cloud"]))]);
+    let root = env.usual(&[]);
+    env.write_user_file(&accounts_yaml(&["cloud"]));
     let kit = Kit::new(FakeTerminal::new());
     kit.term.line("cloud2");
     kit.term.line(CANARY);
@@ -539,7 +652,7 @@ async fn add_to_an_existing_file_appends_the_account_as_an_edit() {
 
     assert_eq!(ran.code, 0, "{}", ran.all());
     assert_eq!(
-        loaded_accounts(&root),
+        loaded_accounts(&env),
         vec![
             (
                 "cloud".to_string(),
@@ -555,13 +668,10 @@ async fn add_to_an_existing_file_appends_the_account_as_an_edit() {
             ),
         ]
     );
-    let history = env.history(&root);
+    let history = env.history();
     assert_eq!(history.len(), 1);
     assert_eq!(history[0].kind, HistoryKind::Edit);
-    assert_eq!(
-        audit_line_of_kind(&env.audit(&root), "account_added").len(),
-        1
-    );
+    assert_eq!(audit_line_of_kind(&env.audit(), "account_added").len(), 1);
     assert_no_key_leaked(&env, &root, &ran);
 }
 
@@ -571,8 +681,9 @@ async fn add_to_an_existing_file_appends_the_account_as_an_edit() {
 #[tokio::test]
 async fn add_and_remove_refuse_when_stdin_is_not_a_terminal() {
     let env = env();
-    let root = env.usual(&[(ACCOUNTS_FILE, accounts_yaml(&["cloud2", "spare"]))]);
-    let before = read(&root, ACCOUNTS_FILE);
+    let root = env.usual(&[]);
+    env.write_user_file(&accounts_yaml(&["cloud2", "spare"]));
+    let before = env.user_text();
     for args in [
         vec!["add", "cloud3", "--provider", "anthropic"],
         vec!["remove", "spare"],
@@ -586,8 +697,8 @@ async fn add_and_remove_refuse_when_stdin_is_not_a_terminal() {
         assert_eq!(kit.term.reads(), 0, "{args:?}: nothing is read");
         assert_eq!(kit.key("cloud3"), None);
     }
-    assert_eq!(read(&root, ACCOUNTS_FILE), before);
-    assert!(env.history(&root).is_empty());
+    assert_eq!(env.user_text(), before);
+    assert!(env.history().is_empty());
 }
 
 /// Wrong name: a typed id that differs writes and stores nothing, and the
@@ -612,9 +723,9 @@ async fn add_with_a_wrong_name_writes_and_stores_nothing() {
     assert_eq!(kit.term.echo_reads(), vec![true], "the key is never read");
     assert!(kit.term.echo());
     assert_eq!(kit.key("cloud2"), None);
-    assert!(!root.join(ACCOUNTS_FILE).exists());
-    assert!(env.history(&root).is_empty());
-    assert!(audit_line_of_kind(&env.audit(&root), "account_added").is_empty());
+    assert!(!env.accounts_path().exists());
+    assert!(env.history().is_empty());
+    assert!(audit_line_of_kind(&env.audit(), "account_added").is_empty());
 }
 
 /// The id not typed within 2 minutes: nothing written or stored.
@@ -639,8 +750,8 @@ async fn add_that_times_out_writes_and_stores_nothing() {
     assert_eq!(kit.term.reads(), 1);
     assert!(kit.term.echo());
     assert_eq!(kit.key("cloud2"), None);
-    assert!(!root.join(ACCOUNTS_FILE).exists());
-    assert!(env.history(&root).is_empty());
+    assert!(!env.accounts_path().exists());
+    assert!(env.history().is_empty());
 }
 
 /// Interrupt (in process): `^C` at the key prompt ends the command non-zero
@@ -661,8 +772,8 @@ async fn interrupt_at_the_key_prompt_restores_echo_and_stores_nothing() {
     assert_eq!(kit.term.echo_reads(), vec![true, false]);
     assert!(kit.term.echo(), "echo is restored after ^C");
     assert_eq!(kit.key("cloud2"), None);
-    assert!(!root.join(ACCOUNTS_FILE).exists());
-    assert!(env.history(&root).is_empty());
+    assert!(!env.accounts_path().exists());
+    assert!(env.history().is_empty());
 }
 
 /// Reserved or duplicate: `local-lmstudio`, `local-ollama` and an id
@@ -671,8 +782,9 @@ async fn interrupt_at_the_key_prompt_restores_echo_and_stores_nothing() {
 #[tokio::test]
 async fn add_refuses_a_reserved_or_existing_id() {
     let env = env();
-    let root = env.usual(&[(ACCOUNTS_FILE, accounts_yaml(&["cloud2"]))]);
-    let before = read(&root, ACCOUNTS_FILE);
+    let root = env.usual(&[]);
+    env.write_user_file(&accounts_yaml(&["cloud2"]));
+    let before = env.user_text();
     for id in ["local-ollama", "local-lmstudio", "cloud2"] {
         let kit = Kit::new(FakeTerminal::new());
         kit.term.line(id);
@@ -685,8 +797,8 @@ async fn add_refuses_a_reserved_or_existing_id() {
         assert_eq!(kit.term.reads(), 0, "{id}: nothing is read");
         assert_eq!(kit.key(id), None);
     }
-    assert_eq!(read(&root, ACCOUNTS_FILE), before);
-    assert!(env.history(&root).is_empty());
+    assert_eq!(env.user_text(), before);
+    assert!(env.history().is_empty());
 }
 
 /// A provider that is not a model provider (a search provider, or a word
@@ -723,19 +835,24 @@ async fn add_refuses_a_provider_that_is_not_a_model_provider() {
         assert!(ran.shown.is_empty(), "{provider}: no prompt: {}", ran.shown);
         assert_eq!(kit.key("cloud2"), None);
     }
-    assert!(!root.join(ACCOUNTS_FILE).exists());
-    assert!(env.history(&root).is_empty());
+    assert!(!env.accounts_path().exists());
+    assert!(env.history().is_empty());
 }
 
-/// Reuse key: a keychain entry already held for the id is reused, never
-/// overwritten and the key is not asked; the add says it reuses it.
+/// Reuse key (story 2.12, Existing Keychain entry): a keychain entry
+/// already held for the id is reused and never overwritten, and the add
+/// says so; since the user store holds no confirmation of that id for this
+/// provider and endpoint, the owner types the stored key at the hidden
+/// prompt (echo off) and it must equal the entry. It is never echoed,
+/// printed or stored again.
 #[tokio::test]
 async fn add_reuses_an_existing_keychain_entry_and_never_overwrites_it() {
+    const EARLIER: &str = "sk-ant-earlier-canary-1111";
     let env = env();
     let root = env.usual(&[]);
-    let kit = Kit::new(FakeTerminal::new()).with_key("cloud2", "sk-ant-earlier-canary-1111");
+    let kit = Kit::new(FakeTerminal::new()).with_key("cloud2", EARLIER);
     kit.term.line("cloud2");
-    kit.term.line(CANARY);
+    kit.term.line(EARLIER);
 
     let ran = kit
         .run(&env, &root, &["add", "cloud2", "--provider", "anthropic"])
@@ -743,48 +860,116 @@ async fn add_reuses_an_existing_keychain_entry_and_never_overwrites_it() {
 
     assert_eq!(ran.code, 0, "{}", ran.all());
     assert!(ran.all().to_lowercase().contains("reus"), "{}", ran.all());
-    assert_eq!(kit.term.reads(), 1, "only the id is read");
+    assert_eq!(
+        kit.term.echo_reads(),
+        vec![true, false],
+        "the id echoed, then the stored key at the hidden prompt"
+    );
+    assert!(kit.term.echo(), "echo is on again");
     assert_eq!(
         kit.key("cloud2").as_deref(),
-        Some("sk-ant-earlier-canary-1111"),
+        Some(EARLIER),
         "never overwritten"
     );
-    assert_eq!(loaded_accounts(&root).len(), 1);
-    assert!(!ran.all().contains("sk-ant-earlier-canary-1111"));
+    assert_eq!(loaded_accounts(&env).len(), 1);
+    assert!(!ran.all().contains(EARLIER));
+    assert!(!ran.all().contains(&EARLIER[..12]));
+    let audit = env.audit();
+    assert!(!audit.contains(EARLIER), "the stored key is never recorded");
+    assert_eq!(audit_line_of_kind(&audit, "account_added").len(), 1);
 }
 
-/// Make `dir` read-only; false when the process can still write there (it
-/// runs as root), so the test cannot make a write fail.
-fn read_only(dir: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o555)).unwrap();
-    let probe = dir.join(".probe");
-    if std::fs::write(&probe, b"x").is_ok() {
-        let _ = std::fs::remove_file(&probe);
-        return false;
+/// Existing Keychain entry, mismatch: the key typed at the hidden prompt is
+/// not the stored one, so nothing is written or recorded, the entry stays
+/// as it was, and neither key is printed.
+#[tokio::test]
+async fn add_reusing_an_entry_whose_stored_key_is_mistyped_writes_nothing() {
+    const EARLIER: &str = "sk-ant-earlier-canary-1111";
+    let env = env();
+    let root = env.usual(&[]);
+    let kit = Kit::new(FakeTerminal::new()).with_key("cloud2", EARLIER);
+    kit.term.line("cloud2");
+    kit.term.line(CANARY);
+
+    let ran = kit
+        .run(&env, &root, &["add", "cloud2", "--provider", "anthropic"])
+        .await;
+
+    assert_ne!(ran.code, 0, "{}", ran.all());
+    assert!(
+        ran.all().contains("does not match"),
+        "says the typed key is not the stored one: {}",
+        ran.all()
+    );
+    assert_eq!(kit.term.echo_reads(), vec![true, false]);
+    assert_eq!(kit.key("cloud2").as_deref(), Some(EARLIER), "unchanged");
+    assert!(!env.accounts_path().exists(), "nothing written");
+    assert!(env.history().is_empty());
+    assert!(audit_line_of_kind(&env.audit(), "account_added").is_empty());
+    for key in [EARLIER, CANARY] {
+        assert!(!ran.all().contains(key), "{}", ran.all());
     }
-    true
 }
 
-fn writable(dir: &Path) {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+/// Existing Keychain entry with a confirmation for another endpoint: the
+/// user store confirmed the id for another host, so a re-add at a new
+/// endpoint asks for the stored key too.
+#[tokio::test]
+async fn add_reusing_an_entry_confirmed_for_another_host_asks_for_the_stored_key() {
+    const STORED: &str = "sk-or-stored-canary-2222-RTRT";
+    let env = env();
+    let root = plain(&env);
+    add_account(
+        &env,
+        &root,
+        "router",
+        "openai-compatible",
+        Some("https://first.example/v1"),
+        STORED,
+    )
+    .await;
+    remove_account(&env, &root, "router").await;
+
+    let kit = Kit::new(FakeTerminal::new()).with_key("router", STORED);
+    kit.term.line("router");
+    kit.term.line(STORED);
+    let ran = kit
+        .run(
+            &env,
+            &root,
+            &[
+                "add",
+                "router",
+                "--provider",
+                "openai-compatible",
+                "--base-url",
+                "https://second.example/v1",
+            ],
+        )
+        .await;
+    assert_eq!(ran.code, 0, "{}", ran.all());
+    assert_eq!(
+        kit.term.echo_reads(),
+        vec![true, false],
+        "the stored key is asked"
+    );
+    assert_eq!(kit.key("router").as_deref(), Some(STORED));
+    assert!(!ran.all().contains(STORED));
 }
 
-/// Write fails: the writer refuses after this add stored the key, so the
-/// keychain entry it created is deleted, the file is unchanged and the
-/// writer's refusal is shown; an entry the add only reused stays.
+/// Write fails: the user file's writer stops before the rename (as a full
+/// disk or a crash would; `am_app::runtime::testing::fail_writer_at` keyed
+/// by the app data dir, the user writer's root) after this add stored the
+/// key, so the keychain entry it created is deleted, the file is unchanged
+/// and the failure is shown; an entry the add only reused stays.
 #[tokio::test]
 async fn a_failed_write_deletes_only_the_key_this_add_stored() {
     let env = env();
-    let root = env.usual(&[(ACCOUNTS_FILE, accounts_yaml(&["cloud"]))]);
-    let before = read(&root, ACCOUNTS_FILE);
-    let models = root.join("models");
-    if !read_only(&models) {
-        writable(&models);
-        eprintln!("skipped: running as a user who can write a read-only folder");
-        return;
-    }
+    let root = env.usual(&[]);
+    env.write_user_file(&accounts_yaml(&["cloud"]));
+    let before = env.user_text();
+    let app_data = env.places.user.dir().to_path_buf();
+    am_app::runtime::testing::fail_writer_at(&app_data, Some(am_config::FailPoint::BeforeRename));
 
     let kit = Kit::new(FakeTerminal::new());
     kit.term.line("cloud2");
@@ -793,33 +978,29 @@ async fn a_failed_write_deletes_only_the_key_this_add_stored() {
         .run(&env, &root, &["add", "cloud2", "--provider", "anthropic"])
         .await;
     assert_ne!(ran.code, 0, "{}", ran.all());
-    assert!(
-        ran.all().contains("ermission denied"),
-        "the writer's refusal: {}",
-        ran.all()
-    );
     assert_eq!(
         kit.key("cloud2"),
         None,
         "the key this add stored is deleted"
     );
-    assert_eq!(read(&root, ACCOUNTS_FILE), before);
+    assert_eq!(env.user_text(), before);
 
     let reused = Kit::new(FakeTerminal::new()).with_key("cloud2", "sk-ant-earlier-canary-1111");
     reused.term.line("cloud2");
+    reused.term.line("sk-ant-earlier-canary-1111");
     let ran = reused
         .run(&env, &root, &["add", "cloud2", "--provider", "anthropic"])
         .await;
+    am_app::runtime::testing::fail_writer_at(&app_data, None);
     assert_ne!(ran.code, 0, "{}", ran.all());
     assert_eq!(
         reused.key("cloud2").as_deref(),
         Some("sk-ant-earlier-canary-1111"),
         "an entry the add did not create stays"
     );
-    writable(&models);
-    assert_eq!(read(&root, ACCOUNTS_FILE), before);
-    assert!(env.history(&root).is_empty());
-    assert!(audit_line_of_kind(&env.audit(&root), "account_added").is_empty());
+    assert_eq!(env.user_text(), before);
+    assert!(env.history().is_empty());
+    assert!(audit_line_of_kind(&env.audit(), "account_added").is_empty());
 }
 
 // ------------------------------------------------------------ list, test
@@ -829,8 +1010,9 @@ async fn a_failed_write_deletes_only_the_key_this_add_stored() {
 #[tokio::test]
 async fn list_masks_keys_and_names_missing_ones() {
     let env = env();
-    let root = env.usual(&[(ACCOUNTS_FILE, accounts_yaml(&["cloud", "cloud2"]))]);
-    let before = read(&root, ACCOUNTS_FILE);
+    let root = env.usual(&[]);
+    env.write_user_file(&accounts_yaml(&["cloud", "cloud2"]));
+    let before = env.user_text();
     let kit = Kit::new(FakeTerminal::piped()).with_key("cloud", CANARY);
 
     let ran = kit.run(&env, &root, &["list"]).await;
@@ -857,8 +1039,8 @@ async fn list_masks_keys_and_names_missing_ones() {
     let cloud2 = line_of("cloud2");
     assert!(cloud2.contains("no key in Keychain"), "{cloud2}");
     assert_eq!(kit.term.reads(), 0);
-    assert_eq!(read(&root, ACCOUNTS_FILE), before);
-    assert!(env.history(&root).is_empty());
+    assert_eq!(env.user_text(), before);
+    assert!(env.history().is_empty());
     assert_no_key_leaked(&env, &root, &ran);
 }
 
@@ -873,8 +1055,8 @@ async fn test_streams_a_reply_through_the_accounts_pinned_host() {
     let env = env();
     let root = plain(&env);
     add_account(&env, &root, "cloud", "anthropic", None, CANARY).await;
-    let before = read(&root, ACCOUNTS_FILE);
-    let recorded = env.history(&root).len();
+    let before = env.user_text();
+    let recorded = env.history().len();
     let kit = Kit::new(FakeTerminal::piped()).with_key("cloud", CANARY);
     kit.egress
         .replay("api.anthropic.com", "anthropic/c1_count_stream.sse");
@@ -921,8 +1103,8 @@ async fn test_streams_a_reply_through_the_accounts_pinned_host() {
         })
     );
 
-    assert_eq!(read(&root, ACCOUNTS_FILE), before);
-    assert_eq!(env.history(&root).len(), recorded, "no edit");
+    assert_eq!(env.user_text(), before);
+    assert_eq!(env.history().len(), recorded, "no edit");
     assert!(!ran.all().contains(CANARY));
 }
 
@@ -990,7 +1172,9 @@ async fn test_without_a_key_or_of_an_unknown_id_sends_nothing() {
 // ---------------------------------------------------------------- remove
 
 /// Remove, unreferenced: a plain edit with History and Undo; the keychain
-/// entry stays and the command says so.
+/// entry stays and the command says so. Story 2.12: the remove writes
+/// `account_removed` (the id) in the user store with its History entry, and
+/// a later `test` of the id is refused.
 #[tokio::test]
 async fn remove_of_an_unreferenced_account_has_history_and_undo() {
     let env = env();
@@ -1000,42 +1184,47 @@ async fn remove_of_an_unreferenced_account_has_history_and_undo() {
             ("company.yaml", COMPANY.to_string()),
             ("seats/alpha.md", alpha("cloud")),
             ("seats/beta.md", beta("cloud")),
-            (ACCOUNTS_FILE, accounts_yaml(&["cloud", "spare"])),
         ],
     );
+    env.write_user_file(&accounts_yaml(&["cloud", "spare"]));
     let kit = Kit::new(FakeTerminal::new()).with_key("spare", CANARY);
 
     let ran = kit.run(&env, &root, &["remove", "spare"]).await;
 
     assert_eq!(ran.code, 0, "{}", ran.all());
-    let ids: Vec<String> = loaded_accounts(&root).into_iter().map(|a| a.0).collect();
+    let ids: Vec<String> = loaded_accounts(&env).into_iter().map(|a| a.0).collect();
     assert_eq!(ids, vec!["cloud".to_string()]);
     assert_eq!(kit.key("spare").as_deref(), Some(CANARY), "the key stays");
     assert!(ran.all().contains("Keychain"), "it says so: {}", ran.all());
     // True today: the change is recorded in History; Undo comes with the UI.
     assert!(ran.all().contains("recorded in History"), "{}", ran.all());
     assert!(ran.all().contains("when the UI ships"), "{}", ran.all());
-    let history = env.history(&root);
+    let history = env.history();
     assert_eq!(history.len(), 1);
     assert_eq!(history[0].kind, HistoryKind::Edit);
-    assert_eq!(history[0].file, ACCOUNTS_FILE);
+    assert_eq!(history[0].file, USER_FILE);
     assert_eq!(history[0].actor, owner());
+    let audit = env.audit();
+    let removed = audit_line_of_kind(&audit, "account_removed");
+    assert_eq!(removed.len(), 1, "{audit}");
+    assert!(has(&removed[0], "account", "spare"), "{}", removed[0]);
+    assert!(
+        env.project_history(&root).is_empty(),
+        "the project store is not written"
+    );
 
-    // Undo through the writer brings the Account back.
-    let (store, _) = am_store::open_runtime(&env.layout(&root), "Test Mac".into()).unwrap();
-    let writer =
-        am_config::ConfigWriter::open(&root, Arc::new(StoreConfigHistory::new(&store).unwrap()))
-            .unwrap();
+    // Undo through the user file's writer brings the Account back.
+    let writer = env.user_writer();
     writer.undo(owner(), &history[0].id).unwrap();
     drop(writer);
-    drop(store);
-    let ids: Vec<String> = loaded_accounts(&root).into_iter().map(|a| a.0).collect();
+    let ids: Vec<String> = loaded_accounts(&env).into_iter().map(|a| a.0).collect();
     assert_eq!(ids, vec!["cloud".to_string(), "spare".to_string()]);
     assert_no_key_leaked(&env, &root, &ran);
 }
 
-/// Remove, referenced: refused naming the seats that still name it; a
-/// reserved or unknown id is refused too; nothing changes.
+/// Remove, referenced (Remove in use): refused naming the project and the
+/// seat lines that still name it; a reserved or unknown id is refused too;
+/// nothing changes.
 #[tokio::test]
 async fn remove_refuses_a_referenced_reserved_or_unknown_id() {
     let env = env();
@@ -1045,10 +1234,10 @@ async fn remove_refuses_a_referenced_reserved_or_unknown_id() {
             ("company.yaml", COMPANY.to_string()),
             ("seats/alpha.md", alpha("cloud")),
             ("seats/beta.md", beta("cloud")),
-            (ACCOUNTS_FILE, accounts_yaml(&["cloud", "spare"])),
         ],
     );
-    let before = read(&root, ACCOUNTS_FILE);
+    env.write_user_file(&accounts_yaml(&["cloud", "spare"]));
+    let before = env.user_text();
 
     let kit = Kit::new(FakeTerminal::new());
     let ran = kit.run(&env, &root, &["remove", "cloud"]).await;
@@ -1058,22 +1247,34 @@ async fn remove_refuses_a_referenced_reserved_or_unknown_id() {
         "names the seats: {}",
         ran.all()
     );
+    assert!(
+        ran.all().contains(&root.display().to_string()),
+        "names the project: {}",
+        ran.all()
+    );
+    assert!(
+        ran.all().contains("seats/alpha.md") && ran.all().contains("seats/beta.md"),
+        "names the seat files: {}",
+        ran.all()
+    );
 
     for id in ["local-ollama", "local-lmstudio", "nope"] {
         let ran = kit.run(&env, &root, &["remove", id]).await;
         assert_ne!(ran.code, 0, "{id}: {}", ran.all());
         assert!(ran.all().contains(id), "{id}: {}", ran.all());
     }
-    assert_eq!(read(&root, ACCOUNTS_FILE), before);
-    assert!(env.history(&root).is_empty());
+    assert_eq!(env.user_text(), before);
+    assert!(env.history().is_empty());
 }
 
 // ------------------------------------------------------------------ open
 
-/// Busy: while another process holds the store's lock, an add is refused
-/// naming the holder, before anything is read or stored.
+/// Story 2.12: the commands open no project. While another process holds
+/// a project's store (the app is serving it), an add and a remove still
+/// run, and the holder keeps its lock: the user store has its own lock,
+/// `user.lock`, taken only for the write.
 #[tokio::test]
-async fn add_while_the_store_is_held_is_refused_naming_the_holder() {
+async fn add_and_remove_run_while_a_project_store_is_held() {
     let env = env();
     let root = env.usual(&[]);
     let (held, _) = am_store::open_runtime(&env.layout(&root), "Holder Mac".into()).unwrap();
@@ -1084,17 +1285,30 @@ async fn add_while_the_store_is_held_is_refused_naming_the_holder() {
     let ran = kit
         .run(&env, &root, &["add", "cloud2", "--provider", "anthropic"])
         .await;
+    assert_eq!(ran.code, 0, "{}", ran.all());
+    assert!(!ran.all().contains("Holder Mac"), "{}", ran.all());
+    assert_eq!(kit.key("cloud2").as_deref(), Some(CANARY));
 
-    assert_ne!(ran.code, 0, "{}", ran.all());
+    // A second Account nobody names is removed the same way.
+    let other = Kit::new(FakeTerminal::new());
+    other.term.line("spare");
+    other.term.line(CANARY);
+    let ran = other
+        .run(&env, &root, &["add", "spare", "--provider", "anthropic"])
+        .await;
+    assert_eq!(ran.code, 0, "{}", ran.all());
+    let ran = Kit::new(FakeTerminal::new())
+        .run(&env, &root, &["remove", "spare"])
+        .await;
+    assert_eq!(ran.code, 0, "{}", ran.all());
+
     assert!(
-        ran.all().contains("Holder Mac"),
-        "names the holder: {}",
-        ran.all()
+        am_store::lock_is_held(&env.layout(&root)),
+        "the holder keeps it"
     );
-    assert_eq!(kit.term.reads(), 0);
-    assert_eq!(kit.key("cloud2"), None);
-    assert!(!root.join(ACCOUNTS_FILE).exists());
+    assert_eq!(env.history().len(), 3);
     drop(held);
+    assert!(env.project_history(&root).is_empty());
 }
 
 /// Busy: an outside change not yet reloaded (a tracked file that differs
@@ -1115,9 +1329,9 @@ async fn an_outside_change_waiting_for_reload_refuses_naming_the_file() {
     // Changed by hand afterwards.
     let changed = format!(
         "{}  - id: spare\n    provider: anthropic\n    secret_ref: spare\n",
-        read(&root, ACCOUNTS_FILE).unwrap()
+        env.user_text().unwrap()
     );
-    std::fs::write(root.join(ACCOUNTS_FILE), &changed).unwrap();
+    std::fs::write(env.accounts_path(), &changed).unwrap();
 
     for args in [
         vec!["add", "cloud3", "--provider", "anthropic"],
@@ -1128,12 +1342,12 @@ async fn an_outside_change_waiting_for_reload_refuses_naming_the_file() {
         kit.term.line(CANARY);
         let ran = kit.run(&env, &root, &args).await;
         assert_ne!(ran.code, 0, "{args:?}: {}", ran.all());
-        assert!(ran.all().contains(ACCOUNTS_FILE), "{args:?}: {}", ran.all());
+        assert!(ran.all().contains(USER_FILE), "{args:?}: {}", ran.all());
         assert_eq!(kit.term.reads(), 0, "{args:?}");
         assert_eq!(kit.key("cloud3"), None);
     }
-    assert_eq!(read(&root, ACCOUNTS_FILE).unwrap(), changed);
-    assert_eq!(env.history(&root).len(), 1);
+    assert_eq!(env.user_text().unwrap(), changed);
+    assert_eq!(env.history().len(), 1);
 }
 
 /// While config enables a stdio MCP server (a child that runs as the owner)
@@ -1152,19 +1366,26 @@ async fn add_is_refused_while_a_stdio_mcp_server_is_enabled() {
 
     assert_ne!(ran.code, 0, "{}", ran.all());
     assert!(ran.all().contains("stdio MCP server"), "{}", ran.all());
+    assert!(
+        ran.all().contains(&root.display().to_string()),
+        "names the project: {}",
+        ran.all()
+    );
     assert_eq!(kit.term.reads(), 0);
     assert_eq!(kit.key("cloud2"), None);
-    assert!(!root.join(ACCOUNTS_FILE).exists());
+    assert!(!env.accounts_path().exists());
 }
 
-/// The project is resolved read-only (AD-32's checks): a project that would
-/// need an id minted, a legacy folder moved or its store migrated is refused
-/// in words, and none of those happens.
+/// Story 2.12: the commands open no project, so none is resolved: a folder
+/// never opened on this Mac (no `project_id`), a project with an unmoved
+/// legacy folder, and a project whose store an older binary wrote are all
+/// left exactly as they were by an add run from inside them: no id minted,
+/// no folder moved, no store migrated, no marker written.
 #[tokio::test]
-async fn add_refuses_a_project_that_would_need_a_mint_a_move_or_a_migration() {
+async fn add_resolves_no_project_and_changes_none() {
     let env = env();
 
-    // Never opened: no project_id yet.
+    // Never opened: no project_id yet; the add is run from inside it.
     let fresh = env.folder(
         "fresh",
         &[
@@ -1178,48 +1399,33 @@ async fn add_refuses_a_project_that_would_need_a_mint_a_move_or_a_migration() {
     let ran = kit
         .run(&env, &fresh, &["add", "cloud2", "--provider", "anthropic"])
         .await;
-    assert_ne!(ran.code, 0, "{}", ran.all());
-    assert!(ran.all().contains("project_id"), "{}", ran.all());
+    assert_eq!(ran.code, 0, "{}", ran.all());
     assert_eq!(
         read(&fresh, "company.yaml").unwrap(),
         COMPANY,
         "no id minted"
     );
-    assert!(!env.places.base.dir().exists(), "no runtime folder made");
-    assert_eq!(kit.term.reads(), 0);
+    assert!(!open_marker(&fresh).exists(), "no marker is written");
 
-    // An unmoved legacy folder.
+    // An unmoved legacy folder, and a store at an older version.
     let root = env.usual(&[]);
     std::fs::create_dir(legacy_dir(&root)).unwrap();
-    let kit = Kit::new(FakeTerminal::new());
-    kit.term.line("cloud2");
-    kit.term.line(CANARY);
-    let ran = kit
-        .run(&env, &root, &["add", "cloud2", "--provider", "anthropic"])
-        .await;
-    assert_ne!(ran.code, 0, "{}", ran.all());
-    assert!(ran.all().contains("old runtime folder"), "{}", ran.all());
-    assert!(legacy_dir(&root).is_dir(), "not moved");
-    assert_eq!(kit.term.reads(), 0);
-    std::fs::remove_dir(legacy_dir(&root)).unwrap();
-
-    // A store that would need a migration.
     let db = env.layout(&root).state_db();
     std::fs::remove_file(&db).unwrap();
     am_store::testing::database_at_version(&db, SCHEMA_VERSION - 1).unwrap();
     let db_before = std::fs::read(&db).unwrap();
     let kit = Kit::new(FakeTerminal::new());
-    kit.term.line("cloud2");
+    kit.term.line("cloud3");
     kit.term.line(CANARY);
     let ran = kit
-        .run(&env, &root, &["add", "cloud2", "--provider", "anthropic"])
+        .run(&env, &root, &["add", "cloud3", "--provider", "anthropic"])
         .await;
-    assert_ne!(ran.code, 0, "{}", ran.all());
-    assert!(ran.all().contains("migrat"), "{}", ran.all());
+    assert_eq!(ran.code, 0, "{}", ran.all());
+    assert!(legacy_dir(&root).is_dir(), "not moved");
     assert_eq!(std::fs::read(&db).unwrap(), db_before, "not migrated");
-    assert_eq!(kit.term.reads(), 0);
-    assert_eq!(kit.key("cloud2"), None);
-    assert!(!root.join(ACCOUNTS_FILE).exists());
+    assert!(!open_marker(&root).exists(), "no marker is written");
+    let ids: Vec<String> = loaded_accounts(&env).into_iter().map(|a| a.0).collect();
+    assert_eq!(ids, ["cloud2", "cloud3"]);
 }
 
 #[tokio::test]
@@ -1234,6 +1440,18 @@ async fn bad_usage_exits_two() {
         vec!["remove"],
         vec!["test"],
         vec!["list", "extra"],
+        // Story 2.12: no command takes a project.
+        vec!["list", "--project", "/tmp"],
+        vec![
+            "add",
+            "cloud2",
+            "--provider",
+            "anthropic",
+            "--project",
+            "/tmp",
+        ],
+        vec!["remove", "cloud2", "--project", "/tmp"],
+        vec!["test", "cloud2", "--project", "/tmp"],
     ] {
         let kit = Kit::new(FakeTerminal::new());
         let ran = kit.run(&env, &root, &args).await;
@@ -1281,23 +1499,23 @@ impl SecretStore for CountingStore {
 /// key is not stored and nothing is recorded.
 #[tokio::test]
 async fn an_account_added_to_the_file_while_add_waits_is_never_overwritten() {
-    let env = env();
     for start in [
         accounts_yaml(&["cloud"]),
         // `accounts:` absent: the add would set the whole list.
         "schema_version: 2\n".to_string(),
     ] {
+        let env = env();
         let root = env.project(
-            &format!("p{}", start.len()),
+            "p",
             &[
                 ("company.yaml", COMPANY.to_string()),
                 ("seats/alpha.md", alpha("cloud")),
-                (ACCOUNTS_FILE, start.clone()),
             ],
         );
+        env.write_user_file(&start);
         let appeared = accounts_yaml(&["cloud", "other"]);
         let kit = Kit::new(FakeTerminal::new());
-        let file = root.join(ACCOUNTS_FILE);
+        let file = env.accounts_path();
         let bytes = appeared.clone();
         kit.term.line_and("cloud2", move || {
             std::fs::write(&file, &bytes).unwrap();
@@ -1311,13 +1529,13 @@ async fn an_account_added_to_the_file_while_add_waits_is_never_overwritten() {
         assert_ne!(ran.code, 0, "{}", ran.all());
         assert!(ran.all().contains("again"), "run it again: {}", ran.all());
         assert_eq!(
-            read(&root, ACCOUNTS_FILE).unwrap(),
+            env.user_text().unwrap(),
             appeared,
             "the Account that appeared stays"
         );
         assert_eq!(kit.key("cloud2"), None, "no key is stored");
-        assert!(env.history(&root).is_empty());
-        assert!(audit_line_of_kind(&env.audit(&root), "account_added").is_empty());
+        assert!(env.history().is_empty());
+        assert!(audit_line_of_kind(&env.audit(), "account_added").is_empty());
         assert_no_key_leaked(&env, &root, &ran);
     }
 }
@@ -1354,8 +1572,8 @@ async fn a_seat_that_starts_naming_the_account_while_add_waits_refuses_the_add()
         ran.all()
     );
     assert_eq!(kit.key("cloud2"), None);
-    assert!(!root.join(ACCOUNTS_FILE).exists());
-    assert!(env.history(&root).is_empty());
+    assert!(!env.accounts_path().exists());
+    assert!(env.history().is_empty());
 }
 
 /// AD-17 names a key's Keychain entry by the Account id. A hand-written
@@ -1367,7 +1585,8 @@ async fn a_secret_ref_that_names_another_entry_is_never_read_or_sent() {
     const OTHER: &str = "sk-other-entry-canary-9z8y7x-QRST";
     let env = env();
     let yaml = "schema_version: 2\naccounts:\n  - id: cloud\n    provider: anthropic\n    secret_ref: other-entry\n";
-    let root = env.usual(&[(ACCOUNTS_FILE, yaml.to_string())]);
+    let root = env.usual(&[]);
+    env.write_user_file(yaml);
     let kit = Kit::new(FakeTerminal::piped()).with_key("other-entry", OTHER);
     kit.egress
         .replay("api.anthropic.com", "anthropic/c1_count_stream.sse");
@@ -1405,66 +1624,58 @@ async fn a_secret_ref_that_names_another_entry_is_never_read_or_sent() {
     assert!(!ran.all().contains("QRST"));
 }
 
-/// The open settles a config write a crash interrupted (reconcile at
-/// open). Its report is printed even when the command is then refused, and
-/// no refusal claims that nothing was written.
+/// Story 2.12: taking `user.lock` settles a write of the user file a crash
+/// interrupted (a pending intent whose file holds its new bytes is
+/// completed as reconciled), and the command reports it; the add then
+/// proceeds on the settled file, and no refusal or report claims that
+/// nothing was written.
 #[tokio::test]
-async fn a_refused_add_still_reports_the_interrupted_write_it_completed() {
+async fn an_add_settles_and_reports_an_interrupted_write_of_the_user_file() {
     let env = env();
     let root = env.usual(&[]);
     {
         // A create interrupted after the file was placed: its intent stays.
-        let (store, _) = am_store::open_runtime(&env.layout(&root), "Test Mac".into()).unwrap();
-        let writer = am_config::ConfigWriter::open(
-            &root,
-            Arc::new(StoreConfigHistory::new(&store).unwrap()),
-        )
-        .unwrap();
+        let writer = env.user_writer();
         writer.fail_at(Some(am_config::FailPoint::AfterRename));
         writer
             .create(
                 owner(),
                 am_config::ConfigCreate {
-                    file: ACCOUNTS_FILE.into(),
-                    bytes: accounts_yaml(&["cloud2"]).into_bytes(),
+                    file: USER_FILE.into(),
+                    bytes: accounts_yaml(&["cloud"]).into_bytes(),
                     audit: Vec::new(),
                 },
             )
             .unwrap_err();
     }
-    assert!(env.history(&root).is_empty(), "the entry is still pending");
+    assert!(env.history().is_empty(), "the entry is still pending");
+    assert!(env.accounts_path().exists(), "the file was placed");
 
     let kit = Kit::new(FakeTerminal::new());
+    kit.term.line("cloud2");
+    kit.term.line(CANARY);
     let ran = kit
-        .run(
-            &env,
-            &root,
-            &["add", "local-ollama", "--provider", "anthropic"],
-        )
+        .run(&env, &root, &["add", "cloud2", "--provider", "anthropic"])
         .await;
 
-    assert_ne!(ran.code, 0, "{}", ran.all());
+    assert_eq!(ran.code, 0, "{}", ran.all());
     assert!(
-        ran.all().contains(&format!(
-            "completed the interrupted write of {ACCOUNTS_FILE}"
-        )),
-        "the reconcile is reported before the refusal: {}",
+        ran.all()
+            .contains(&format!("completed the interrupted write of {USER_FILE}")),
+        "the reconcile is reported: {}",
         ran.all()
     );
-    assert_eq!(env.history(&root).len(), 1, "the open recorded the entry");
-    for claim in ["othing was written", "written or stored"] {
-        assert!(
-            !ran.all().contains(claim),
-            "the refusal claims `{claim}`: {}",
-            ran.all()
-        );
-    }
-    assert!(ran.all().contains("No Account was added"), "{}", ran.all());
+    let history = env.history();
+    assert_eq!(history.len(), 2, "{history:#?}");
+    assert_eq!(history[0].kind, HistoryKind::Create);
+    assert_eq!(history[1].kind, HistoryKind::Edit);
+    let ids: Vec<String> = loaded_accounts(&env).into_iter().map(|a| a.0).collect();
+    assert_eq!(ids, ["cloud", "cloud2"]);
 }
 
-/// Ctrl-C after the id was typed, on the path that reads no key (the
-/// Keychain already holds one): the add is cancelled with exit 130, and
-/// nothing is written or stored.
+/// Ctrl-C after the id was typed, on the path that reuses the Keychain's
+/// entry (story 2.12: the stored key's hidden prompt comes next): the add
+/// is cancelled, echo is on again, and nothing is written or stored.
 #[tokio::test]
 async fn ctrl_c_after_the_id_on_the_reuse_path_adds_nothing() {
     let env = env();
@@ -1477,10 +1688,10 @@ async fn ctrl_c_after_the_id_on_the_reuse_path_adds_nothing() {
         .run(&env, &root, &["add", "cloud2", "--provider", "anthropic"])
         .await;
 
-    assert_eq!(ran.code, 130, "{}", ran.all());
-    assert_eq!(kit.term.reads(), 1, "only the id was read");
-    assert!(!root.join(ACCOUNTS_FILE).exists(), "nothing written");
-    assert!(env.history(&root).is_empty());
+    assert_ne!(ran.code, 0, "{}", ran.all());
+    assert!(kit.term.echo(), "echo is on again");
+    assert!(!env.accounts_path().exists(), "nothing written");
+    assert!(env.history().is_empty());
     assert_eq!(
         kit.key("cloud2").as_deref(),
         Some("sk-ant-earlier-canary-1111"),
@@ -1546,11 +1757,11 @@ async fn a_keychain_entry_that_changes_while_a_prompt_waits_refuses_the_add() {
             assert!(!ran.all().contains(key), "{when}: a key was printed");
         }
     };
-    let nothing_written = |env: &Env, root: &Path, when: &str| {
-        assert!(!root.join(ACCOUNTS_FILE).exists(), "{when}: no file");
-        assert!(env.history(root).is_empty(), "{when}: no History entry");
+    let nothing_written = |env: &Env, _root: &Path, when: &str| {
+        assert!(!env.accounts_path().exists(), "{when}: no file");
+        assert!(env.history().is_empty(), "{when}: no History entry");
         assert!(
-            audit_line_of_kind(&env.audit(root), "account_added").is_empty(),
+            audit_line_of_kind(&env.audit(), "account_added").is_empty(),
             "{when}: no audit note"
         );
     };
@@ -1606,7 +1817,9 @@ async fn a_keychain_entry_that_changes_while_a_prompt_waits_refuses_the_add() {
     nothing_written(&env, &root, "during the key prompt");
 
     // The entry the sentence said would be reused is deleted while the id
-    // prompt waits: no key is asked for in its place.
+    // prompt waits: no new key is stored in its place (story 2.12: the
+    // stored key's hidden prompt may come first; what is typed there is
+    // never stored).
     let env = self::env();
     let root = env.usual(&[]);
     let kit = Kit::new(FakeTerminal::new()).with_key("cloud2", THEIRS);
@@ -1618,7 +1831,6 @@ async fn a_keychain_entry_that_changes_while_a_prompt_waits_refuses_the_add() {
     let ran = kit.run(&env, &root, &args).await;
     refused(&ran, "deleted during the id prompt");
     assert!(ran.shown.contains("already holds"), "{}", ran.shown);
-    assert_eq!(kit.term.reads(), 1, "the key is not asked for");
     assert_eq!(kit.key("cloud2"), None, "nothing is stored");
     nothing_written(&env, &root, "deleted during the id prompt");
 }
@@ -1631,18 +1843,13 @@ async fn a_keychain_entry_that_changes_while_a_prompt_waits_refuses_the_add() {
 #[tokio::test]
 async fn the_same_id_added_from_outside_before_the_write_is_not_taken_for_this_write() {
     let env = env();
-    let root = env.project(
-        "p",
-        &[
-            ("company.yaml", COMPANY.to_string()),
-            (ACCOUNTS_FILE, accounts_yaml(&["cloud"])),
-        ],
-    );
+    let root = env.project("p", &[("company.yaml", COMPANY.to_string())]);
+    env.write_user_file(&accounts_yaml(&["cloud"]));
     let outside = accounts_yaml(&["cloud", "cloud2"]);
     let kit = Kit::new(FakeTerminal::new());
     kit.term.line("cloud2");
     kit.term.line(CANARY);
-    let (file, bytes) = (root.join(ACCOUNTS_FILE), outside.clone());
+    let (file, bytes) = (env.accounts_path(), outside.clone());
     let secrets = Arc::new(BeforeSet {
         inner: kit.secrets.clone(),
         meanwhile: Mutex::new(Some(Box::new(move || {
@@ -1660,7 +1867,7 @@ async fn the_same_id_added_from_outside_before_the_write_is_not_taken_for_this_w
         .await;
 
     assert_ne!(ran.code, 0, "{}", ran.all());
-    assert_eq!(read(&root, ACCOUNTS_FILE).unwrap(), outside);
+    assert_eq!(env.user_text().unwrap(), outside);
     assert!(
         !ran.all().contains("History entry is recorded"),
         "no pending History entry is claimed: {}",
@@ -1671,8 +1878,8 @@ async fn the_same_id_added_from_outside_before_the_write_is_not_taken_for_this_w
         None,
         "the key this command stored is deleted"
     );
-    assert!(env.history(&root).is_empty());
-    assert!(audit_line_of_kind(&env.audit(&root), "account_added").is_empty());
+    assert!(env.history().is_empty());
+    assert!(audit_line_of_kind(&env.audit(), "account_added").is_empty());
 }
 
 /// Ctrl-C between the store and the write (the second check): the key this
@@ -1693,8 +1900,8 @@ async fn ctrl_c_between_the_store_and_the_write_leaves_no_key_and_no_account() {
     assert_eq!(ran.code, 130, "{}", ran.all());
     assert_eq!(kit.term.reads(), 2, "the id and the key were read");
     assert_eq!(kit.key("cloud2"), None, "the key it stored is deleted");
-    assert!(!root.join(ACCOUNTS_FILE).exists(), "no Account written");
-    assert!(env.history(&root).is_empty());
+    assert!(!env.accounts_path().exists(), "no Account written");
+    assert!(env.history().is_empty());
     assert_no_key_leaked(&env, &root, &ran);
 }
 
@@ -1705,21 +1912,18 @@ async fn ctrl_c_between_the_store_and_the_write_leaves_no_key_and_no_account() {
 #[tokio::test]
 async fn a_remove_that_fails_after_the_file_was_written_says_it_was_removed() {
     let env = env();
-    let root = env.project(
-        "p",
-        &[
-            ("company.yaml", COMPANY.to_string()),
-            (ACCOUNTS_FILE, accounts_yaml(&["cloud", "spare"])),
-        ],
-    );
-    am_app::runtime::testing::fail_writer_at(&root, Some(am_config::FailPoint::AfterRename));
+    let root = env.project("p", &[("company.yaml", COMPANY.to_string())]);
+    env.write_user_file(&accounts_yaml(&["cloud", "spare"]));
+    // Story 2.12: the user file's writer has the app data dir as its root.
+    let app_data = env.places.user.dir().to_path_buf();
+    am_app::runtime::testing::fail_writer_at(&app_data, Some(am_config::FailPoint::AfterRename));
     let kit = Kit::new(FakeTerminal::new());
 
     let ran = kit.run(&env, &root, &["remove", "spare"]).await;
 
-    am_app::runtime::testing::fail_writer_at(&root, None);
+    am_app::runtime::testing::fail_writer_at(&app_data, None);
     assert_ne!(ran.code, 0, "{}", ran.all());
-    let ids: Vec<String> = loaded_accounts(&root).into_iter().map(|a| a.0).collect();
+    let ids: Vec<String> = loaded_accounts(&env).into_iter().map(|a| a.0).collect();
     assert_eq!(ids, vec!["cloud".to_string()], "the file was written");
     assert!(
         !ran.all().contains("was not removed"),
@@ -1728,20 +1932,26 @@ async fn a_remove_that_fails_after_the_file_was_written_says_it_was_removed() {
     );
     assert!(ran.all().contains("removed from"), "{}", ran.all());
     assert!(
-        ran.all().contains("next time the project opens"),
-        "{}",
+        ran.all().contains("History"),
+        "says its History entry is recorded later: {}",
         ran.all()
     );
-    assert!(env.history(&root).is_empty(), "the entry is still pending");
+    assert!(env.history().is_empty(), "the entry is still pending");
 
-    // The next command's open records it.
-    let ran = kit.run(&env, &root, &["remove", "nope"]).await;
+    // The next write's lock settles it (an add of another Account).
+    let next = Kit::new(FakeTerminal::new());
+    next.term.line("cloud3");
+    next.term.line(CANARY);
+    let ran = next
+        .run(&env, &root, &["add", "cloud3", "--provider", "anthropic"])
+        .await;
+    assert_eq!(ran.code, 0, "{}", ran.all());
     assert!(
         ran.all().contains("completed the interrupted write"),
         "{}",
         ran.all()
     );
-    assert_eq!(env.history(&root).len(), 1);
+    assert_eq!(env.history().len(), 2);
 }
 
 // ------------------------------- OpenAI and compatible Accounts (story 2.3)
@@ -1877,7 +2087,7 @@ fn assert_says_not_confirmed(ran: &Ran, id: &str) {
     assert!(said.contains(id), "{id}: {said}");
 }
 
-/// One Account as the project's config holds it: (id, provider, name,
+/// One Account as the user Accounts file holds it: (id, provider, name,
 /// base_url, secret_ref).
 type Held = (
     String,
@@ -1897,16 +2107,24 @@ fn held(id: &str, provider: &str, name: Option<&str>, base_url: Option<&str>) ->
     )
 }
 
-/// The Accounts of the project's config now. The project must load without
-/// an error: what the add wrote is valid config.
-fn held_accounts(root: &Path) -> Vec<Held> {
-    let loaded = am_config::load(root).unwrap();
-    let snap = loaded
-        .snapshot
-        .unwrap_or_else(|| panic!("{:#?}", loaded.findings));
-    snap.accounts()
+/// The Accounts of the user file now. It must load without an error: what
+/// the add wrote is valid config.
+fn held_accounts(env: &Env) -> Vec<Held> {
+    let loaded = am_config::user_accounts::load(&env.accounts_path());
+    assert!(
+        loaded
+            .findings
+            .iter()
+            .all(|f| f.severity != am_config::Severity::Error),
+        "{:#?}",
+        loaded.findings
+    );
+    loaded
+        .accounts
+        .ids()
         .iter()
-        .map(|a| {
+        .map(|id| {
+            let a = loaded.accounts.get(id).unwrap();
             (
                 a.id.clone(),
                 a.provider.clone(),
@@ -1922,18 +2140,18 @@ fn held_accounts(root: &Path) -> Vec<Held> {
 /// (AD-15) and for the endpoint's scheme, host and port.
 fn assert_added_audit(
     env: &Env,
-    root: &Path,
+    _root: &Path,
     account: &str,
     provider: &str,
     scheme: &str,
     host: &str,
     port: &str,
 ) {
-    let audit = env.audit(root);
+    let audit = env.audit();
     let added = audit_line_of_kind(&audit, "account_added");
     assert_eq!(added.len(), 1, "{audit}");
     let line = &added[0];
-    assert!(has(line, "file", ACCOUNTS_FILE), "{line}");
+    assert!(has(line, "file", USER_FILE), "{line}");
     assert!(has(line, "account", account), "{line}");
     assert!(has(line, "provider", provider), "{line}");
     assert!(has(line, "scheme", scheme), "{line}");
@@ -1942,6 +2160,7 @@ fn assert_added_audit(
         has(line, "port", port) || line.contains(&format!("\"port\":{port}")),
         "port {port}: {line}"
     );
+    assert!(has(line, "key", "stored"), "{line}");
     assert!(has(line, "confirmation", "typed_id"), "{line}");
 }
 
@@ -1996,12 +2215,12 @@ async fn add_an_openai_account_names_its_endpoint_and_records_it() {
     );
     assert_eq!(kit.key("oa").as_deref(), Some(OA_CANARY));
 
-    assert_eq!(held_accounts(&root), vec![held("oa", "openai", None, None)]);
-    let text = read(&root, ACCOUNTS_FILE).unwrap();
+    assert_eq!(held_accounts(&env), vec![held("oa", "openai", None, None)]);
+    let text = env.user_text().unwrap();
     assert!(!text.contains("base_url"), "{text}");
-    let history = env.history(&root);
+    let history = env.history();
     assert_eq!(history.len(), 1, "{history:#?}");
-    assert_eq!(history[0].file, ACCOUNTS_FILE);
+    assert_eq!(history[0].file, USER_FILE);
     assert_eq!(history[0].kind, HistoryKind::Create);
     assert_eq!(history[0].actor, owner());
     assert_added_audit(
@@ -2016,10 +2235,10 @@ async fn add_an_openai_account_names_its_endpoint_and_records_it() {
 
     assert_eq!(read(&root, "seats/alpha.md"), seat, "no seat is changed");
     assert!(!open_marker(&root).exists(), "no marker is written");
-    for leak in [&ran.all(), &text, &env.audit(&root)] {
+    for leak in [&ran.all(), &text, &env.audit()] {
         assert!(!leak.contains(OA_CANARY), "the key left the Keychain");
     }
-    for e in env.history(&root) {
+    for e in env.history() {
         assert!(
             !format!("{e:?}").contains(OA_CANARY),
             "the key reached History"
@@ -2041,9 +2260,9 @@ async fn add_a_compatible_account_at_a_remote_url_pins_that_host() {
             ("company.yaml", COMPANY.to_string()),
             ("seats/alpha.md", alpha("router")),
             ("seats/beta.md", beta("cloud")),
-            (ACCOUNTS_FILE, accounts_yaml(&["cloud"])),
         ],
     );
+    env.write_user_file(&accounts_yaml(&["cloud"]));
     let seats = (read(&root, "seats/alpha.md"), read(&root, "seats/beta.md"));
     let kit = Kit::new(FakeTerminal::new());
     kit.term.line("router");
@@ -2083,7 +2302,7 @@ async fn add_a_compatible_account_at_a_remote_url_pins_that_host() {
     assert_eq!(kit.key("router").as_deref(), Some(ROUTER_CANARY));
 
     assert_eq!(
-        held_accounts(&root),
+        held_accounts(&env),
         vec![
             held("cloud", "anthropic", None, None),
             held(
@@ -2094,7 +2313,7 @@ async fn add_a_compatible_account_at_a_remote_url_pins_that_host() {
             ),
         ]
     );
-    let history = env.history(&root);
+    let history = env.history();
     assert_eq!(history.len(), 1, "{history:#?}");
     assert_eq!(history[0].kind, HistoryKind::Edit);
     assert_eq!(history[0].actor, owner());
@@ -2113,8 +2332,8 @@ async fn add_a_compatible_account_at_a_remote_url_pins_that_host() {
         seats,
         "no seat is changed"
     );
-    let text = read(&root, ACCOUNTS_FILE).unwrap();
-    for leak in [&ran.all(), &text, &env.audit(&root)] {
+    let text = env.user_text().unwrap();
+    for leak in [&ran.all(), &text, &env.audit()] {
         assert!(!leak.contains(ROUTER_CANARY), "the key left the Keychain");
     }
 }
@@ -2175,10 +2394,10 @@ async fn add_a_compatible_account_on_this_mac_says_its_calls_stay_here() {
     assert_eq!(kit.key("llama").as_deref(), Some(LLAMA_CANARY));
 
     assert_eq!(
-        held_accounts(&root),
+        held_accounts(&env),
         vec![held("llama", "openai-compatible", None, Some(LOOPBACK_URL))]
     );
-    let history = env.history(&root);
+    let history = env.history();
     assert_eq!(history.len(), 1, "{history:#?}");
     assert_eq!(history[0].kind, HistoryKind::Create);
     assert_added_audit(
@@ -2190,8 +2409,8 @@ async fn add_a_compatible_account_on_this_mac_says_its_calls_stay_here() {
         "127.0.0.1",
         "8080",
     );
-    let text = read(&root, ACCOUNTS_FILE).unwrap();
-    for leak in [&ran.all(), &text, &env.audit(&root)] {
+    let text = env.user_text().unwrap();
+    for leak in [&ran.all(), &text, &env.audit()] {
         assert!(!leak.contains(LLAMA_CANARY), "the key left the Keychain");
     }
 }
@@ -2305,13 +2524,10 @@ async fn add_refuses_a_base_url_outside_the_two_accepted_forms() {
         );
         assert_eq!(kit.term.reads(), 0, "{case}: nothing is read");
         assert_eq!(kit.key("cloud2"), None, "{case}: nothing is stored");
-        assert!(
-            !root.join(ACCOUNTS_FILE).exists(),
-            "{case}: nothing is written"
-        );
+        assert!(!env.accounts_path().exists(), "{case}: nothing is written");
     }
-    assert!(env.history(&root).is_empty());
-    assert!(audit_line_of_kind(&env.audit(&root), "account_added").is_empty());
+    assert!(env.history().is_empty());
+    assert!(audit_line_of_kind(&env.audit(), "account_added").is_empty());
 }
 
 /// The 2.1 terminal rule holds for the new providers: with a stdin that is
@@ -2341,8 +2557,8 @@ async fn add_of_an_openai_or_compatible_account_needs_a_terminal() {
         assert_eq!(kit.term.reads(), 0, "{args:?}: nothing is read");
         assert_eq!(kit.key("cloud2"), None);
     }
-    assert!(!root.join(ACCOUNTS_FILE).exists());
-    assert!(env.history(&root).is_empty());
+    assert!(!env.accounts_path().exists());
+    assert!(env.history().is_empty());
 }
 
 /// The usage text names the three providers and `--base-url`; a
@@ -2398,8 +2614,9 @@ fn list_columns(out: &str, id: &str) -> Vec<String> {
 #[tokio::test]
 async fn list_shows_the_endpoint_host_of_each_kind_of_account() {
     let env = env();
-    let root = env.usual(&[(ACCOUNTS_FILE, four_kinds())]);
-    let before = read(&root, ACCOUNTS_FILE);
+    let root = env.usual(&[]);
+    env.write_user_file(&four_kinds());
+    let before = env.user_text();
     let kit = Kit::new(FakeTerminal::piped()).with_key("cloud", CANARY);
     for (id, key) in [
         ("oa", OA_CANARY),
@@ -2445,8 +2662,8 @@ async fn list_shows_the_endpoint_host_of_each_kind_of_account() {
         );
     }
     assert_eq!(kit.term.reads(), 0);
-    assert_eq!(read(&root, ACCOUNTS_FILE), before);
-    assert!(env.history(&root).is_empty());
+    assert_eq!(env.user_text(), before);
+    assert!(env.history().is_empty());
     assert!(kit.egress.requests().is_empty(), "list calls nothing");
 }
 
@@ -2459,8 +2676,8 @@ async fn list_shows_the_endpoint_host_of_each_kind_of_account() {
 async fn test_of_an_openai_account_streams_through_its_pinned_host() {
     let env = env();
     let root = four_kinds_added(&env).await;
-    let before = read(&root, ACCOUNTS_FILE);
-    let recorded = env.history(&root).len();
+    let before = env.user_text();
+    let recorded = env.history().len();
     let kit = Kit::new(FakeTerminal::piped()).with_key("oa", OA_CANARY);
     kit.egress.replay("api.openai.com", "openai/text.sse");
 
@@ -2516,8 +2733,8 @@ async fn test_of_an_openai_account_streams_through_its_pinned_host() {
         })
     );
 
-    assert_eq!(read(&root, ACCOUNTS_FILE), before);
-    assert_eq!(env.history(&root).len(), recorded, "no edit");
+    assert_eq!(env.user_text(), before);
+    assert_eq!(env.history().len(), recorded, "no edit");
     assert!(!ran.all().contains(OA_CANARY));
 }
 
@@ -2581,8 +2798,8 @@ async fn test_of_an_openai_or_compatible_account_needs_a_model() {
 async fn test_of_a_compatible_account_calls_only_its_base_url() {
     let env = env();
     let root = four_kinds_added(&env).await;
-    let before = read(&root, ACCOUNTS_FILE);
-    let recorded = env.history(&root).len();
+    let before = env.user_text();
+    let recorded = env.history().len();
 
     // Remote.
     let kit = Kit::new(FakeTerminal::piped()).with_key("router", ROUTER_CANARY);
@@ -2669,8 +2886,8 @@ async fn test_of_a_compatible_account_calls_only_its_base_url() {
     );
     assert!(!ran.all().contains(LLAMA_CANARY));
 
-    assert_eq!(read(&root, ACCOUNTS_FILE), before);
-    assert_eq!(env.history(&root).len(), recorded, "no edit");
+    assert_eq!(env.user_text(), before);
+    assert_eq!(env.history().len(), recorded, "no edit");
 }
 
 /// There is no keyless Account: a compatible Account (added through the
@@ -2713,7 +2930,7 @@ async fn test_of_a_compatible_account_without_a_key_sends_nothing() {
 async fn test_never_follows_a_hand_written_base_url_outside_the_endpoint_rules() {
     let env = env();
     let root = four_kinds_added(&env).await;
-    let written = read(&root, ACCOUNTS_FILE).unwrap();
+    let written = env.user_text().unwrap();
 
     // An OpenAI Account with a `base_url` line added under its provider.
     let provider_line = written
@@ -2727,9 +2944,9 @@ async fn test_never_follows_a_hand_written_base_url_outside_the_endpoint_rules()
         1,
     );
     assert_ne!(edited, written);
-    std::fs::write(root.join(ACCOUNTS_FILE), &edited).unwrap();
+    std::fs::write(env.accounts_path(), &edited).unwrap();
     assert!(
-        file_accounts(&root)
+        file_accounts(&env)
             .iter()
             .any(|a| a.0 == "oa" && a.3.as_deref() == Some("https://elsewhere.example/v1")),
         "the loader reads the hand-written base_url: {edited}"
@@ -2756,7 +2973,7 @@ async fn test_never_follows_a_hand_written_base_url_outside_the_endpoint_rules()
     ] {
         let edited = written.replace(from, to);
         assert_ne!(edited, written, "{id}");
-        std::fs::write(root.join(ACCOUNTS_FILE), &edited).unwrap();
+        std::fs::write(env.accounts_path(), &edited).unwrap();
         let ran = refused_test(&env, &root, id).await;
         assert!(
             ran.all().contains("base_url"),
@@ -2780,19 +2997,19 @@ async fn test_never_follows_a_hand_written_base_url_outside_the_endpoint_rules()
 // of the Account names the same provider, scheme, host and port. It still
 // runs from any stdin.
 
-/// The History entries of `models/accounts.yaml` the commands made, oldest
-/// first.
-fn accounts_history(env: &Env, root: &Path) -> Vec<HistoryEntry> {
-    env.history(root)
+/// The History entries of the user Accounts file the commands made,
+/// oldest first.
+fn accounts_history(env: &Env) -> Vec<HistoryEntry> {
+    env.history()
         .into_iter()
-        .filter(|e| e.file == ACCOUNTS_FILE)
+        .filter(|e| e.file == USER_FILE)
         .collect()
 }
 
-/// The Accounts the file holds now, as its loader reads them (the project
-/// around it need not be valid).
-fn file_accounts(root: &Path) -> Vec<Held> {
-    let file = am_config::accounts_file(root);
+/// The Accounts the user file holds now, as its reader reads them (entries
+/// with an error included).
+fn file_accounts(env: &Env) -> Vec<Held> {
+    let file = am_config::accounts_file(env.places.user.dir());
     assert_eq!(file.problem, None);
     file.accounts
         .into_iter()
@@ -2800,14 +3017,11 @@ fn file_accounts(root: &Path) -> Vec<Held> {
         .collect()
 }
 
-/// Writes an older entry's bytes back through the app's writer (History's
-/// Restore): a write the app made, which carries no `account_added` note.
-fn restore(env: &Env, root: &Path, entry: &HistoryEntry) {
-    let (store, _) = am_store::open_runtime(&env.layout(root), "Test Mac".into()).unwrap();
-    let writer =
-        am_config::ConfigWriter::open(root, Arc::new(StoreConfigHistory::new(&store).unwrap()))
-            .unwrap();
-    writer.restore(owner(), &entry.id).unwrap();
+/// Writes an older entry's bytes back through the app's writer of the user
+/// file (History's Restore), under `user.lock`: a write the app made, which
+/// carries no `account_added` note.
+fn restore(env: &Env, entry: &HistoryEntry) {
+    env.user_writer().restore(owner(), &entry.id).unwrap();
 }
 
 async fn remove_account(env: &Env, root: &Path, id: &str) {
@@ -2826,7 +3040,7 @@ async fn remove_account(env: &Env, root: &Path, id: &str) {
 async fn test_refuses_a_base_url_edited_by_hand_after_the_add() {
     let env = env();
     let root = four_kinds_added(&env).await;
-    let written = read(&root, ACCOUNTS_FILE).unwrap();
+    let written = env.user_text().unwrap();
 
     for (id, from, to) in [
         ("router", "openrouter.example", "elsewhere.example"),
@@ -2834,9 +3048,9 @@ async fn test_refuses_a_base_url_edited_by_hand_after_the_add() {
     ] {
         let edited = written.replace(from, to);
         assert_ne!(edited, written, "{id}: the edit changes the file");
-        std::fs::write(root.join(ACCOUNTS_FILE), &edited).unwrap();
+        std::fs::write(env.accounts_path(), &edited).unwrap();
         assert!(
-            file_accounts(&root)
+            file_accounts(&env)
                 .iter()
                 .any(|a| a.0 == id && a.3.as_deref().is_some_and(|u| u.contains(to))),
             "{id}: the edited file is valid config naming {to}"
@@ -2845,7 +3059,7 @@ async fn test_refuses_a_base_url_edited_by_hand_after_the_add() {
         let ran = refused_test(&env, &root, id).await;
         assert_says_not_confirmed(&ran, id);
         assert!(
-            ran.all().contains(ACCOUNTS_FILE),
+            ran.all().contains(USER_FILE),
             "{id}: it names the file: {}",
             ran.all()
         );
@@ -2856,7 +3070,7 @@ async fn test_refuses_a_base_url_edited_by_hand_after_the_add() {
         }
     }
 
-    std::fs::write(root.join(ACCOUNTS_FILE), &written).unwrap();
+    std::fs::write(env.accounts_path(), &written).unwrap();
     let kit = Kit::new(FakeTerminal::piped()).with_key("router", ROUTER_CANARY);
     kit.egress
         .replay("openrouter.example", "openai_compat/reasoning.sse");
@@ -2880,7 +3094,7 @@ async fn test_refuses_a_base_url_edited_by_hand_after_the_add() {
 async fn test_refuses_a_provider_edited_by_hand_after_the_add() {
     let env = env();
     let root = four_kinds_added(&env).await;
-    let written = read(&root, ACCOUNTS_FILE).unwrap();
+    let written = env.user_text().unwrap();
 
     for (id, from, to) in [
         ("cloud", "provider: anthropic", "provider: openai"),
@@ -2888,10 +3102,10 @@ async fn test_refuses_a_provider_edited_by_hand_after_the_add() {
     ] {
         let edited = written.replacen(from, to, 1);
         assert_ne!(edited, written, "{id}: the edit changes the file");
-        std::fs::write(root.join(ACCOUNTS_FILE), &edited).unwrap();
+        std::fs::write(env.accounts_path(), &edited).unwrap();
         let provider = to.trim().trim_start_matches("provider: ");
         assert!(
-            file_accounts(&root)
+            file_accounts(&env)
                 .iter()
                 .any(|a| a.0 == id && a.1 == provider),
             "{id}: the edited file is valid config with provider {provider}"
@@ -2910,42 +3124,43 @@ async fn test_refuses_a_provider_edited_by_hand_after_the_add() {
 async fn test_refuses_an_account_that_was_never_added() {
     // Opened on this Mac; the file was never written by the app.
     let env = env();
-    let root = env.usual(&[(ACCOUNTS_FILE, four_kinds())]);
+    let root = env.usual(&[]);
+    env.write_user_file(&four_kinds());
     for id in ["cloud", "oa", "router", "llama"] {
         let ran = refused_test(&env, &root, id).await;
         assert_says_not_confirmed(&ran, id);
     }
-    assert!(env.history(&root).is_empty(), "nothing was written");
+    assert!(env.history().is_empty(), "nothing was written");
 
-    // Never opened on this Mac: no project id, no runtime folder.
-    let fresh = self::env();
-    let folder = fresh.folder(
+    // Story 2.12: an old project file is never read to send a key. A
+    // project still holding `models/accounts.yaml` (never migrated), on a
+    // Mac whose user list lacks its ids: `test` of such an id is refused
+    // before any Keychain read, from inside that project.
+    let legacy = self::env();
+    let folder = legacy.project(
         "p",
         &[
             ("company.yaml", COMPANY.to_string()),
-            (ACCOUNTS_FILE, four_kinds()),
+            (LEGACY_FILE, four_kinds()),
         ],
     );
     for id in ["cloud", "oa", "router", "llama"] {
-        let ran = refused_test(&fresh, &folder, id).await;
-        assert_says_not_confirmed(&ran, id);
+        let ran = refused_test(&legacy, &folder, id).await;
+        assert!(ran.all().contains(id), "{id}: {}", ran.all());
     }
-    assert!(!fresh.places.base.dir().exists(), "no runtime folder made");
-    assert!(!open_marker(&folder).exists(), "no marker is written");
+    assert!(!legacy.accounts_path().exists(), "no user file is made");
 
-    // Added, but the database is older than this version: it is not read
-    // (and never migrated by `test`).
-    let older = self::env();
-    let root = four_kinds_added(&older).await;
-    let db = older.layout(&root).state_db();
-    std::fs::remove_file(&db).unwrap();
-    am_store::testing::database_at_version(&db, SCHEMA_VERSION - 1).unwrap();
-    let db_before = std::fs::read(&db).unwrap();
+    // Added, then the user store is lost (deleted): every Account is to be
+    // re-confirmed; the keys stay in the Keychain.
+    let lost = self::env();
+    let root = four_kinds_added(&lost).await;
+    for side in ["user.db", "user.db-wal", "user.db-shm"] {
+        let _ = std::fs::remove_file(lost.places.user.dir().join(side));
+    }
     for id in ["cloud", "router"] {
-        let ran = refused_test(&older, &root, id).await;
+        let ran = refused_test(&lost, &root, id).await;
         assert_says_not_confirmed(&ran, id);
     }
-    assert_eq!(std::fs::read(&db).unwrap(), db_before, "not migrated");
 }
 
 /// An Account added, then removed, then put back into the file by hand
@@ -2955,10 +3170,10 @@ async fn test_refuses_an_account_that_was_never_added() {
 async fn test_refuses_an_account_removed_and_put_back_by_hand() {
     let env = env();
     let root = four_kinds_added(&env).await;
-    let with_router = read(&root, ACCOUNTS_FILE).unwrap();
+    let with_router = env.user_text().unwrap();
     remove_account(&env, &root, "router").await;
-    assert!(!read(&root, ACCOUNTS_FILE).unwrap().contains("router"));
-    std::fs::write(root.join(ACCOUNTS_FILE), &with_router).unwrap();
+    assert!(!env.user_text().unwrap().contains("router"));
+    std::fs::write(env.accounts_path(), &with_router).unwrap();
 
     let ran = refused_test(&env, &root, "router").await;
     assert_says_not_confirmed(&ran, "router");
@@ -2994,10 +3209,10 @@ async fn test_refuses_what_the_latest_add_of_the_account_did_not_record() {
         ROUTER_CANARY,
     )
     .await;
-    let first_add = accounts_history(&env, &root).remove(0);
-    restore(&env, &root, &first_add);
+    let first_add = accounts_history(&env).remove(0);
+    restore(&env, &first_add);
     assert_eq!(
-        file_accounts(&root),
+        file_accounts(&env),
         vec![held("router", "openai-compatible", None, Some(REMOTE_URL))],
         "the app wrote the first endpoint back"
     );
@@ -3019,10 +3234,10 @@ async fn test_refuses_what_the_latest_add_of_the_account_did_not_record() {
     .await;
     remove_account(&env, &root, "oa").await;
     add_account(&env, &root, "oa", "openai", None, OA_CANARY).await;
-    let first_add = accounts_history(&env, &root).remove(0);
-    restore(&env, &root, &first_add);
+    let first_add = accounts_history(&env).remove(0);
+    restore(&env, &first_add);
     assert_eq!(
-        file_accounts(&root),
+        file_accounts(&env),
         vec![held("oa", "openai-compatible", None, Some(OPENAI_URL))]
     );
     let ran = refused_test(&env, &root, "oa").await;
@@ -3060,6 +3275,9 @@ async fn add_says_before_the_id_is_typed_that_a_held_key_will_go_to_the_endpoint
         let root = plain(&env);
         let kit = Kit::new(FakeTerminal::new()).with_key(id, EARLIER);
         kit.term.line(id);
+        // Story 2.12: no confirmation of this id for this endpoint yet, so
+        // the stored key is typed at the hidden prompt.
+        kit.term.line(EARLIER);
         let ran = kit.run(&env, &root, &args).await;
         assert_eq!(ran.code, 0, "{id}: {}", ran.all());
         let prompt = ran
@@ -3076,7 +3294,11 @@ async fn add_says_before_the_id_is_typed_that_a_held_key_will_go_to_the_endpoint
                 "{id}: before the id is typed, the sentence says \"{words}\": {sentence}"
             );
         }
-        assert_eq!(kit.term.reads(), 1, "{id}: only the id is read");
+        assert_eq!(
+            kit.term.echo_reads(),
+            vec![true, false],
+            "{id}: the id, then the stored key with echo off"
+        );
         assert_eq!(kit.key(id).as_deref(), Some(EARLIER), "never overwritten");
         assert!(!ran.all().contains(EARLIER), "{id}: the key is never shown");
         assert!(!ran.all().contains(&EARLIER[..12]), "{id}: nor its head");
@@ -3112,7 +3334,8 @@ async fn add_says_before_the_id_is_typed_that_a_held_key_will_go_to_the_endpoint
 async fn test_and_list_of_an_entry_with_an_error_point_at_validate() {
     let env = env();
     let yaml = "schema_version: 2\naccounts:\n  - id: cloud\n    provider: anthropic\n    secret_ref: cloud\n  - id: oa\n    provider: openai\n    base_url: http://example.org/v1\n    secret_ref: oa\n  - id: box\n    provider: openai-compatible\n    base_url: http://localhost:8080/v1\n    secret_ref: box\n  - id: odd\n    provider: anthropic\n    surprise: true\n    secret_ref: odd\n";
-    let root = env.usual(&[(ACCOUNTS_FILE, yaml.to_string())]);
+    let root = env.usual(&[]);
+    env.write_user_file(yaml);
 
     for id in ["oa", "box", "odd"] {
         let ran = refused_test(&env, &root, id).await;
@@ -3165,15 +3388,17 @@ async fn test_and_list_of_an_entry_with_an_error_point_at_validate() {
 // ------------------------------- second review of story 2.3: no lock taken
 
 /// `accounts test` takes no lock: while another process holds the project's
-/// store (the app is serving it), a confirmed Account is still read from
-/// the store read-only and answers, on any stdin. The holder keeps its
-/// lock, and nothing is written.
+/// store (the app is serving it) and another holds `user.lock` (story
+/// 2.12: a write in progress that has not touched the file), a confirmed
+/// Account is still read from the user store read-only and answers, on any
+/// stdin. The holders keep their locks, and nothing is written.
 #[tokio::test]
 async fn test_answers_while_another_process_holds_the_store() {
     let env = env();
     let root = four_kinds_added(&env).await;
-    let before = read(&root, ACCOUNTS_FILE);
+    let before = env.user_text();
     let (held, _) = am_store::open_runtime(&env.layout(&root), "Holder Mac".into()).unwrap();
+    let user_held = UserStore::locked(&env.places.user, Duration::from_secs(10)).unwrap();
 
     let kit = Kit::new(FakeTerminal::piped()).with_key("cloud", CANARY);
     kit.egress
@@ -3199,7 +3424,12 @@ async fn test_answers_while_another_process_holds_the_store() {
         am_store::lock_is_held(&env.layout(&root)),
         "the holder still has the lock"
     );
-    assert_eq!(read(&root, ACCOUNTS_FILE), before);
+    assert_eq!(env.user_text(), before);
+    assert!(
+        UserStore::locked(&env.places.user, Duration::from_millis(100)).is_err(),
+        "the user lock's holder still has it"
+    );
+    drop(user_held);
     drop(held);
 }
 
@@ -3207,9 +3437,10 @@ async fn test_answers_while_another_process_holds_the_store() {
 
 // Decision 8 (owner, 2026-11-22): AD-15's Key use check moves out of
 // `accounts test` into the egress directory, so every path that sends a
-// key gets it. `am_app::egress::ProjectDirectory::open(root, places)` reads
-// the project's config and its store read-only (no lock, no edit) and
-// answers for an Account only while it is confirmed: `models/accounts.yaml`
+// key gets it. Story 2.12: `am_app::egress::ProjectDirectory::open(root,
+// places)` resolves an Account id from this Mac's user list through
+// `am_app::key_use`, read-only (no lock, no edit), and answers for an
+// Account only while it is confirmed: the user Accounts file
 // holds exactly the bytes of its latest History entry, and the latest
 // `account_added` note names the same provider, scheme, host and port. The
 // reserved local Accounts skip the check (AD-31). Written first.
@@ -3241,8 +3472,8 @@ fn every_account_refused(directory: &dyn EgressDirectory, why: &str) {
 async fn the_project_directory_answers_an_account_added_through_the_command() {
     let env = env();
     let root = four_kinds_added(&env).await;
-    let before = read(&root, ACCOUNTS_FILE);
-    let recorded = env.history(&root).len();
+    let before = env.user_text();
+    let recorded = env.history().len();
 
     let directory = project_directory(&env, &root);
     for (id, at) in [
@@ -3260,8 +3491,8 @@ async fn the_project_directory_answers_an_account_added_through_the_command() {
         "a configured seat with no allowed_hosts reaches nothing"
     );
 
-    assert_eq!(read(&root, ACCOUNTS_FILE), before, "no edit");
-    assert_eq!(env.history(&root).len(), recorded, "nothing recorded");
+    assert_eq!(env.user_text(), before, "no edit");
+    assert_eq!(env.history().len(), recorded, "nothing recorded");
 }
 
 /// A hand edit of `models/accounts.yaml` after the adds (a `base_url`, or a
@@ -3272,7 +3503,7 @@ async fn the_project_directory_answers_an_account_added_through_the_command() {
 async fn the_project_directory_refuses_every_account_of_a_hand_edited_file() {
     let env = env();
     let root = four_kinds_added(&env).await;
-    let written = read(&root, ACCOUNTS_FILE).unwrap();
+    let written = env.user_text().unwrap();
 
     for (what, from, to) in [
         ("base_url host", "openrouter.example", "elsewhere.example"),
@@ -3281,12 +3512,12 @@ async fn the_project_directory_refuses_every_account_of_a_hand_edited_file() {
     ] {
         let edited = written.replacen(from, to, 1);
         assert_ne!(edited, written, "{what}: the edit changes the file");
-        std::fs::write(root.join(ACCOUNTS_FILE), &edited).unwrap();
+        std::fs::write(env.accounts_path(), &edited).unwrap();
         let directory = project_directory(&env, &root);
         every_account_refused(&directory, what);
     }
 
-    std::fs::write(root.join(ACCOUNTS_FILE), &written).unwrap();
+    std::fs::write(env.accounts_path(), &written).unwrap();
     let directory = project_directory(&env, &root);
     assert_eq!(
         directory.account_endpoint("router"),
@@ -3299,7 +3530,8 @@ async fn the_project_directory_refuses_every_account_of_a_hand_edited_file() {
 #[tokio::test]
 async fn the_project_directory_refuses_an_account_never_added() {
     let env = env();
-    let root = env.usual(&[(ACCOUNTS_FILE, four_kinds())]);
+    let root = env.usual(&[]);
+    env.write_user_file(&four_kinds());
     let directory = project_directory(&env, &root);
     every_account_refused(&directory, "never added");
 }
@@ -3311,9 +3543,9 @@ async fn the_project_directory_refuses_an_account_never_added() {
 async fn the_project_directory_refuses_an_account_removed_and_put_back_by_hand() {
     let env = env();
     let root = four_kinds_added(&env).await;
-    let with_router = read(&root, ACCOUNTS_FILE).unwrap();
+    let with_router = env.user_text().unwrap();
     remove_account(&env, &root, "router").await;
-    std::fs::write(root.join(ACCOUNTS_FILE), &with_router).unwrap();
+    std::fs::write(env.accounts_path(), &with_router).unwrap();
     let directory = project_directory(&env, &root);
     every_account_refused(&directory, "removed and put back");
 }
@@ -3326,9 +3558,9 @@ async fn the_project_directory_refuses_an_account_removed_and_put_back_by_hand()
 async fn an_unconfirmed_accounts_request_reads_no_key_and_is_audited() {
     let env = env();
     let root = four_kinds_added(&env).await;
-    let written = read(&root, ACCOUNTS_FILE).unwrap();
+    let written = env.user_text().unwrap();
     std::fs::write(
-        root.join(ACCOUNTS_FILE),
+        env.accounts_path(),
         written.replacen("openrouter.example", "elsewhere.example", 1),
     )
     .unwrap();
@@ -3453,8 +3685,8 @@ async fn test_of_an_account_on_the_apps_own_port_is_refused_with_no_key_read() {
 }
 
 /// Story 2.2 review (2): an `account_added` note confirms an Account only
-/// when the owner confirmed it (`Actor::Human`) on an intent of
-/// `models/accounts.yaml`. The same note written by a System actor, or
+/// when the owner confirmed it (`Actor::Human`) on an intent of the user
+/// Accounts file (story 2.12: in the user store). The same note written by a System actor, or
 /// carried by another file's History entry (`company.yaml`), does not; the
 /// control, the owner on the Accounts file's own intent, does.
 #[tokio::test]
@@ -3470,12 +3702,13 @@ async fn a_note_by_a_system_actor_or_with_another_files_entry_does_not_confirm()
         target: "router".into(),
         args: [
             ("kind", "account_added"),
-            ("file", ACCOUNTS_FILE),
+            ("file", USER_FILE),
             ("account", "router"),
             ("provider", "openai-compatible"),
             ("scheme", "https"),
             ("host", "openrouter.example"),
             ("port", "443"),
+            ("key", "stored"),
         ]
         .into_iter()
         .map(|(k, v)| (k.to_string(), v.to_string()))
@@ -3498,24 +3731,25 @@ async fn a_note_by_a_system_actor_or_with_another_files_entry_does_not_confirm()
         ("the owner, on company.yaml's intent", false),
     ] {
         let env = env();
-        let root = env.usual(&[(ACCOUNTS_FILE, four_kinds())]);
-        let bytes = std::fs::read(root.join(ACCOUNTS_FILE)).unwrap();
+        let root = env.usual(&[]);
+        env.write_user_file(&four_kinds());
+        let bytes = std::fs::read(env.accounts_path()).unwrap();
         {
-            let (store, _) = am_store::open_runtime(&env.layout(&root), "Test Mac".into()).unwrap();
-            let history = StoreConfigHistory::new(&store).unwrap();
+            // Story 2.12: the records live in the user store.
+            let history = UserStore::locked(&env.places.user, Duration::from_secs(10)).unwrap();
             let write = |actor: Actor, intent: NewIntent| {
                 let id = history.begin_intent(actor.clone(), intent).unwrap();
                 history.commit_entry(actor, id).unwrap();
             };
             match case {
                 c if c.starts_with("the owner, on the Accounts") => {
-                    write(owner(), created(ACCOUNTS_FILE, &bytes, vec![note.clone()]))
+                    write(owner(), created(USER_FILE, &bytes, vec![note.clone()]))
                 }
                 c if c.starts_with("a System actor") => {
-                    write(system(), created(ACCOUNTS_FILE, &bytes, vec![note.clone()]))
+                    write(system(), created(USER_FILE, &bytes, vec![note.clone()]))
                 }
                 _ => {
-                    write(owner(), created(ACCOUNTS_FILE, &bytes, Vec::new()));
+                    write(owner(), created(USER_FILE, &bytes, Vec::new()));
                     write(
                         owner(),
                         created("company.yaml", b"x: 1\n", vec![note.clone()]),
@@ -3548,7 +3782,7 @@ async fn a_note_by_a_system_actor_or_with_another_files_entry_does_not_confirm()
 async fn every_running_servers_port_is_refused_and_a_stale_record_removed() {
     let env = env();
     let root = four_kinds_added(&env).await;
-    let running = am_domain::runtime::serving_dir(&env.places.app_data);
+    let running = env.places.user.serving_dir();
     std::fs::create_dir_all(&running).unwrap();
     std::fs::write(running.join(std::process::id().to_string()), "8080\n").unwrap();
     std::fs::write(

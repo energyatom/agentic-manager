@@ -55,7 +55,7 @@ pub(crate) const COMPANY_KEYS: &[&str] = &[
     "hats",
 ];
 
-/// The top-level keys of `models/accounts.yaml`, in schema order: the loader's allow-list
+/// The top-level keys of this Mac's user Accounts file (`accounts.yaml`), in schema order: the loader's allow-list
 /// and the writer's canonical order (story 1.8).
 pub(crate) const ACCOUNTS_KEYS: &[&str] = &["schema_version", "accounts"];
 
@@ -478,9 +478,9 @@ pub(crate) fn company(
     })
 }
 
-/// `models/accounts.yaml`.
+/// The user Accounts file (`<app data dir>/accounts.yaml`, AD-17).
 pub(crate) fn accounts(rep: &mut Report, root: &Node) -> Vec<Account> {
-    let Some(f) = fields(rep, root, "models/accounts.yaml") else {
+    let Some(f) = fields(rep, root, "accounts.yaml") else {
         return Vec::new();
     };
     f.allow(rep, ACCOUNTS_KEYS);
@@ -556,6 +556,23 @@ pub(crate) fn accounts(rep: &mut Report, root: &Node) -> Vec<Account> {
                 },
             );
         }
+        // A key is read only from the entry named by the Account's own id
+        // (AD-17): `secret_ref`, when present, must say so.
+        let secret_ref = a.text(rep, "secret_ref");
+        if let (Some(id), Some(entry)) = (&id, &secret_ref)
+            && entry.value != id.value
+        {
+            // The value is never quoted: a key pasted here is not repeated
+            // (AD-17).
+            rep.error(
+                entry.line,
+                format!(
+                    "secret_ref names another Keychain entry than the Account's own id '{}'; a key is only ever read from the entry named by the Account's id",
+                    id.value
+                ),
+                format!("write `secret_ref: {}`, or remove the line", id.value),
+            );
+        }
         if let Some(id) = &id {
             ids.push(id.clone());
         }
@@ -568,7 +585,7 @@ pub(crate) fn accounts(rep: &mut Report, root: &Node) -> Vec<Account> {
                 kind,
                 name: value(a.text(rep, "name")),
                 base_url: value(base_url),
-                secret_ref: value(a.text(rep, "secret_ref")),
+                secret_ref: value(secret_ref),
             });
         }
     }
@@ -3009,14 +3026,6 @@ pub(crate) fn declared_ids(root: &Node, key: &str) -> Vec<String> {
     items_at(root, key)
         .into_iter()
         .filter_map(|item| str_at(item, "id"))
-        .collect()
-}
-
-/// The `(id, provider)` of each Account declared in accounts.yaml.
-pub(crate) fn declared_account_providers(root: &Node) -> Vec<(String, String)> {
-    items_at(root, "accounts")
-        .into_iter()
-        .filter_map(|item| Some((str_at(item, "id")?, str_at(item, "provider")?)))
         .collect()
 }
 

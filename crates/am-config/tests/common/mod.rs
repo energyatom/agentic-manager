@@ -4,7 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
-use am_config::{ConfigSnapshot, Finding, Severity, load};
+use am_config::{ConfigSnapshot, Finding, LoadOptions, Severity, UserAccounts, load, load_in};
 
 pub fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -34,6 +34,39 @@ pub fn edit(root: &Path, rel: &str, from: &str, to: &str) {
     let text = std::fs::read_to_string(root.join(rel)).unwrap();
     assert!(text.contains(from), "{rel} has no `{from}`");
     write(root, rel, &text.replacen(from, to, 1));
+}
+
+/// `fixtures/accounts/<variant>.yaml`: the user-level Accounts a fixture
+/// project names (story 2.12, AD-17). Tests hand it to the loader by path;
+/// they never read the real app data dir.
+pub fn accounts_fixture(variant: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../fixtures/accounts")
+        .join(format!("{variant}.yaml"))
+}
+
+/// The user list of a valid `fixtures/accounts/<variant>.yaml` (it loads
+/// with no finding).
+pub fn user_accounts(variant: &str) -> UserAccounts {
+    let loaded = am_config::user_accounts::load(&accounts_fixture(variant));
+    assert!(
+        loaded.findings.is_empty(),
+        "{variant}: {:#?}",
+        loaded.findings
+    );
+    loaded.accounts
+}
+
+/// The findings of the project at `root` with the user list of `variant`
+/// passed, as `agentic validate` passes this Mac's list.
+pub fn findings_with(root: &Path, variant: &str) -> Vec<Finding> {
+    let opts = LoadOptions {
+        user_accounts: Some(user_accounts(variant)),
+        ..LoadOptions::default()
+    };
+    load_in(root, opts)
+        .expect("the project folder exists")
+        .findings
 }
 
 pub fn findings(root: &Path) -> Vec<Finding> {

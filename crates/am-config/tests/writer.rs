@@ -86,9 +86,8 @@ fn values(s: &ConfigSnapshot) -> String {
         src.text.clear();
     }
     format!(
-        "{:?}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}",
+        "{:?}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}",
         s.company(),
-        s.accounts(),
         s.prices(),
         s.capabilities(),
         s.tools(),
@@ -354,7 +353,7 @@ fn writer_allows_fixing_two_broken_files_one_at_a_time() {
             reviewer(),
             edit(
                 BETA,
-                vec![set(&["model", "account"], json!("no-such-account"))],
+                vec![set(&["model", "account"], json!("No_Such_Account"))],
             ),
         )
         .unwrap_err();
@@ -368,7 +367,7 @@ fn writer_allows_fixing_two_broken_files_one_at_a_time() {
     assert!(
         findings
             .iter()
-            .any(|f| f.message.contains("no-such-account")),
+            .any(|f| f.message.contains("No_Such_Account")),
         "{findings:#?}"
     );
     assert_eq!(read(root, BETA), before, "nothing written");
@@ -670,7 +669,6 @@ fn writer_config_files_lists_every_known_config_file_only() {
         [
             "company.yaml",
             "dashboards/overview.yaml",
-            "models/accounts.yaml",
             "models/capabilities.yaml",
             "models/prices.yaml",
             "schemas/summary.json",

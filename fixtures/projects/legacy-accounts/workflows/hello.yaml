@@ -1,0 +1,8 @@
+schema_version: 2
+name: Hello
+team: core
+description: One step that asks for one line.
+steps:
+  - id: greet
+    seat: alpha
+    instruction: Say hello in one line.

@@ -150,6 +150,9 @@ pub(crate) struct Known {
     pub mcp_tools: BTreeSet<String>,
     /// Account id → provider as written.
     pub account_providers: BTreeMap<String, String>,
+    /// `accounts` and `account_providers` hold this Mac's user list (story
+    /// 2.12); otherwise an Account reference is checked for form only.
+    pub user_list: bool,
     pub skills: BTreeSet<String>,
     /// Table id → its column ids, when its file declared them readably.
     pub tables: BTreeMap<String, Option<BTreeSet<String>>>,
@@ -278,6 +281,17 @@ fn cycles<'e>(edges: &[&'e Edge]) -> Vec<(Vec<String>, &'e Edge)> {
     found
 }
 
+/// An Account id this Mac's user list lacks (story 2.12, AD-17): a
+/// Warning, since the project is valid on a Mac that has it; a run or call
+/// that needs it is refused in words.
+fn missing_account(rep: &mut Report, line: u32, id: &str) {
+    rep.warning(
+        line,
+        format!("the Account '{id}' is not on this Mac"),
+        format!("add that Account on this Mac: `agentic accounts add {id}`"),
+    );
+}
+
 fn check(r: &PendingRef, known: &Known, rep: &mut Report) {
     let id = r.id.as_str();
     match &r.kind {
@@ -306,17 +320,8 @@ fn check(r: &PendingRef, known: &Known, rep: &mut Report) {
             }
         }
         RefKind::Account => {
-            if !known.accounts.contains(id) && !RESERVED_ACCOUNTS.contains(&id) {
-                let mut all: BTreeSet<String> = known.accounts.clone();
-                all.extend(RESERVED_ACCOUNTS.iter().map(|s| s.to_string()));
-                rep.error(
-                    r.line,
-                    format!("unknown account '{id}'"),
-                    format!(
-                        "use an Account from models/accounts.yaml or a local one: {}",
-                        list(all.iter())
-                    ),
-                );
+            if known.user_list && !known.accounts.contains(id) && !RESERVED_ACCOUNTS.contains(&id) {
+                missing_account(rep, r.line, id);
             }
         }
         RefKind::Schema => {
@@ -400,18 +405,9 @@ fn check(r: &PendingRef, known: &Known, rep: &mut Report) {
             let declared = known.accounts.contains(id);
             let reserved = RESERVED_ACCOUNTS.contains(&id);
             if !declared && !reserved {
-                let mut all: BTreeSet<String> = known.accounts.clone();
-                if *want == AccountKind::Model {
-                    all.extend(RESERVED_ACCOUNTS.iter().map(|s| s.to_string()));
+                if known.user_list {
+                    missing_account(rep, r.line, id);
                 }
-                rep.error(
-                    r.line,
-                    format!("unknown account '{id}'"),
-                    format!(
-                        "use an Account from models/accounts.yaml: {}",
-                        list(all.iter())
-                    ),
-                );
                 return;
             }
             let kind = if reserved {
@@ -438,7 +434,7 @@ fn check(r: &PendingRef, known: &Known, rep: &mut Report) {
                         want.as_str()
                     ),
                     format!(
-                        "{choice} a {} Account (provider {providers}) from models/accounts.yaml",
+                        "{choice} a {} Account (provider {providers}) from this Mac's Accounts (`agentic accounts list`)",
                         want.as_str()
                     ),
                 );

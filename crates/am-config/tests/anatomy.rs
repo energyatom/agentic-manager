@@ -7,7 +7,7 @@
 mod common;
 
 use am_config::Severity;
-use am_domain::capability::{AccountKind, Capability};
+use am_domain::capability::Capability;
 use am_domain::runtime::LEGACY_DIR;
 use am_domain::workspace::Access;
 use common::*;
@@ -320,7 +320,8 @@ fn unknown_capabilities_and_missing_on_are_errors() {
 
 #[test]
 fn a_provider_account_of_the_wrong_kind_is_an_error() {
-    let found = findings(&fixture("broken-anatomy"));
+    // Story 2.12: the kind is known only from the user list (AD-17).
+    let found = findings_with(&fixture("broken-anatomy"), "anatomy");
     let f = at(&found, "seats/searcher.md", 9, "crawly");
     assert_eq!(f.severity, Severity::Error);
     assert!(f.message.contains("crawl-service"), "{}", f.message);
@@ -336,49 +337,14 @@ fn built_in_only_capabilities_refuse_an_account() {
         "team: core\n",
         "team: core\ncapabilities:\n  tables:\n    on: true\n    provider: finder\n",
     );
-    let found = findings(copy.path());
+    let found = findings_with(copy.path(), "anatomy");
     let f = at(&found, "seats/plain.md", 9, "finder");
     assert!(f.fix.contains("builtin"), "{}", f.fix);
 }
 
-#[test]
-fn account_kinds_follow_the_provider() {
-    let snap = snapshot(&fixture("anatomy"));
-    let kinds: Vec<(&str, AccountKind)> = snap
-        .accounts()
-        .iter()
-        .map(|a| (a.id.as_str(), a.kind))
-        .collect();
-    assert_eq!(
-        kinds,
-        [
-            ("finder", AccountKind::Search),
-            ("crawly", AccountKind::CrawlService)
-        ]
-    );
-    let valid = snapshot(&fixture("valid"));
-    assert_eq!(valid.accounts()[0].kind, AccountKind::Model);
-}
-
-#[test]
-fn firecrawl_and_searxng_remote_need_a_base_url() {
-    let copy = copy_of("anatomy");
-    edit(
-        copy.path(),
-        "models/accounts.yaml",
-        "    base_url: https://crawl.example.org\n",
-        "",
-    );
-    edit(
-        copy.path(),
-        "models/accounts.yaml",
-        "provider: tavily",
-        "provider: searxng-remote",
-    );
-    let found = findings(copy.path());
-    at(&found, "models/accounts.yaml", 3, "base_url");
-    at(&found, "models/accounts.yaml", 7, "base_url");
-}
+// Story 2.12: `account_kinds_follow_the_provider` and
+// `firecrawl_and_searxng_remote_need_a_base_url` moved to user_accounts.rs
+// with the Accounts file (AD-17).
 
 // Row: full seat.
 
@@ -483,7 +449,7 @@ fn broken_skills_and_seat_give_one_error_each() {
         .collect();
     assert_eq!(scripted.len(), 2, "{scripted:#?}");
     // Every other seat file in the set holds its own one problem only.
-    assert_eq!(errors(&found).len(), 11, "{found:#?}");
+    assert_eq!(errors(&found).len(), 10, "{found:#?}");
 }
 
 // Row: soft problems.

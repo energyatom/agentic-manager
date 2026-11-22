@@ -1,7 +1,9 @@
-//! What the interim CLI Account edit needs from the project's files (story
-//! 2.1, AD-15): only this crate reads them (AD-16).
+//! What the interim CLI Account edit needs from the config files (story
+//! 2.1, AD-15): only this crate reads them (AD-16). Since story 2.12 (AD-17)
+//! the edit targets this Mac's user Accounts file,
+//! `<app data dir>/accounts.yaml`; the references stay in the projects.
 //!
-//! - [`accounts_file`] reads `models/accounts.yaml` as it is now: whether it
+//! - [`accounts_file`] reads the user Accounts file as it is now: whether it
 //!   exists, each listed Account's id in file order, and the Accounts the
 //!   loader accepts.
 //! - [`account_uses`] lists every place that names an Account id (a seat's
@@ -26,11 +28,9 @@ use crate::canon::{self, FileKind};
 use crate::finding::{Report, Severity};
 use crate::node::{Kind, Node};
 use crate::refs::RefKind;
+use crate::user_accounts::USER_ACCOUNTS_FILE;
 use crate::writer::sha256_hex;
 use crate::{Account, ConfigEdit, EditOp, Loader, WriteError, checks, kinds, tracked};
-
-/// The project-relative path of the Accounts file.
-pub const ACCOUNTS_FILE: &str = "models/accounts.yaml";
 
 /// The reserved local Account ids (AD-31): always resolvable, never listed
 /// in the file, never added or removed.
@@ -47,7 +47,7 @@ pub fn is_config_id(id: &str) -> bool {
     checks::is_kebab(id)
 }
 
-/// `models/accounts.yaml` as it is on disk now.
+/// The user Accounts file as it is on disk now.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AccountsFile {
     /// False when there is no such file (an add then creates it).
@@ -63,6 +63,8 @@ pub struct AccountsFile {
     /// Each item of `accounts:` in file order: its `id` as written, when it
     /// has one.
     pub ids: Vec<Option<String>>,
+    /// The line on which each item of `accounts:` starts, in file order.
+    pub lines: Vec<u32>,
     /// The Accounts the loader accepts (a known provider and an id).
     pub accounts: Vec<Account>,
     /// `accounts:` holds a list (an item is appended to it); otherwise the
@@ -128,18 +130,19 @@ fn at<'n>(node: &'n Node, key: &str) -> Option<&'n Node> {
         .map(|(_, v)| v)
 }
 
-/// Reads `models/accounts.yaml` of the project at `root`.
-pub fn accounts_file(root: &Path) -> AccountsFile {
+/// Reads the user Accounts file in the app data dir `app_data`.
+pub fn accounts_file(app_data: &Path) -> AccountsFile {
     let mut out = AccountsFile {
         exists: false,
         sha256: None,
         problem: None,
         ids: Vec::new(),
+        lines: Vec::new(),
         accounts: Vec::new(),
         list: false,
         errors: Vec::new(),
     };
-    let bytes = match std::fs::read(root.join(ACCOUNTS_FILE)) {
+    let bytes = match std::fs::read(app_data.join(USER_ACCOUNTS_FILE)) {
         Ok(b) => b,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return out,
         Err(e) => {
@@ -157,7 +160,8 @@ pub fn accounts_file(root: &Path) -> AccountsFile {
     let doc = match canon::parse(FileKind::Accounts, &text) {
         Ok(d) => d,
         Err(reason) => {
-            out.problem = Some(reason);
+            // Never a value from the file (AD-17).
+            out.problem = Some(crate::user_accounts::hide_text(&reason, &text, &[]));
             return out;
         }
     };
@@ -171,14 +175,17 @@ pub fn accounts_file(root: &Path) -> AccountsFile {
                 .map(|item| at(item, "id").and_then(text_of))
                 .collect();
             spans = items.iter().map(lines_of).collect();
+            out.lines = spans.iter().map(|(first, _)| *first).collect();
         }
         Some(_) => {
             out.problem = Some("its `accounts` is not a list".into());
             return out;
         }
     }
-    let mut rep = Report::new(ACCOUNTS_FILE);
+    let mut rep = Report::new(USER_ACCOUNTS_FILE);
     out.accounts = kinds::accounts(&mut rep, &doc.tree);
+    let valid = crate::user_accounts::valid_ids(&out.accounts);
+    crate::user_accounts::hide_values(&mut rep.findings, &text, &valid);
     // Each error of the loader, filed under the entry whose lines hold it.
     out.errors = spans
         .iter()
@@ -288,7 +295,7 @@ pub fn add_account_edit(
         }
     };
     ConfigEdit {
-        file: ACCOUNTS_FILE.into(),
+        file: USER_ACCOUNTS_FILE.into(),
         ops: vec![op],
         body: None,
     }
@@ -300,7 +307,7 @@ pub fn add_account_edit(
 pub fn remove_account_edit(file: &AccountsFile, id: &str) -> Option<ConfigEdit> {
     let index = file.ids.iter().position(|i| i.as_deref() == Some(id))?;
     Some(ConfigEdit {
-        file: ACCOUNTS_FILE.into(),
+        file: USER_ACCOUNTS_FILE.into(),
         ops: vec![EditOp::Remove {
             path: vec!["accounts".into(), index.to_string()],
         }],
@@ -308,7 +315,7 @@ pub fn remove_account_edit(file: &AccountsFile, id: &str) -> Option<ConfigEdit> 
     })
 }
 
-/// The canonical bytes of a new `models/accounts.yaml` holding one Account,
+/// The canonical bytes of a new user Accounts file holding one Account,
 /// for a [`crate::ConfigCreate`]. `base_url` is `None` for a provider with
 /// one fixed endpoint.
 pub fn new_accounts_file(
@@ -317,7 +324,7 @@ pub fn new_accounts_file(
     name: Option<&str>,
     base_url: Option<&str>,
 ) -> Result<Vec<u8>, WriteError> {
-    let bad = |e: String| WriteError::BadEdit(format!("{ACCOUNTS_FILE}: {e}"));
+    let bad = |e: String| WriteError::BadEdit(format!("{USER_ACCOUNTS_FILE}: {e}"));
     let head = format!("schema_version: {}\n", checks::SCHEMA_VERSION);
     let mut doc = canon::parse(FileKind::Accounts, &head).map_err(bad)?;
     let list = Value::Array(vec![account_item(id, provider, name, base_url)]);
@@ -329,7 +336,8 @@ pub fn new_accounts_file(
 /// entry wrote (an empty file is the same as no file), sorted: each is a
 /// change made outside the app that no Reload has applied yet (AD-16). A
 /// file with no History entry is not judged: nothing the app recorded says
-/// what it held.
+/// what it held. `root` is a project with its store's History, or the app
+/// data dir with the user store's (story 2.12: the user Accounts file).
 pub fn outside_changes(
     root: &Path,
     history: &dyn ConfigHistory,
@@ -345,7 +353,7 @@ pub fn outside_changes(
     }
     Ok(last
         .into_iter()
-        .filter(|(file, _)| tracked(file))
+        .filter(|(file, _)| tracked(file) || file == USER_ACCOUNTS_FILE)
         .filter(|(file, after)| {
             let on_disk = std::fs::read(root.join(file))
                 .ok()

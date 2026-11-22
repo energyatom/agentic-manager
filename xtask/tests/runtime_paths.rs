@@ -53,3 +53,39 @@ fn the_repository_is_clean() {
     let out = xtask(&["runtime-paths"]);
     assert!(out.status.success(), "{}", stderr(&out));
 }
+
+/// Story 2.12 (AD-17): `am_domain::runtime::AppDataLayout` joins
+/// `RuntimeLayout` as the only speller of the app data dir's store files:
+/// a literal naming the user store or its lock (`user.db`, `user.lock`, at
+/// the start or after a `/`) outside `crates/am-domain/src/runtime.rs`
+/// fails, naming file, line and the layout; the same literals in that file
+/// pass.
+#[test]
+fn a_planted_user_store_path_literal_fails_and_the_layout_file_passes() {
+    let tmp = tempfile::tempdir().unwrap();
+    write(
+        tmp.path(),
+        "crates/x/src/lib.rs",
+        "//! generic\n\npub const DB: &str = \"user.db\";\npub const LOCK: &str = \"/a/b/user.lock\";\n",
+    );
+    let out = scan(tmp.path());
+    let err = stderr(&out);
+    assert!(!out.status.success(), "a planted literal must fail: {err}");
+    assert!(err.contains("crates/x/src/lib.rs:3"), "{err}");
+    assert!(err.contains("crates/x/src/lib.rs:4"), "{err}");
+    assert!(err.contains("AppDataLayout"), "names the layout: {err}");
+
+    let tmp = tempfile::tempdir().unwrap();
+    write(
+        tmp.path(),
+        "crates/am-domain/src/runtime.rs",
+        "pub fn user_db() -> &'static str { \"user.db\" }\npub fn user_lock() -> &'static str { \"user.lock\" }\n",
+    );
+    write(
+        tmp.path(),
+        "crates/x/src/lib.rs",
+        "// the user.db of this Mac\npub const W: &str = \"a superuser.dbx name\";\n",
+    );
+    let out = scan(tmp.path());
+    assert!(out.status.success(), "{}", stderr(&out));
+}

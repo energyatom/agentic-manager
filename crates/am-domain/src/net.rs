@@ -117,6 +117,15 @@ pub fn reserved_local_account(account: &str) -> Option<Endpoint> {
     })
 }
 
+/// An Account's confirmation as a directory states it (AD-15 *Key use*):
+/// the endpoint it is confirmed for and a version naming the Accounts
+/// file's hash and the latest confirmation record. Never a secret.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountStamp {
+    pub endpoint: Endpoint,
+    pub version: String,
+}
+
 /// The one place the egress client learns what a caller may reach (AD-12,
 /// AD-48), answered from the pinned config snapshot. `None` means the id is
 /// unknown (or, for an Account, not confirmed), and the request is refused.
@@ -131,6 +140,19 @@ pub trait EgressDirectory: Send + Sync {
     /// words, when it knows (for example: not confirmed). Never a secret.
     fn account_refusal(&self, _account: &str) -> Option<String> {
         None
+    }
+    /// Where the Account's confirmation stands now (AD-15 *Key use*): the
+    /// endpoint it is confirmed for and a version that changes whenever its
+    /// confirmation record or the Accounts file changes; `None` when it is
+    /// not answered. The client takes it before resolving and again right
+    /// after its own key read, and sends the key only when both are present,
+    /// equal and name the endpoint the request goes to. A directory that
+    /// keeps no confirmations answers with its endpoint and no version.
+    fn account_stamp(&self, account: &str) -> Option<AccountStamp> {
+        self.account_endpoint(account).map(|endpoint| AccountStamp {
+            endpoint,
+            version: String::new(),
+        })
     }
     /// The ports the app's own servers are listening on (every running
     /// `agentic serve` records its port): refused to every Account and MCP

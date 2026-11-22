@@ -1,0 +1,8 @@
+schema_version: 2
+name: Legacy Accounts
+description: A synthetic project that still holds the old per-project Accounts file.
+timezone: UTC
+currency: EUR
+teams:
+  - id: core
+    name: Core team

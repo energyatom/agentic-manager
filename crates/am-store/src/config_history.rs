@@ -402,6 +402,20 @@ impl Reader {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
+    /// The latest History entry of `file`, or none.
+    pub fn latest_config_entry(&self, file: &str) -> Result<Option<HistoryEntry>, StoreError> {
+        Ok(self
+            .conn
+            .query_row(
+                &format!(
+                    "SELECT {ENTRY_COLUMNS} FROM config_history WHERE file = ?1 ORDER BY seq DESC LIMIT 1"
+                ),
+                params![file],
+                entry_of,
+            )
+            .optional()?)
+    }
+
     pub fn config_entry(&self, id: &str) -> Result<Option<HistoryEntry>, StoreError> {
         Ok(self
             .conn

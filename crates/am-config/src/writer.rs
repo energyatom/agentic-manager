@@ -67,6 +67,7 @@ use sha2::{Digest, Sha256};
 use crate::canon::{self, FileKind};
 use crate::finding::Report;
 use crate::migrate::{self, MigrationOffer};
+use crate::user_accounts::USER_ACCOUNTS_FILE;
 use crate::{
     FOLDERS, Finding, LoadError, LoadOptions, MODEL_FILES, Severity, checks, linediff, load_exact,
     load_with,
@@ -285,10 +286,15 @@ impl fmt::Display for Joined<'_> {
 /// secret-looking value, as the validator detects one: a key-shaped text on
 /// any line, or a secret-named key holding a value.
 pub(crate) fn secret_lines(file: &str, bytes: &[u8]) -> Vec<u32> {
+    secret_lines_of(canon::kind_of(file), file, bytes)
+}
+
+/// [`secret_lines`] for a file of `kind`.
+fn secret_lines_of(kind: Option<FileKind>, file: &str, bytes: &[u8]) -> Vec<u32> {
     let text = String::from_utf8_lossy(bytes);
     let mut rep = Report::new(file);
     checks::text_secrets(&mut rep, &text, 1);
-    if let Some(kind) = canon::kind_of(file)
+    if let Some(kind) = kind
         && let Ok(doc) = canon::parse(kind, &text)
     {
         // A Markdown file's frontmatter starts on line 2.
@@ -315,9 +321,14 @@ pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 
-/// The project's config writer. Build one per open project.
+/// The project's config writer. Build one per open project; or, with
+/// [`ConfigWriter::for_user_accounts`], the writer of this Mac's user
+/// Accounts file (story 2.12).
 pub struct ConfigWriter {
     root: PathBuf,
+    /// The writer of the user Accounts file: `root` is the app data dir and
+    /// `accounts.yaml` the one file it writes (AD-17).
+    user: bool,
     history: Arc<dyn ConfigHistory>,
     /// Runs each intent, write and commit sequence alone.
     serial: Mutex<()>,
@@ -352,12 +363,66 @@ impl ConfigWriter {
         }
         Ok(ConfigWriter {
             root: root.to_path_buf(),
+            user: false,
             history,
             serial: Mutex::new(()),
             own: Mutex::new(VecDeque::new()),
             #[cfg(feature = "test-support")]
             fail: Mutex::new(None),
         })
+    }
+
+    /// The writer of this Mac's user Accounts file (story 2.12; AD-16,
+    /// AD-17): `app_data` is the app data dir, and `accounts.yaml` in it is
+    /// the one file it writes, with the same atomic write, intent, History,
+    /// self-write fingerprint and `ConfigCreate` as a project file; any other
+    /// name is refused. `history` is the user store's (its guard holds
+    /// `user.lock`). Removes a temp file a crashed write left. The file is
+    /// written owner-only (0600).
+    pub fn for_user_accounts(
+        app_data: &Path,
+        history: Arc<dyn ConfigHistory>,
+    ) -> Result<ConfigWriter, WriteError> {
+        if !app_data.is_dir() {
+            return Err(WriteError::BadPath {
+                file: app_data.display().to_string(),
+                reason: "there is no app data folder here".into(),
+            });
+        }
+        let tmp = app_data.join(format!(".{USER_ACCOUNTS_FILE}{TMP_SUFFIX}"));
+        if std::fs::symlink_metadata(&tmp).is_ok_and(|m| m.is_file() || m.file_type().is_symlink())
+        {
+            std::fs::remove_file(&tmp).map_err(io(format!("cannot remove {}", tmp.display())))?;
+        }
+        Ok(ConfigWriter {
+            root: app_data.to_path_buf(),
+            user: true,
+            history,
+            serial: Mutex::new(()),
+            own: Mutex::new(VecDeque::new()),
+            #[cfg(feature = "test-support")]
+            fail: Mutex::new(None),
+        })
+    }
+
+    /// The kind of `file` this writer writes: the user Accounts file only
+    /// (user mode), or a project's config file.
+    fn kind_of(&self, file: &str) -> Option<FileKind> {
+        if self.user {
+            (file == USER_ACCOUNTS_FILE).then_some(FileKind::Accounts)
+        } else {
+            canon::kind_of(file)
+        }
+    }
+
+    /// The refusal of a name this writer does not write.
+    fn not_written(&self) -> &'static str {
+        if self.user {
+            "not the file this writer writes: it writes only this Mac's Accounts file, accounts.yaml"
+        } else {
+            "not a config file the app writes (company.yaml, tools.yaml, models/, seats/, \
+             skills/<id>/SKILL.md, workflows/, tables/, dashboards/, sources/ or schemas/)"
+        }
     }
 
     /// Stops the next writes at `point` as a crash would (tests only).
@@ -479,7 +544,7 @@ impl ConfigWriter {
         self.resolve_absent(&file)?;
         // No key may reach a config file, an intent or a diff.
         let secret = |bytes: &[u8]| {
-            let lines = secret_lines(&file, bytes);
+            let lines = secret_lines_of(Some(kind), &file, bytes);
             if lines.is_empty() {
                 return Ok(());
             }
@@ -509,7 +574,7 @@ impl ConfigWriter {
         // As for an edit: refused only when the new file adds an error. The
         // project is read from an exact map of its tracked files, with and
         // without the new one (a missing file cannot be overridden).
-        let now = crate::session::scan(&self.root);
+        let now = self.scan();
         let mut with = now.clone();
         with.insert(file.clone(), after.clone());
         let new_errors = added_errors(self.errors_exact(now)?, self.errors_exact(with)?);
@@ -871,7 +936,7 @@ impl ConfigWriter {
         actor: Actor,
         p: PendingIntent,
     ) -> Result<Option<HistoryEntry>, WriteError> {
-        let holds_new = canon::kind_of(&p.intent.file).is_some()
+        let holds_new = self.kind_of(&p.intent.file).is_some()
             && std::fs::read(self.root.join(&p.intent.file))
                 .is_ok_and(|b| sha256_hex(&b) == p.intent.after_sha256);
         if holds_new {
@@ -942,12 +1007,7 @@ impl ConfigWriter {
         if file.split(['/', '\\']).any(|c| c == "..") {
             return Err(refuse("a path with `..`; name a file inside the project"));
         }
-        canon::kind_of(file).ok_or_else(|| {
-            refuse(
-                "not a config file the app writes (company.yaml, tools.yaml, models/, seats/, \
-                 skills/<id>/SKILL.md, workflows/, tables/, dashboards/, sources/ or schemas/)",
-            )
-        })
+        self.kind_of(file).ok_or_else(|| refuse(self.not_written()))
     }
 
     /// Checks that a create may place `file` (already a plain config path):
@@ -1030,12 +1090,9 @@ impl ConfigWriter {
         if file.split(['/', '\\']).any(|c| c == "..") {
             return Err(refuse("a path with `..`; name a file inside the project"));
         }
-        let kind = canon::kind_of(file).ok_or_else(|| {
-            refuse(
-                "not a config file the app writes (company.yaml, tools.yaml, models/, seats/, \
-                 skills/<id>/SKILL.md, workflows/, tables/, dashboards/, sources/ or schemas/)",
-            )
-        })?;
+        let kind = self
+            .kind_of(file)
+            .ok_or_else(|| refuse(self.not_written()))?;
         // Each component must be the exact name listed in its folder (a
         // case-insensitive volume would open `ALPHA.md` as `alpha.md`), and
         // none may be a link: the write stays inside the project.
@@ -1079,7 +1136,7 @@ impl ConfigWriter {
     fn step(&self, actor: Actor, file: &str, change: Change) -> Result<HistoryEntry, WriteError> {
         // No key may reach History, an intent or a diff through the bytes
         // the file holds now: the owner removes it by hand first.
-        let lines = secret_lines(file, &change.before);
+        let lines = secret_lines_of(self.kind_of(file), file, &change.before);
         if !lines.is_empty() {
             return Err(WriteError::Secret {
                 file: file.to_string(),
@@ -1121,7 +1178,7 @@ impl ConfigWriter {
             after,
             audit,
         } = change;
-        let lines = secret_lines(file, &before);
+        let lines = secret_lines_of(self.kind_of(file), file, &before);
         if !lines.is_empty() {
             return Err(WriteError::Secret {
                 file: file.to_string(),
@@ -1177,6 +1234,11 @@ impl ConfigWriter {
 
     /// The project's error findings, with `overrides` read instead of disk.
     fn errors(&self, overrides: BTreeMap<String, Vec<u8>>) -> Result<Vec<Finding>, WriteError> {
+        if self.user {
+            let mut files = self.scan();
+            files.extend(overrides);
+            return Ok(user_errors(&files));
+        }
         let loaded = load_with(&self.root, overrides).map_err(|e| match e {
             LoadError::NotFound(p) | LoadError::NotADirectory(p) => WriteError::BadPath {
                 file: p.display().to_string(),
@@ -1193,6 +1255,9 @@ impl ConfigWriter {
     /// The project's error findings when its tracked files are exactly
     /// `files` (see [`load_exact`]).
     fn errors_exact(&self, files: BTreeMap<String, Vec<u8>>) -> Result<Vec<Finding>, WriteError> {
+        if self.user {
+            return Ok(user_errors(&files));
+        }
         let loaded =
             load_exact(&self.root, files, LoadOptions::default()).map_err(|e| match e {
                 LoadError::NotFound(p) | LoadError::NotADirectory(p) => WriteError::BadPath {
@@ -1205,6 +1270,30 @@ impl ConfigWriter {
             .into_iter()
             .filter(|f| f.severity == Severity::Error)
             .collect())
+    }
+
+    /// The tracked files as they are on disk: the project's, or (user mode)
+    /// the user Accounts file when it exists.
+    fn scan(&self) -> BTreeMap<String, Vec<u8>> {
+        if self.user {
+            return std::fs::read(self.root.join(USER_ACCOUNTS_FILE))
+                .ok()
+                .map(|b| BTreeMap::from([(USER_ACCOUNTS_FILE.to_string(), b)]))
+                .unwrap_or_default();
+        }
+        crate::session::scan(&self.root)
+    }
+
+    /// The options of a new temp file: owner-only (0600) in user mode.
+    fn new_file(&self) -> std::fs::OpenOptions {
+        let mut o = std::fs::OpenOptions::new();
+        o.write(true).create_new(true);
+        #[cfg(unix)]
+        if self.user {
+            use std::os::unix::fs::OpenOptionsExt;
+            o.mode(0o600);
+        }
+        o
     }
 
     /// A create's placement (AD-16): missing parent folders, a new temp
@@ -1253,9 +1342,8 @@ impl ConfigWriter {
                 Err(_) => Ok(()),
             }
             .map_err(io(format!("cannot remove {}", tmp.display())))?;
-            let mut f = std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
+            let mut f = self
+                .new_file()
                 .open(&tmp)
                 .map_err(io(format!("cannot create {}", tmp.display())))?;
             f.write_all(bytes)
@@ -1334,9 +1422,15 @@ impl ConfigWriter {
             .unwrap_or_default();
         let tmp = dir.join(format!(".{name}{TMP_SUFFIX}"));
         let written = (|| -> Result<(), WriteError> {
-            let perms = std::fs::metadata(&path)
+            #[allow(unused_mut)]
+            let mut perms = std::fs::metadata(&path)
                 .map_err(io(format!("cannot read {file}")))?
                 .permissions();
+            #[cfg(unix)]
+            if self.user {
+                use std::os::unix::fs::PermissionsExt;
+                perms.set_mode(0o600);
+            }
             // Whatever stands at the temp path (a file, a link, a folder) goes
             // first, and the temp file is created new: a link is never followed.
             match std::fs::symlink_metadata(&tmp) {
@@ -1345,9 +1439,8 @@ impl ConfigWriter {
                 Err(_) => Ok(()),
             }
             .map_err(io(format!("cannot remove {}", tmp.display())))?;
-            let mut f = std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
+            let mut f = self
+                .new_file()
                 .open(&tmp)
                 .map_err(io(format!("cannot create {}", tmp.display())))?;
             f.write_all(bytes)
@@ -1387,6 +1480,17 @@ impl ConfigWriter {
         }
         Ok(())
     }
+}
+
+/// The errors of the user Accounts file in `files` (none when it is absent).
+fn user_errors(files: &BTreeMap<String, Vec<u8>>) -> Vec<Finding> {
+    files
+        .get(USER_ACCOUNTS_FILE)
+        .map(|bytes| crate::user_accounts::load_bytes(USER_ACCOUNTS_FILE, bytes).findings)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|f| f.severity == Severity::Error)
+        .collect()
 }
 
 /// `text` with `line` inserted after its first top-level `schema_version:`
@@ -1484,10 +1588,13 @@ fn config_dirs(root: &Path) -> Vec<PathBuf> {
 /// The canonical bytes of the config file `file` holding `bytes`: what the
 /// writer would write for an edit that changes nothing.
 pub fn canonical_bytes(file: &str, bytes: &[u8]) -> Result<Vec<u8>, WriteError> {
-    let kind = canon::kind_of(file).ok_or_else(|| WriteError::BadPath {
-        file: file.to_string(),
-        reason: "not a config file the app writes".into(),
-    })?;
+    let user = (file == USER_ACCOUNTS_FILE).then_some(FileKind::Accounts);
+    let kind = user
+        .or_else(|| canon::kind_of(file))
+        .ok_or_else(|| WriteError::BadPath {
+            file: file.to_string(),
+            reason: "not a config file the app writes".into(),
+        })?;
     let text = std::str::from_utf8(bytes).map_err(|_| WriteError::NotEditable {
         file: file.to_string(),
         reason: "it is not UTF-8 text".into(),

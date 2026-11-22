@@ -284,7 +284,8 @@ fn a_scope_host_pattern_is_parsed_by_host_pattern() {
 
 #[test]
 fn an_account_endpoint_never_joins_a_seat_allow_list() {
-    let accounts = "schema_version: 2\naccounts:\n  - id: cloud\n    provider: anthropic\n    name: Cloud account\n    secret_ref: cloud\n";
+    // Story 2.12 (AD-17): the Account is user-level; the project names it
+    // by id only.
     let model = "model:\n  account: cloud\n  model: example-large\nfallback:\n  - account: cloud\n    model: example-large\n";
     let writer = format!(
         "---\nschema_version: 2\nname: Writer\nrole: Writer\nteam: core\n{model}allowed_hosts:\n  - docs.example.org\n---\nWrite.\n"
@@ -292,11 +293,7 @@ fn an_account_endpoint_never_joins_a_seat_allow_list() {
     let plain = format!(
         "---\nschema_version: 2\nname: Plain\nrole: Analyst\nteam: core\n{model}---\nRead.\n"
     );
-    let dir = project_with(&[
-        ("models/accounts.yaml", accounts),
-        ("seats/writer.md", &writer),
-        ("seats/plain.md", &plain),
-    ]);
+    let dir = project_with(&[("seats/writer.md", &writer), ("seats/plain.md", &plain)]);
     let snap = snapshot(dir.path());
     assert_eq!(hosts_of(&snap, "writer"), ["docs.example.org"]);
     assert!(hosts_of(&snap, "plain").is_empty());

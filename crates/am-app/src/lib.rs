@@ -10,7 +10,8 @@
 //! ([`run`]): a configured workflow's run on am-engine's driver. Story 2.2
 //! wires the egress client ([`egress`]): the project's egress directory and
 //! the store-backed audit sink; the spike's `c1` and `c4` commands left the
-//! binary (owner decision 9, 2026-11-22).
+//! binary (owner decision 9, 2026-11-22). Story 2.12 moves Accounts to this
+//! Mac ([`user`]) and makes [`key_use`] the one check before any key read.
 #![forbid(unsafe_code)]
 
 // The composition root depends on every adapter (Design Paradigm table); the
@@ -26,10 +27,12 @@ pub mod accounts;
 pub mod cli;
 pub mod egress;
 pub mod identity;
+pub mod key_use;
 pub mod run;
 pub mod runtime;
 pub mod spike;
 pub mod terminal;
+pub mod user;
 
 use std::sync::Arc;
 
