@@ -58,7 +58,7 @@ validate:
     #!/usr/bin/env bash
     set -euo pipefail
     cargo build -q -p am-app --bin agentic
-    for project in fixtures/projects/valid*/ fixtures/projects/anatomy/ templates/departments/*/ templates/roles/*/ templates/samples/*/; do
+    for project in fixtures/projects/valid*/ fixtures/projects/anatomy/ fixtures/projects/one-step/ templates/departments/*/ templates/roles/*/ templates/samples/*/; do
         "$CARGO_TARGET_DIR/debug/agentic" validate --template "$project"
     done
 

@@ -6,6 +6,8 @@
 //! ([`runtime`]) through the OS identity adapters ([`identity`]). Story 2.1
 //! adds `agentic accounts add|list|test|remove` ([`accounts`]), AD-15's
 //! interim CLI Account edit, and the owner's real terminal ([`terminal`]).
+//! Epic 3 story 1 adds `agentic run <workflow>` and `agentic status`
+//! ([`run`]): a configured workflow's run on am-engine's driver.
 #![forbid(unsafe_code)]
 
 // The composition root depends on every adapter (Design Paradigm table); the
@@ -20,6 +22,7 @@ use am_services as _;
 pub mod accounts;
 pub mod cli;
 pub mod identity;
+pub mod run;
 pub mod runtime;
 pub mod spike;
 pub mod terminal;

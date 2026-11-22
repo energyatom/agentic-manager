@@ -2,7 +2,8 @@
 //! [<folder>]` (AD-16, epic R1) prints every finding as `file:line: message`
 //! with a `fix:` line, sorted by file and line, then a summary. `agentic
 //! audit export|verify` (AD-25, story 1.7) exports a project's audit log as
-//! JSON Lines and checks an export's hash chain.
+//! JSON Lines and checks an export's hash chain. `agentic run` and `agentic
+//! status` (epic 3 story 1) are in [`crate::run`] and re-exported here.
 //!
 //! Both find a project's runtime folder read-only (story 1.13, AD-32): no
 //! lock, no write and no identity tool. `validate` on a project checks
@@ -17,6 +18,21 @@ use std::path::Path;
 /// `agentic accounts add|remove|list|test` (story 2.1, AD-15's interim CLI
 /// Account edit); see [`crate::accounts`].
 pub use crate::accounts::{AccountsContext, accounts};
+/// `agentic run <workflow>` and `agentic status` (epic 3 story 1); see
+/// [`crate::run`].
+pub use crate::run::{Providers, RunContext, run, status, unwired_providers};
+
+/// What the `agentic` binary gives every CLI-class command (AD-15): this
+/// platform's places, the OS identity adapter and the owner's real
+/// terminal. `main` builds it in one place, so the binary builds one
+/// terminal for every command (story 2.1's release guard counts them), and
+/// each command's context ([`AccountsContext`], [`RunContext`]) takes its
+/// parts from it.
+pub struct OwnerSide {
+    pub places: crate::runtime::Places,
+    pub identity: std::sync::Arc<dyn am_domain::ProjectIdentity>,
+    pub terminal: Box<dyn am_domain::Terminal>,
+}
 
 /// Exit codes of `agentic validate`.
 pub const EXIT_OK: i32 = 0;
@@ -46,6 +62,25 @@ fn other_recorded_roots(places: &crate::runtime::Places, root: &Path) -> Vec<std
         .collect()
 }
 
+/// How a project (not a template) is loaded, by `agentic validate` and
+/// `agentic run` alike: reference files are checked against its runtime
+/// folder's `knowledge/` when it has one on this Mac, and a linked folder
+/// that is, holds or lies inside another project this Mac has opened (a
+/// recorded root) is refused (AD-30). With no `places`, neither is known.
+pub(crate) fn project_load_options(
+    places: Option<&crate::runtime::Places>,
+    root: &Path,
+) -> am_config::LoadOptions {
+    let knowledge = places.and_then(|places| crate::runtime::knowledge_root(places, root));
+    let recent_roots = places
+        .map(|places| other_recorded_roots(places, root))
+        .unwrap_or_default();
+    am_config::LoadOptions {
+        recent_roots,
+        ..am_config::LoadOptions::project(knowledge)
+    }
+}
+
 /// `agentic validate [<project>]`: `args` are the words after `validate`.
 /// Returns the exit code: 0 with no errors (warnings allowed), 1 with any
 /// error, 2 for bad usage or a missing project folder.
@@ -65,20 +100,7 @@ pub fn validate(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> i3
     let opts = if template {
         am_config::LoadOptions::template(root)
     } else {
-        let places = crate::runtime::Places::from_env().ok();
-        let knowledge = places
-            .as_ref()
-            .and_then(|places| crate::runtime::knowledge_root(places, root));
-        // AD-30: a folder that is, holds or lies inside another project this
-        // Mac has opened (a recorded root) may not be linked.
-        let recent_roots = places
-            .as_ref()
-            .map(|places| other_recorded_roots(places, root))
-            .unwrap_or_default();
-        am_config::LoadOptions {
-            recent_roots,
-            ..am_config::LoadOptions::project(knowledge)
-        }
+        project_load_options(crate::runtime::Places::from_env().ok().as_ref(), root)
     };
     let loaded = match am_config::load_in(root, opts) {
         Ok(l) => l,

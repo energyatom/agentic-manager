@@ -277,6 +277,125 @@ fn terminal_impls(root: &Path) -> Vec<TerminalImpl> {
 
 const REAL_TERMINAL_FILE: &str = "crates/am-app/src/terminal.rs";
 const REAL_TERMINAL_TYPE: &str = "OwnerTerminal";
+const MAIN_FILE: &str = "crates/am-app/src/main.rs";
+/// The one construction of the real terminal.
+const REAL_CONSTRUCTION: &str = "OwnerTerminal::new()";
+/// How `main.rs` binds it: the only value a `terminal` may be given there.
+const REAL_BOXED: &str = "Box::new(am_app::terminal::OwnerTerminal::new())";
+
+/// The code of a Rust file as one string: whole-line comments dropped
+/// (they may name the rule), all whitespace removed.
+fn code_of(text: &str) -> String {
+    text.lines()
+        .map(str::trim)
+        .filter(|l| !l.starts_with("//"))
+        .flat_map(str::split_whitespace)
+        .collect()
+}
+
+fn ident_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+/// Why the terminal a command of the `agentic` binary gets could be other
+/// than the owner's real one, read from am-app's sources (review of story
+/// 3.1: the terminal is built once in `main.rs` and handed to each
+/// command's context, by field shorthand too, so a `terminal:` field count
+/// would not see it):
+///
+/// - outside `terminal.rs`, am-app's code names `OwnerTerminal` only as the
+///   one `OwnerTerminal::new()`, which appears exactly once, in `main.rs`
+///   (no second construction, no `OwnerTerminal::default()`, no literal);
+/// - `main.rs` names no other type ending in `Terminal`, nor the `Terminal`
+///   trait (`Box<dyn Terminal>`): it can hold a terminal only by building
+///   the real one;
+/// - every `terminal:` field and every `terminal =` binding in `main.rs`
+///   is given exactly `Box::new(am_app::terminal::OwnerTerminal::new())`,
+///   so a shorthand `terminal` cannot come from another constructor.
+fn construction_offences(root: &Path) -> Vec<String> {
+    let mut why = Vec::new();
+    let mut files = Vec::new();
+    rust_files(&root.join("crates/am-app/src"), &mut files);
+    files.sort();
+    // (file, constructions, other mentions) outside the real terminal's file.
+    let mut built: Vec<(String, usize)> = Vec::new();
+    for file in &files {
+        let rel = file
+            .strip_prefix(root)
+            .unwrap()
+            .to_string_lossy()
+            .replace('\\', "/");
+        if rel == REAL_TERMINAL_FILE {
+            continue;
+        }
+        let code = code_of(&std::fs::read_to_string(file).unwrap_or_default());
+        let constructions = code.matches(REAL_CONSTRUCTION).count();
+        let mentions = code.matches(REAL_TERMINAL_TYPE).count();
+        if constructions > 0 {
+            built.push((rel.clone(), constructions));
+        }
+        if mentions > constructions {
+            why.push(format!(
+                "{rel} names {REAL_TERMINAL_TYPE} other than as `{REAL_CONSTRUCTION}`: outside {REAL_TERMINAL_FILE} the real terminal is only built, once, in {MAIN_FILE}"
+            ));
+        }
+    }
+    if built != [(MAIN_FILE.to_string(), 1)] {
+        let found: Vec<String> = built.iter().map(|(f, n)| format!("{n} in {f}")).collect();
+        why.push(format!(
+            "`{REAL_CONSTRUCTION}` must appear exactly once in crates/am-app/src, in {MAIN_FILE}: the binary builds one terminal and every command takes it (found {})",
+            if found.is_empty() {
+                "none".to_string()
+            } else {
+                found.join(", ")
+            }
+        ));
+    }
+    let main = code_of(&std::fs::read_to_string(root.join(MAIN_FILE)).unwrap_or_default());
+    // A type whose name ends in `Terminal` (or the trait itself): only the
+    // real one, in its one construction.
+    for (at, word) in main.match_indices("Terminal") {
+        let after = &main[at + word.len()..];
+        if after.starts_with(ident_char) {
+            // A longer name (`TerminalPrompt`), not a `Terminal` type.
+            continue;
+        }
+        let before = &main[..at];
+        let real = before.ends_with("::Owner") && after.starts_with("::new()");
+        if !real {
+            let name: String = before
+                .chars()
+                .rev()
+                .take_while(|c| ident_char(*c))
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
+            why.push(format!(
+                "{MAIN_FILE} names `{name}Terminal`: it may name no `Terminal` type or trait but the one `{REAL_BOXED}`"
+            ));
+        }
+    }
+    // A `terminal` field or binding: given only the real terminal.
+    for (at, word) in main.match_indices("terminal") {
+        let after = &main[at + word.len()..];
+        let given = if let Some(rest) = after.strip_prefix(':') {
+            // `terminal::` is a path, not a field.
+            (!rest.starts_with(':')).then_some(rest)
+        } else if let Some(rest) = after.strip_prefix('=') {
+            // `==` compares and `=>` is a match arm; neither binds.
+            (!rest.starts_with('=') && !rest.starts_with('>')).then_some(rest)
+        } else {
+            None
+        };
+        if given.is_some_and(|rest| !rest.starts_with(REAL_BOXED)) {
+            why.push(format!(
+                "{MAIN_FILE} gives a `terminal` something other than `{REAL_BOXED}`: every command's terminal is the one real terminal"
+            ));
+        }
+    }
+    why
+}
 
 /// Why the repo at `root` could hand the `agentic` binary a terminal that
 /// is not the owner's real one; empty when it cannot:
@@ -285,8 +404,10 @@ const REAL_TERMINAL_TYPE: &str = "OwnerTerminal";
 ///   `OwnerTerminal`'s in `crates/am-app/src/terminal.rs`;
 /// - that file, or the line declaring its module, under a `cfg(feature`
 ///   attribute (a feature could then swap the terminal);
-/// - `crates/am-app/src/main.rs` building the command's context with
-///   anything but `OwnerTerminal::new()`.
+/// - the real terminal built anywhere but once, as `OwnerTerminal::new()`
+///   in `crates/am-app/src/main.rs`, or `main.rs` naming another `Terminal`
+///   type or binding a `terminal` from anything else (see
+///   [`construction_offences`]).
 fn terminal_offences(root: &Path) -> Vec<String> {
     let mut why = Vec::new();
     let impls = terminal_impls(root);
@@ -344,30 +465,15 @@ fn terminal_offences(root: &Path) -> Vec<String> {
             }
         }
     }
-    let main: String = std::fs::read_to_string(root.join("crates/am-app/src/main.rs"))
-        .unwrap_or_default()
-        .split_whitespace()
-        .collect();
-    // A `terminal:` field (not the `terminal::` of a path).
-    let built = main
-        .match_indices("terminal:")
-        .filter(|(at, m)| !main[at + m.len()..].starts_with(':'))
-        .count();
-    let real_built = main
-        .matches("terminal:Box::new(am_app::terminal::OwnerTerminal::new())")
-        .count();
-    if built != 1 || real_built != 1 {
-        why.push(format!(
-            "crates/am-app/src/main.rs must build the command's context once, with `terminal: Box::new(am_app::terminal::OwnerTerminal::new())` (found {built} `terminal:` fields, {real_built} of them the real terminal)"
-        ));
-    }
+    why.extend(construction_offences(root));
     why
 }
 
 /// Story 2.1 (review): the guard above knows only the name `am-testkit`.
 /// This one reads the sources: outside am-testkit the only `Terminal`
 /// implementations are `OwnerTerminal`'s, in am-app's `terminal.rs`, under
-/// no cargo feature, and `main.rs` builds the command with it.
+/// no cargo feature, and am-app builds it exactly once, in `main.rs`, as
+/// the only terminal any command is given (review of story 3.1).
 #[test]
 fn the_only_terminal_outside_the_test_kit_is_the_owners_real_one() {
     let root = repo_root();
@@ -392,7 +498,10 @@ fn the_only_terminal_outside_the_test_kit_is_the_owners_real_one() {
 /// Self-check on a synthetic tree: a clean tree passes; a second
 /// implementation (in am-app or another crate), a feature-gated real one, a
 /// gated module and a `main.rs` built with another terminal are each
-/// found; an implementation inside am-testkit is not.
+/// found; an implementation inside am-testkit is not. One construction
+/// shared by field shorthand is clean; a second construction of the real
+/// terminal, a shorthand `terminal` bound from another constructor and
+/// another `Terminal` type or the trait named in `main.rs` are each found.
 #[test]
 fn the_terminal_guard_finds_a_fake_a_feature_gate_and_another_main() {
     const REAL: &str = "pub struct OwnerTerminal;\nimpl Terminal for OwnerTerminal {\n}\n";
@@ -455,6 +564,66 @@ fn the_terminal_guard_finds_a_fake_a_feature_gate_and_another_main() {
     let two = format!("{MAIN}fn other() {{ let c = C {{ terminal: Box::new(Scripted) }}; }}\n");
     let why = offences(&[("crates/am-app/src/main.rs", &two)]);
     assert!(why.iter().any(|w| w.contains("main.rs")), "{why:?}");
+
+    // Review of story 3.1: the terminal is built once and shared. A main
+    // that builds the owner's side once and hands its terminal to two
+    // contexts by field shorthand is clean.
+    const SHARED: &str = "fn owner_side() -> OwnerSide {\n    OwnerSide {\n        terminal: Box::new(am_app::terminal::OwnerTerminal::new()),\n    }\n}\nfn accounts() {\n    let OwnerSide { terminal } = owner_side();\n    let ctx = AccountsContext { terminal };\n}\nfn run() {\n    let OwnerSide { terminal } = owner_side();\n    let ctx = RunContext { terminal };\n    open(&mut TerminalPrompt);\n}\n";
+    assert_eq!(
+        offences(&[("crates/am-app/src/main.rs", SHARED)]),
+        Vec::<String>::new(),
+        "one construction, shared by shorthand"
+    );
+    // A second construction of the real terminal, in main or elsewhere in
+    // am-app, is found although no `terminal:` field names it.
+    let twice = format!("{MAIN}fn other() {{ let t = am_app::terminal::OwnerTerminal::new(); }}\n");
+    let why = offences(&[("crates/am-app/src/main.rs", &twice)]);
+    assert!(why.iter().any(|w| w.contains("exactly once")), "{why:?}");
+    let elsewhere = "pub fn context() { let t = crate::terminal::OwnerTerminal::new(); }\n";
+    let why = offences(&[("crates/am-app/src/run.rs", elsewhere)]);
+    assert!(
+        why.iter()
+            .any(|w| w.contains("exactly once") && w.contains("crates/am-app/src/run.rs")),
+        "{why:?}"
+    );
+    let by_default = "pub fn context() { let t = crate::terminal::OwnerTerminal::default(); }\n";
+    let why = offences(&[("crates/am-app/src/run.rs", by_default)]);
+    assert!(
+        why.iter().any(|w| w.contains("crates/am-app/src/run.rs")),
+        "{why:?}"
+    );
+    // A context whose shorthand `terminal` comes from another constructor.
+    let shorthand = format!(
+        "{MAIN}fn other() {{\n    let terminal = Box::new(scripted::Scripted::new());\n    let ctx = RunContext {{ terminal }};\n}}\n"
+    );
+    let why = offences(&[("crates/am-app/src/main.rs", &shorthand)]);
+    assert!(
+        why.iter()
+            .any(|w| w.contains("main.rs") && w.contains("`terminal`")),
+        "{why:?}"
+    );
+    // Another `Terminal` type, or the trait itself, named in main.
+    for other in [
+        "fn other() { let t = FakeTerminal::new(); }\n",
+        "fn other(t: Box<dyn Terminal>) {}\n",
+        "fn other(t: Box<dyn am_domain::Terminal>) {}\n",
+    ] {
+        let named = format!("{MAIN}{other}");
+        let why = offences(&[("crates/am-app/src/main.rs", &named)]);
+        assert!(
+            why.iter()
+                .any(|w| w.contains("main.rs") && w.contains("Terminal")),
+            "{other}: {why:?}"
+        );
+    }
+    // Comments may name the rule and the type.
+    let commented = format!(
+        "{MAIN}// The owner's terminal: OwnerTerminal::new() is built once; no Box<dyn Terminal> here.\n"
+    );
+    assert_eq!(
+        offences(&[("crates/am-app/src/main.rs", &commented)]),
+        Vec::<String>::new()
+    );
 
     // Not a Terminal implementation: other traits, and the trait itself.
     for line in [

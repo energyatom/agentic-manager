@@ -815,12 +815,40 @@ pub(crate) fn company_head(text: &str) -> Result<CompanyHead, CompanyRefusal> {
     }
 }
 
-/// Why the CLI's project-open decisions (`--take-over`, `--confirm-move`)
-/// move to the UI (AD-15): the project's config enables a stdio MCP server
-/// or a Source with `render: true` (children that run as the owner). Read
-/// through am-config with no store; a `tools.yaml` or Source file with an
-/// error counts as enabling one (fails closed). `None` when neither.
-pub fn decisions_locked(root: &Path) -> Option<String> {
+/// The children that run as the owner which a project's config enables
+/// (AD-13, AD-15), and the files that could not be read to tell.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OwnerChildren {
+    /// One reason per enabled child, in words: a stdio MCP server, a Source
+    /// with `render: true`.
+    pub enabled: Vec<String>,
+    /// `tools.yaml` and Source files with an error: each is read as
+    /// enabling a child (fails closed), though nothing says it does.
+    pub broken: Vec<String>,
+}
+
+impl OwnerChildren {
+    /// Every reason in words, joined; `None` when there is none.
+    pub fn words(&self) -> Option<String> {
+        let mut reasons = self.enabled.clone();
+        reasons.extend(self.broken.iter().map(|file| {
+            format!("{file} has an error, so it is read as enabling a child that runs as you")
+        }));
+        (!reasons.is_empty()).then(|| reasons.join("; "))
+    }
+}
+
+pub(crate) fn stdio_server_words(id: &str) -> String {
+    format!("the stdio MCP server `{id}` is enabled")
+}
+
+pub(crate) fn rendering_source_words(id: &str) -> String {
+    format!("the Source `{id}` has render: true")
+}
+
+/// What the project's files at `root` enable now (see [`OwnerChildren`]).
+/// Read through am-config with no store.
+pub fn owner_children(root: &Path) -> OwnerChildren {
     let mut loader = Loader {
         places: kinds::Places {
             project: root.to_path_buf(),
@@ -831,24 +859,32 @@ pub fn decisions_locked(root: &Path) -> Option<String> {
         ..Loader::default()
     };
     loader.read_all(root);
-    let mut reasons = Vec::new();
+    let mut found = OwnerChildren::default();
     for s in &loader.tools.mcp_servers {
         if s.transport == "stdio" {
-            reasons.push(format!("the stdio MCP server `{}` is enabled", s.id));
+            found.enabled.push(stdio_server_words(&s.id));
         }
     }
     for s in loader.sources.values() {
         if s.render {
-            reasons.push(format!("the Source `{}` has render: true", s.id));
+            found.enabled.push(rendering_source_words(&s.id));
         }
     }
     for (file, rep) in &loader.reports {
         let config = file == "tools.yaml" || file.starts_with("sources/");
         if config && rep.findings.iter().any(|f| f.severity == Severity::Error) {
-            reasons.push(format!(
-                "{file} has an error, so it is read as enabling a child that runs as you"
-            ));
+            found.broken.push(file.clone());
         }
     }
-    (!reasons.is_empty()).then(|| reasons.join("; "))
+    found
+}
+
+/// Why the CLI's project-open decisions (`--take-over`, `--confirm-move`)
+/// move to the UI (AD-15): the project's config enables a stdio MCP server
+/// or a Source with `render: true` (children that run as the owner). Read
+/// through am-config with no store; a `tools.yaml` or Source file with an
+/// error counts as enabling one (fails closed). `None` when neither.
+/// [`owner_children`] gives the same reasons apart.
+pub fn decisions_locked(root: &Path) -> Option<String> {
+    owner_children(root).words()
 }

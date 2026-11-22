@@ -40,6 +40,11 @@ fn sha256_hex(s: &str) -> String {
     hex::encode(Sha256::digest(s.as_bytes()))
 }
 
+/// The hash of the config snapshot the run is pinned to (story 3.1).
+fn config_hash() -> String {
+    sha256_hex("the config files")
+}
+
 /// A project after a run, a settle, a trigger and an `Audit` with a hash.
 fn populated(root: &Path) -> Store {
     let (store, _) = open_project(root).unwrap();
@@ -51,6 +56,7 @@ fn populated(root: &Path) -> Store {
             workflow: "wf-1".into(),
             origin: "manual".into(),
             steps: vec!["a".into(), "b".into()],
+            config_hash: Some(config_hash()),
         },
     )
     .unwrap();
@@ -230,7 +236,7 @@ fn args_are_redacted_ids_hashes_counts_and_statuses() {
 
     assert_eq!(
         entry(&all, "run.created")["args"],
-        json!({"origin": "manual", "steps": 2, "workflow": "wf-1"})
+        json!({"config_hash": config_hash(), "origin": "manual", "steps": 2, "workflow": "wf-1"})
     );
     assert_eq!(
         entry(&all, "model_call.settled")["args"],

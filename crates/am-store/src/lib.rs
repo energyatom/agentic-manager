@@ -21,8 +21,11 @@
 //!   path remains for the spike's callers.
 //!
 //! The spike keeps the minimal journal: runs, step runs, model calls, the
-//! ledger (reserve, then settle), triggers and fires. Config History (the
-//! intent rows and History entries of AD-16's apply order) is in
+//! ledger (reserve, then settle), triggers and fires. Since epic 3 story 1 a
+//! run pins the hash of the config snapshot it was built from (AD-16) in
+//! the transaction that creates it, and the writer stamps when a step
+//! started and when a step and a run finished. Config History (the intent
+//! rows and History entries of AD-16's apply order) is in
 //! [`StoreConfigHistory`].
 #![forbid(unsafe_code)]
 
@@ -145,12 +148,18 @@ pub fn new_id() -> String {
 /// Every mutation the spike needs. Each carries its Actor (AD-24).
 #[derive(Debug, Clone)]
 pub enum WriteCommand {
+    /// A run (`running`) with its steps queued. `config_hash` is the hash
+    /// of the `ConfigSnapshot` the run was built from (AD-16: sha256 hex),
+    /// pinned here and audited as an argument; `None` only for a run with
+    /// no snapshot (the spike's hard-coded workflow).
     CreateRun {
         run_id: String,
         workflow: String,
         origin: String,
         steps: Vec<String>,
+        config_hash: Option<String>,
     },
+    /// The step is `running`; stamps its `started_at` (kept if already set).
     StartStep {
         step_run_id: String,
     },
@@ -172,6 +181,7 @@ pub enum WriteCommand {
     MarkLost {
         call_id: String,
     },
+    /// The step's final status and output; stamps its `finished_at`.
     FinishStep {
         step_run_id: String,
         status: String,
@@ -179,6 +189,7 @@ pub enum WriteCommand {
     },
     /// Settle a call and finish its step in one transaction, so a crash can
     /// never leave a settled (paid) call under an unfinished step (AD-8).
+    /// Stamps the step's `finished_at`.
     SettleAndFinishStep {
         call_id: String,
         usage: Option<Usage>,
@@ -187,6 +198,7 @@ pub enum WriteCommand {
         status: String,
         output: Option<String>,
     },
+    /// The run's final status; stamps its `finished_at`.
     FinishRun {
         run_id: String,
         status: String,
@@ -254,10 +266,16 @@ impl WriteCommand {
                 workflow,
                 origin,
                 steps,
+                config_hash,
             } => (
                 "run.created".into(),
                 run_id.clone(),
-                Some(json!({"origin": origin, "steps": steps.len(), "workflow": workflow})),
+                Some(json!({
+                    "config_hash": config_hash,
+                    "origin": origin,
+                    "steps": steps.len(),
+                    "workflow": workflow,
+                })),
             ),
             WriteCommand::StartStep { step_run_id } => {
                 ("step.started".into(), step_run_id.clone(), Some(json!({})))
@@ -589,6 +607,17 @@ fn apply(conn: &mut Connection, actor: &Actor, cmd: &WriteCommand) -> Result<(),
             "refused audit entry: `hash` must be 64 lowercase hex characters (sha256)".into(),
         ));
     }
+    // The pin is audited as an argument (AD-25), so it is a hash or nothing.
+    if let WriteCommand::CreateRun {
+        config_hash: Some(h),
+        ..
+    } = cmd
+        && !is_sha256_hex(h)
+    {
+        return Err(StoreError::Invalid(
+            "refused run: `config_hash` must be 64 lowercase hex characters (sha256)".into(),
+        ));
+    }
     let tx = conn.transaction()?;
     let now = now_ts();
     let mut config_entry = None;
@@ -602,10 +631,11 @@ fn apply(conn: &mut Connection, actor: &Actor, cmd: &WriteCommand) -> Result<(),
             workflow,
             origin,
             steps,
+            config_hash,
         } => {
             tx.execute(
-                "INSERT INTO runs (id, workflow, origin, status, created_at, updated_at) VALUES (?1, ?2, ?3, 'running', ?4, ?4)",
-                params![run_id, workflow, origin, now],
+                "INSERT INTO runs (id, workflow, origin, status, created_at, updated_at, config_hash) VALUES (?1, ?2, ?3, 'running', ?4, ?4, ?5)",
+                params![run_id, workflow, origin, now, config_hash],
             )?;
             for (i, s) in steps.iter().enumerate() {
                 tx.execute(
@@ -616,7 +646,7 @@ fn apply(conn: &mut Connection, actor: &Actor, cmd: &WriteCommand) -> Result<(),
         }
         WriteCommand::StartStep { step_run_id } => {
             tx.execute(
-                "UPDATE step_runs SET status = 'running', updated_at = ?2 WHERE id = ?1",
+                "UPDATE step_runs SET status = 'running', started_at = COALESCE(started_at, ?2), updated_at = ?2 WHERE id = ?1",
                 params![step_run_id, now],
             )?;
         }
@@ -677,7 +707,7 @@ fn apply(conn: &mut Connection, actor: &Actor, cmd: &WriteCommand) -> Result<(),
         }
         WriteCommand::FinishRun { run_id, status } => {
             tx.execute(
-                "UPDATE runs SET status = ?2, updated_at = ?3 WHERE id = ?1",
+                "UPDATE runs SET status = ?2, finished_at = ?3, updated_at = ?3 WHERE id = ?1",
                 params![run_id, status, now],
             )?;
         }
@@ -774,7 +804,7 @@ fn finish_step(
     now: &str,
 ) -> Result<(), StoreError> {
     let n = tx.execute(
-        "UPDATE step_runs SET status = ?2, output = ?3, updated_at = ?4 WHERE id = ?1",
+        "UPDATE step_runs SET status = ?2, output = ?3, finished_at = ?4, updated_at = ?4 WHERE id = ?1",
         params![step_run_id, status, output, now],
     )?;
     if n != 1 {
@@ -822,6 +852,27 @@ pub struct RunRow {
     pub id: String,
     pub workflow: String,
     pub status: String,
+    /// The hash of the config snapshot the run was built from (AD-16);
+    /// `None` for a run with no snapshot and for rows from before the pin.
+    pub config_hash: Option<String>,
+    pub created_at: String,
+    /// When the run finished; `None` while it runs and for rows from
+    /// before the column.
+    pub finished_at: Option<String>,
+}
+
+/// The columns of a [`RunRow`], in [`run_row`]'s order.
+const RUN_COLUMNS: &str = "id, workflow, status, config_hash, created_at, finished_at";
+
+fn run_row(r: &rusqlite::Row) -> rusqlite::Result<RunRow> {
+    Ok(RunRow {
+        id: r.get(0)?,
+        workflow: r.get(1)?,
+        status: r.get(2)?,
+        config_hash: r.get(3)?,
+        created_at: r.get(4)?,
+        finished_at: r.get(5)?,
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -831,6 +882,10 @@ pub struct StepRow {
     pub seq: i64,
     pub status: String,
     pub output: Option<String>,
+    /// When the step started; `None` while it is queued.
+    pub started_at: Option<String>,
+    /// When the step finished; `None` until then.
+    pub finished_at: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -875,17 +930,27 @@ impl Reader {
         Ok(Reader { conn })
     }
 
+    /// The database's schema version (`user_version`), so a lock-free
+    /// reader can tell a database this binary has not migrated yet (older
+    /// than [`SCHEMA_VERSION`]) before it reads columns that are not there.
+    pub fn schema_version(&self) -> Result<i64, StoreError> {
+        migrations::user_version(&self.conn)
+    }
+
     pub fn unfinished_runs(&self) -> Result<Vec<RunRow>, StoreError> {
-        let mut st = self.conn.prepare(
-            "SELECT id, workflow, status FROM runs WHERE status NOT IN ('succeeded', 'failed', 'cancelled') ORDER BY created_at",
-        )?;
-        let rows = st.query_map([], |r| {
-            Ok(RunRow {
-                id: r.get(0)?,
-                workflow: r.get(1)?,
-                status: r.get(2)?,
-            })
-        })?;
+        let mut st = self.conn.prepare(&format!(
+            "SELECT {RUN_COLUMNS} FROM runs WHERE status NOT IN ('succeeded', 'failed', 'cancelled') ORDER BY created_at"
+        ))?;
+        let rows = st.query_map([], run_row)?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Every run, newest first (by creation time, then by insertion).
+    pub fn runs(&self) -> Result<Vec<RunRow>, StoreError> {
+        let mut st = self.conn.prepare(&format!(
+            "SELECT {RUN_COLUMNS} FROM runs ORDER BY created_at DESC, rowid DESC"
+        ))?;
+        let rows = st.query_map([], run_row)?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
@@ -893,22 +958,16 @@ impl Reader {
         Ok(self
             .conn
             .query_row(
-                "SELECT id, workflow, status FROM runs WHERE id = ?1",
+                &format!("SELECT {RUN_COLUMNS} FROM runs WHERE id = ?1"),
                 params![run_id],
-                |r| {
-                    Ok(RunRow {
-                        id: r.get(0)?,
-                        workflow: r.get(1)?,
-                        status: r.get(2)?,
-                    })
-                },
+                run_row,
             )
             .optional()?)
     }
 
     pub fn steps(&self, run_id: &str) -> Result<Vec<StepRow>, StoreError> {
         let mut st = self.conn.prepare(
-            "SELECT id, step_key, seq, status, output FROM step_runs WHERE run_id = ?1 ORDER BY seq",
+            "SELECT id, step_key, seq, status, output, started_at, finished_at FROM step_runs WHERE run_id = ?1 ORDER BY seq",
         )?;
         let rows = st.query_map(params![run_id], |r| {
             Ok(StepRow {
@@ -917,6 +976,8 @@ impl Reader {
                 seq: r.get(2)?,
                 status: r.get(3)?,
                 output: r.get(4)?,
+                started_at: r.get(5)?,
+                finished_at: r.get(6)?,
             })
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
@@ -1015,6 +1076,7 @@ mod tests {
                 workflow: "wf".into(),
                 origin: "manual".into(),
                 steps: vec!["a".into()],
+                config_hash: None,
             },
         )
         .unwrap();
@@ -1080,6 +1142,28 @@ mod tests {
         );
     }
 
+    /// The pin is audited as an argument, so anything but a sha256 hex
+    /// string is refused and nothing is written.
+    #[test]
+    fn a_config_hash_that_is_not_a_sha256_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("state.db")).unwrap();
+        for bad in ["", "not a hash", &"A".repeat(64), &"a".repeat(63)] {
+            let refused = store.writer().exec(
+                sys(),
+                WriteCommand::CreateRun {
+                    run_id: "r1".into(),
+                    workflow: "wf".into(),
+                    origin: "manual".into(),
+                    steps: vec!["a".into()],
+                    config_hash: Some(bad.to_string()),
+                },
+            );
+            assert!(matches!(refused, Err(StoreError::Invalid(_))), "{bad:?}");
+        }
+        assert!(store.reader().unwrap().runs().unwrap().is_empty());
+    }
+
     #[test]
     fn mark_lost_never_overwrites_a_settled_cost() {
         let dir = tempfile::tempdir().unwrap();
@@ -1092,6 +1176,7 @@ mod tests {
                 workflow: "wf".into(),
                 origin: "manual".into(),
                 steps: vec!["a".into()],
+                config_hash: None,
             },
         )
         .unwrap();
@@ -1145,6 +1230,7 @@ mod tests {
                 workflow: "wf".into(),
                 origin: "manual".into(),
                 steps: vec!["a".into()],
+                config_hash: None,
             },
         )
         .unwrap();

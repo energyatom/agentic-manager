@@ -70,6 +70,25 @@ impl ConfigSnapshot {
     pub fn skills(&self) -> &BTreeMap<String, Skill> {
         &self.skills
     }
+    /// The children that run as the owner which this snapshot enables
+    /// (AD-13, AD-15), one reason each in the words of
+    /// [`crate::decisions_locked`]: a stdio MCP server, a Source with
+    /// `render: true`. Empty when it enables none. Read from the snapshot
+    /// itself, so a caller that pins the snapshot checks what it pins.
+    pub fn owner_children(&self) -> Vec<String> {
+        let servers = self
+            .tools
+            .mcp_servers
+            .iter()
+            .filter(|s| s.transport == "stdio")
+            .map(|s| crate::stdio_server_words(&s.id));
+        let sources = self
+            .sources
+            .values()
+            .filter(|s| s.render)
+            .map(|s| crate::rendering_source_words(&s.id));
+        servers.chain(sources).collect()
+    }
     /// The host patterns `seat` may reach (AD-12, AD-48): exactly the
     /// seat's own `allowed_hosts`, never an Account's endpoint; none for an
     /// unknown seat.

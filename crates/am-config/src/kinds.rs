@@ -2017,6 +2017,20 @@ pub(crate) fn declared_crawl_on(root: &Node) -> bool {
         .is_some_and(|(_, v)| v.kind == Kind::Bool(true))
 }
 
+/// A step's run-graph keys (AD-40..AD-42), declared in `workflows/*.yaml`
+/// and checked from epic 3 (stories 3.14-3.16) and 4.15. `Step::run_graph`
+/// names the ones a step declares.
+const RUN_GRAPH_KEYS: &[&str] = &[
+    "seats",
+    "join",
+    "over_folder",
+    "routes",
+    "files",
+    "handoff",
+    "review",
+    "max_parallel",
+];
+
 /// `workflows/<id>.yaml`.
 pub(crate) fn workflow(
     rep: &mut Report,
@@ -2067,27 +2081,24 @@ pub(crate) fn workflow(
         let Some(s) = fields(rep, item, "step") else {
             continue;
         };
-        s.allow(
-            rep,
-            &[
-                "id",
-                "seat",
-                "instruction",
-                "description",
-                "output_schema",
-                "max_tokens",
-                // Run-graph keys (AD-40..AD-42), declared here and checked
-                // from epic 3 (stories 3.14-3.16) and 4.15.
-                "seats",
-                "join",
-                "over_folder",
-                "routes",
-                "files",
-                "handoff",
-                "review",
-                "max_parallel",
-            ],
-        );
+        let mut allowed = vec![
+            "id",
+            "seat",
+            "instruction",
+            "description",
+            "output_schema",
+            "max_tokens",
+        ];
+        allowed.extend_from_slice(RUN_GRAPH_KEYS);
+        s.allow(rep, &allowed);
+        // The run-graph keys the step declares (a key with no value counts:
+        // it is written down), names only.
+        let mut run_graph: Vec<String> = RUN_GRAPH_KEYS
+            .iter()
+            .filter(|key| s.get(key).is_some())
+            .map(|key| key.to_string())
+            .collect();
+        run_graph.sort();
         let id = s.req_id(rep, "id");
         // A fan-out step names its seats (or its folder routes) instead.
         let fan_out = !s.absent("seats") || !s.absent("over_folder");
@@ -2116,6 +2127,7 @@ pub(crate) fn workflow(
                 description: value(s.text(rep, "description")),
                 output_schema: value(output_schema),
                 max_tokens,
+                run_graph,
             });
         }
     }

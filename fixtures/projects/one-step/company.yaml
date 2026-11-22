@@ -1,0 +1,8 @@
+schema_version: 2
+name: One Step
+description: A synthetic project with one seat and one workflow of one step.
+timezone: UTC
+currency: EUR
+teams:
+  - id: core
+    name: Core team

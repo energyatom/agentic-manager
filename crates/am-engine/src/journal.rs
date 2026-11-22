@@ -73,6 +73,8 @@ pub fn create_run(
             workflow: wf.workflow.clone(),
             origin: origin.into(),
             steps: wf.steps.clone(),
+            // The spike's hard-coded workflow comes from no config snapshot.
+            config_hash: None,
         },
     )?;
     Ok(run_id)

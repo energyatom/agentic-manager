@@ -7,6 +7,10 @@
 //! - `agentic accounts add <id> --provider anthropic [--name <text>]`, `remove <id>`,
 //!   `list`, `test <id> [--model M]`, each with `[--project <folder>]` (story
 //!   2.1, AD-15's interim CLI Account edit; add and remove only in a terminal)
+//! - `agentic run <workflow> [--project <folder>]` (epic 3 story 1: one run of
+//!   a configured workflow, only in a terminal; exit 0 succeeded, 1 failed or
+//!   refused, 2 usage) and `agentic status [--project <folder>]` (the runs,
+//!   newest first, with their steps; reads only)
 //! - `agentic spike c1 [--provider anthropic|lmstudio|ollama] [--model M]`
 //! - `agentic spike c3 --db PATH [--cron EXPR] [--tz ZONE]` (sleep/wake demo)
 //! - `agentic spike c4 [--dir PATH] [--anthropic-model M] [--local-model M] [--no-anthropic] [--no-local] [--out FILE]`
@@ -70,6 +74,17 @@ async fn main() {
             let code = accounts(&argv[1..]).await;
             std::process::exit(code);
         }
+        Some("run") => {
+            // The code is returned after the command dropped the open
+            // project (the marker, then the store's lock): no
+            // `process::exit` in between.
+            let code = run(&argv[1..]).await;
+            std::process::exit(code);
+        }
+        Some("status") => {
+            let code = status(&argv[1..]);
+            std::process::exit(code);
+        }
         Some("__spike-run") => spike_run(&args).await,
         Some("spike") => match argv.get(1).map(String::as_str) {
             Some("c1") => c1(&args).await,
@@ -82,31 +97,53 @@ async fn main() {
         Some("--version") => println!("agentic {}", env!("CARGO_PKG_VERSION")),
         _ => {
             eprintln!(
-                "usage: agentic serve [--project <path>] | agentic validate [<project>] | agentic audit export|verify | agentic accounts add|remove|list|test | agentic spike c1|c3|c4|c7|local-context"
+                "usage: agentic serve [--project <path>] | agentic validate [<project>] | agentic audit export|verify | agentic accounts add|remove|list|test | agentic run <workflow> | agentic status | agentic spike c1|c3|c4|c7|local-context"
             );
             std::process::exit(2);
         }
     }
 }
 
-/// `agentic accounts add|remove|list|test` (story 2.1, AD-15): the command
-/// with the owner's real terminal, the Keychain, the OS identity adapter
-/// and `am-net`'s client. Nothing here can swap the terminal for another.
-async fn accounts(args: &[String]) -> i32 {
-    use am_app::cli::AccountsContext;
+/// What the binary gives every CLI-class command (AD-15): this platform's
+/// places, the OS identity adapter and the owner's real terminal. This is
+/// the one place the binary builds a terminal (the release guard in
+/// `xtask/tests/release_deps.rs` counts them): `accounts` and `run` both
+/// take theirs from here, and nothing can swap it for another. `Err` is the
+/// exit code, after the reason was printed.
+fn owner_side() -> Result<am_app::cli::OwnerSide, i32> {
     let places = match am_app::runtime::Places::from_env() {
         Ok(p) => p,
         Err(e) => {
             eprintln!("agentic: {e}");
-            return 1;
+            return Err(1);
         }
+    };
+    Ok(am_app::cli::OwnerSide {
+        places,
+        identity: am_app::identity::system(),
+        terminal: Box::new(am_app::terminal::OwnerTerminal::new()),
+    })
+}
+
+/// `agentic accounts add|remove|list|test` (story 2.1, AD-15): the command
+/// with the owner's side ([`owner_side`]), the Keychain and `am-net`'s
+/// client.
+async fn accounts(args: &[String]) -> i32 {
+    use am_app::cli::{AccountsContext, OwnerSide};
+    let OwnerSide {
+        places,
+        identity,
+        terminal,
+    } = match owner_side() {
+        Ok(owner) => owner,
+        Err(code) => return code,
     };
     let secrets = am_app::keychain();
     let for_egress = secrets.clone();
     let ctx = AccountsContext {
         places,
-        identity: am_app::identity::system(),
-        terminal: Box::new(am_app::terminal::OwnerTerminal::new()),
+        identity,
+        terminal,
         secrets,
         egress: Arc::new(move |policy| {
             Arc::new(am_net::NetEgress::new(policy, for_egress.clone(), None))
@@ -114,6 +151,45 @@ async fn accounts(args: &[String]) -> i32 {
         }),
     };
     am_app::cli::accounts(args, ctx, &mut std::io::stdout(), &mut std::io::stderr()).await
+}
+
+/// `agentic run <workflow>` (epic 3 story 1, AD-15): the command with the
+/// owner's side ([`owner_side`]) and the factory that wires no provider
+/// yet. Nothing here can swap in a fake provider.
+async fn run(args: &[String]) -> i32 {
+    use am_app::cli::{OwnerSide, RunContext};
+    let OwnerSide {
+        places,
+        identity,
+        terminal,
+    } = match owner_side() {
+        Ok(owner) => owner,
+        Err(code) => return code,
+    };
+    let ctx = RunContext {
+        places,
+        identity,
+        terminal,
+        providers: am_app::cli::unwired_providers(),
+    };
+    am_app::cli::run(args, ctx, &mut std::io::stdout(), &mut std::io::stderr()).await
+}
+
+/// `agentic status` (epic 3 story 1): reads the project's runs without its
+/// lock, with any stdin.
+fn status(args: &[String]) -> i32 {
+    match am_app::runtime::Places::from_env() {
+        Ok(places) => am_app::cli::status(
+            args,
+            &places,
+            &mut std::io::stdout(),
+            &mut std::io::stderr(),
+        ),
+        Err(e) => {
+            eprintln!("agentic: {e}");
+            1
+        }
+    }
 }
 
 const SERVE_USAGE: &str = "usage: agentic serve [--project <path> [--confirm-move] [--take-over]] [--port N] [--no-browser]";

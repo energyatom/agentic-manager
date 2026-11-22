@@ -59,6 +59,8 @@ fn populated(root: &Path) -> Store {
             workflow: "wf-1".into(),
             origin: "manual".into(),
             steps: vec!["a".into(), "b".into()],
+            // Story 3.1: the run pins its config snapshot's hash.
+            config_hash: Some(sha256_hex("the config files")),
         },
     )
     .unwrap();

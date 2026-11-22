@@ -79,6 +79,8 @@ fn populated(dir: &Path, root: &Path) -> Store {
             workflow: "wf-1".into(),
             origin: "manual".into(),
             steps: vec!["a".into()],
+            // Story 3.1: a run made with no config snapshot has no hash.
+            config_hash: None,
         },
     )
     .unwrap();

@@ -327,6 +327,12 @@ pub struct Step {
     pub output_schema: Option<String>,
     /// Output tokens per model call in this step.
     pub max_tokens: Option<u32>,
+    /// The run-graph keys the step declares (AD-40..AD-42: `seats`, `join`,
+    /// `over_folder`, `routes`, `files`, `handoff`, `review`,
+    /// `max_parallel`), names only, sorted. Their values are checked from
+    /// epic 3 on; a runner that cannot honour one refuses the step by this
+    /// list instead of running it as a plain turn.
+    pub run_graph: Vec<String>,
 }
 
 /// `tables/<id>.yaml` (AD-21, AD-22).
