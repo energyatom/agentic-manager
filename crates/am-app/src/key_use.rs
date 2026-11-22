@@ -17,7 +17,9 @@
 //! 4. the Account's latest confirmation record (`account_added`, or
 //!    `account_changed` from story 14), with no `account_removed` after it,
 //!    written by the owner with an intent of the user file, names the same
-//!    provider, scheme, host, port and key state.
+//!    provider, scheme, host, port and key state. An Account whose latest
+//!    record is `account_listed` (story 2.13: listed unconfirmed by
+//!    `accounts migrate`) is refused naming `agentic accounts change <id>`.
 //!
 //! A hash that fails while another process holds `user.lock`, or that
 //! equals a pending intent's new hash, is a write in flight: the check waits
@@ -58,6 +60,10 @@ pub enum Refused {
     /// The file holds the bytes of a write that was interrupted (its
     /// History entry not recorded yet) and no process is finishing it.
     Interrupted,
+    /// Listed unconfirmed by `agentic accounts migrate` (story 2.13, an
+    /// `account_listed` record with no confirmation after it): no key is
+    /// used until `agentic accounts change <id>` confirms it.
+    Unconfirmed,
 }
 
 impl Refused {
@@ -79,6 +85,7 @@ impl Refused {
                 format!("it is not confirmed by `agentic accounts add` on this Mac ({why})")
             }
             Refused::Interrupted => interrupted_words(),
+            Refused::Unconfirmed => unconfirmed_words(id),
         }
     }
 }
@@ -87,6 +94,13 @@ impl Refused {
 pub fn interrupted_words() -> String {
     format!(
         "a write of this Mac's {USER_ACCOUNTS_FILE} was interrupted before its History entry was recorded, so no key is read until it is settled; the next `agentic accounts add` or `agentic accounts remove` settles it, then run this command again"
+    )
+}
+
+/// The words for an Account `accounts migrate` listed unconfirmed.
+pub fn unconfirmed_words(id: &str) -> String {
+    format!(
+        "'{id}' was moved to this Mac's Accounts unconfirmed (by `agentic accounts migrate`), so no key is used for it until you confirm it with `agentic accounts change {id}`, which asks for a new key"
     )
 }
 
@@ -178,6 +192,21 @@ fn records(reader: &am_store::user::UserReader, id: &str) -> Result<Vec<ConfigNo
     });
     all.sort_by_key(|n| n.seq);
     Ok(all)
+}
+
+/// True when the owner's `account_listed` record of `id` on the user file
+/// (story 2.13) comes after the record at `seq`.
+fn listed_after(reader: &am_store::user::UserReader, id: &str, seq: i64) -> Result<bool, String> {
+    Ok(reader
+        .config_note_args("config.widened", id)
+        .map_err(|e| e.to_string())?
+        .iter()
+        .any(|n| {
+            matches!(n.actor, Actor::Human { .. })
+                && n.file == USER_ACCOUNTS_FILE
+                && n.args.get("kind").map(String::as_str) == Some("account_listed")
+                && n.seq > seq
+        }))
 }
 
 /// What the latest record of an Account confirms: provider, scheme, host,
@@ -313,6 +342,14 @@ fn once(places: &Places, id: &str) -> Once {
         Ok(r) => r,
         Err(why) => return done(Err(Refused::Store(why))),
     };
+    // Listed unconfirmed by `accounts migrate`, with no confirmation since.
+    let listed = match listed_after(&reader, id, records.last().map_or(0, |n| n.seq)) {
+        Ok(l) => l,
+        Err(why) => return done(Err(Refused::Store(why))),
+    };
+    if listed {
+        return done(Err(Refused::Unconfirmed));
+    }
     let Some(latest) = records.last() else {
         return done(Err(Refused::NotConfirmed(format!(
             "no `agentic accounts add` of '{id}' is recorded on this Mac"

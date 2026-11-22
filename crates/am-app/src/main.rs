@@ -5,8 +5,11 @@
 //! - `agentic audit export <project> [--out <file>]`, `agentic audit verify <file>`
 //!   (exit 0 OK, 1 failure or a broken chain, 2 usage)
 //! - `agentic accounts add <id> --provider anthropic|openai|openai-compatible [--base-url <url>] [--name <text>]`, `remove <id>`,
-//!   `list`, `test <id> [--model M]`, each with `[--project <folder>]` (story
-//!   2.1, AD-15's interim CLI Account edit; add and remove only in a terminal)
+//!   `list`, `test <id> [--model M]` (story 2.1, AD-15's interim CLI Account
+//!   edit; add and remove only in a terminal; since story 2.12 no project),
+//!   and `migrate --project <folder> [--as <old>=<new>]... [--dry-run |
+//!   --rollback]` (story 2.13: a project's old `models/accounts.yaml` to this
+//!   Mac's Accounts; only in a terminal, `--dry-run` anywhere)
 //! - `agentic run <workflow> [--project <folder>]` (epic 3 story 1: one run of
 //!   a configured workflow, only in a terminal; exit 0 succeeded, 1 failed or
 //!   refused, 2 usage) and `agentic status [--project <folder>]` (the runs,
@@ -101,7 +104,7 @@ async fn main() {
         Some("--version") => println!("agentic {}", env!("CARGO_PKG_VERSION")),
         _ => {
             eprintln!(
-                "usage: agentic serve [--project <path>] | agentic validate [<project>] | agentic audit export|verify | agentic accounts add|remove|list|test | agentic run <workflow> | agentic status | agentic spike c3|c7|local-context"
+                "usage: agentic serve [--project <path>] | agentic validate [<project>] | agentic audit export|verify | agentic accounts add|remove|list|test|migrate | agentic run <workflow> | agentic status | agentic spike c3|c7|local-context"
             );
             std::process::exit(2);
         }
@@ -129,7 +132,7 @@ fn owner_side() -> Result<am_app::cli::OwnerSide, i32> {
     })
 }
 
-/// `agentic accounts add|remove|list|test` (story 2.1, AD-15): the command
+/// `agentic accounts add|remove|list|test|migrate` (stories 2.1, 2.13; AD-15): the command
 /// with the owner's side ([`owner_side`]), the Keychain and `am-net`'s
 /// client over the directory and audit sink the command hands it.
 async fn accounts(args: &[String]) -> i32 {

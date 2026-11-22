@@ -175,7 +175,7 @@ pub(crate) fn ensure_private_dir(dir: &Path) -> Result<(), Refusal> {
     Ok(())
 }
 
-fn private_options() -> std::fs::OpenOptions {
+pub(crate) fn private_options() -> std::fs::OpenOptions {
     let mut o = std::fs::OpenOptions::new();
     #[cfg(unix)]
     {
@@ -1312,6 +1312,36 @@ pub mod testing {
             if let Some(point) = point {
                 all.push((root, point));
             }
+        }
+    }
+
+    /// What a test runs once in `accounts migrate` of the project at each
+    /// root, after the user store's records committed and before the
+    /// backup's hash checks (story 2.13).
+    type Meanwhile = Box<dyn FnOnce() + Send>;
+    static BEFORE_BACKUP_CHECK: Mutex<Vec<(std::path::PathBuf, Meanwhile)>> =
+        Mutex::new(Vec::new());
+
+    /// Runs `meanwhile` once in the next `agentic accounts migrate` of the
+    /// project at `root`, after the user store's records committed and
+    /// before the backup's hash checks (story 2.13), as another process
+    /// writing the project's files at that moment would.
+    pub fn before_backup_check(root: &std::path::Path, meanwhile: impl FnOnce() + Send + 'static) {
+        let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+        if let Ok(mut all) = BEFORE_BACKUP_CHECK.lock() {
+            all.retain(|(r, _)| *r != root);
+            all.push((root, Box::new(meanwhile)));
+        }
+    }
+
+    /// Takes and runs what [`before_backup_check`] set for `root`.
+    pub(crate) fn run_before_backup_check(root: &std::path::Path) {
+        let found = BEFORE_BACKUP_CHECK.lock().ok().and_then(|mut all| {
+            let at = all.iter().position(|(r, _)| r == root)?;
+            Some(all.remove(at).1)
+        });
+        if let Some(meanwhile) = found {
+            meanwhile();
         }
     }
 

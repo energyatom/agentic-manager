@@ -22,6 +22,15 @@
 //!   lock on drop.
 //! - **Readers:** [`UserReader::open`] is read-only (`query_only=ON`) and
 //!   takes no lock; a missing `user.db` reads as empty and is not created.
+//! - **The `recovered` mark** (story 2.13, user migration 0002; AD-15
+//!   *Migrate*, AD-17 *Recovery*): one row in `user_marks`. am-app sets it
+//!   on a store it creates while the user Accounts file or the
+//!   `accounts migrate` backups already exist
+//!   ([`UserStore::locked_marking_new`], in the creating transaction), or
+//!   under the guard with [`UserStore::mark_recovered`]; it is never
+//!   cleared. [`UserReader::is_recovered`] reads it; a store created
+//!   normally, a store made before 0002 and a missing store read as not
+//!   marked. Setting it is audited `store.marked_recovered`.
 
 use std::collections::BTreeMap;
 use std::fs::{File, TryLockError};
@@ -41,7 +50,10 @@ use crate::audit::{ConfigNote, GENESIS};
 use crate::migrations::{self, MigrationSet};
 use crate::{Reader, StoreError, WriteCommand, fsx, new_id, now_ts};
 
-const USER_MIGRATIONS: &[&str] = &[include_str!("../migrations/user/0001_user.sql")];
+const USER_MIGRATIONS: &[&str] = &[
+    include_str!("../migrations/user/0001_user.sql"),
+    include_str!("../migrations/user/0002_user_marks.sql"),
+];
 
 /// The user store's `application_id`: never a project store's.
 pub const USER_APPLICATION_ID: i32 = 0x414D_5553;
@@ -172,6 +184,18 @@ impl UserStore {
     /// then opens, checks and migrates `user.db` under it (creating the
     /// database 0600 on the first write on this Mac).
     pub fn locked(layout: &AppDataLayout, wait: Duration) -> Result<UserStore, StoreError> {
+        Self::locked_marking_new(layout, wait, false)
+    }
+
+    /// [`UserStore::locked`], and when this call creates the store (a new
+    /// or never-migrated `user.db`) and `recovered_if_new` holds, the
+    /// `recovered` mark commits in the creating transaction (story 2.13),
+    /// so no crash leaves such a store unmarked.
+    pub fn locked_marking_new(
+        layout: &AppDataLayout,
+        wait: Duration,
+        recovered_if_new: bool,
+    ) -> Result<UserStore, StoreError> {
         if !cfg!(unix) {
             return Err(StoreError::Unsupported);
         }
@@ -195,7 +219,10 @@ impl UserStore {
         let mut conn = Connection::open(&path)?;
         check(&path, &conn)?;
         crate::configure(&conn)?;
-        migrations::migrate_set(&mut conn, &layout.backups_pre_migration(), &USER)?;
+        let mark = |tx: &Transaction| set_recovered(tx);
+        let on_create: Option<migrations::OnCreate<'_>> =
+            if recovered_if_new { Some(&mark) } else { None };
+        migrations::migrate_set(&mut conn, &layout.backups_pre_migration(), &USER, on_create)?;
         Ok(UserStore {
             db: Mutex::new(Reader { conn }),
             path,
@@ -268,6 +295,25 @@ impl UserStore {
         })
     }
 
+    /// Marks this store `recovered` (story 2.13), audited
+    /// `store.marked_recovered` in the same transaction; a store already
+    /// marked stays as it is and nothing is written.
+    pub fn mark_recovered(&self) -> Result<(), StoreError> {
+        self.with(|db| {
+            let tx = Transaction::new_unchecked(&db.conn, TransactionBehavior::Immediate)?;
+            check(&self.path, &tx)?;
+            set_recovered(&tx)?;
+            tx.commit()?;
+            Ok(())
+        })
+    }
+
+    /// Whether this store is marked `recovered` (read on the guard's own
+    /// connection).
+    pub fn is_recovered(&self) -> Result<bool, StoreError> {
+        self.with(|db| recovered(&db.conn))
+    }
+
     /// The notes of `action` on `target` that committed config intents
     /// wrote, oldest first (read on the guard's own connection).
     pub fn config_note_args(
@@ -276,6 +322,62 @@ impl UserStore {
         target: &str,
     ) -> Result<Vec<ConfigNote>, StoreError> {
         self.with(|db| db.config_note_args(action, target))
+    }
+}
+
+/// Sets the one mark row to `recovered` with its audit entry; nothing when
+/// it is set already.
+fn set_recovered(tx: &Transaction) -> Result<(), StoreError> {
+    if recovered(tx)? {
+        return Ok(());
+    }
+    let at = now_ts();
+    let set = tx.execute(
+        "UPDATE user_marks SET recovered = 1, recovered_at = ?1 WHERE id = 1",
+        rusqlite::params![at],
+    )?;
+    if set != 1 {
+        return Err(StoreError::Invalid(
+            "this Mac's user store has no marks row to mark recovered".into(),
+        ));
+    }
+    crate::audit::append(
+        tx,
+        &Actor::System {
+            component: "user-store".into(),
+        },
+        "store.marked_recovered",
+        "user store",
+        "created while this Mac's Accounts file or accounts migrate backups already existed: no project's confirmation is carried over",
+        None,
+        &at,
+    )?;
+    Ok(())
+}
+
+/// The mark. A store made before the marks table (version 1) is not
+/// marked; at version 2 or later a missing table, a missing row or any
+/// other read error is an error, never "not marked" (story 2.13: it
+/// decides whether a project's confirmation may be carried over).
+fn recovered(conn: &Connection) -> Result<bool, StoreError> {
+    if migrations::user_version(conn)? < 2 {
+        return Ok(false);
+    }
+    let marked: i64 = conn
+        .query_row("SELECT recovered FROM user_marks WHERE id = 1", [], |r| {
+            r.get(0)
+        })
+        .map_err(|e| {
+            StoreError::Invalid(format!(
+                "this Mac's user store cannot tell whether it was recovered ({e})"
+            ))
+        })?;
+    match marked {
+        0 => Ok(false),
+        1 => Ok(true),
+        other => Err(StoreError::Invalid(format!(
+            "this Mac's user store holds an unknown recovered mark ({other})"
+        ))),
     }
 }
 
@@ -452,6 +554,21 @@ impl UserReader {
         match &self.db {
             Some(db) => db.verify_audit_chain(),
             None => Ok(None),
+        }
+    }
+
+    /// Whether the store exists and was migrated (a write created it); a
+    /// missing or never-migrated `user.db` is not (story 2.13).
+    pub fn is_created(&self) -> bool {
+        self.db.is_some()
+    }
+
+    /// Whether the store is marked `recovered` (story 2.13); a missing
+    /// store, or one made before the marks table, is not.
+    pub fn is_recovered(&self) -> Result<bool, StoreError> {
+        match &self.db {
+            Some(db) => recovered(&db.conn),
+            None => Ok(false),
         }
     }
 }

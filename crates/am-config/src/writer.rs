@@ -24,8 +24,9 @@
 //! whose file holds its new bytes is completed, any other is dropped; stale
 //! temp files are removed when a writer opens. One edit runs at a time. The
 //! writer remembers the (file, sha256) of its own writes for the watcher.
-//! It never deletes or renames a config file, and it makes a new one only
-//! through a [`ConfigCreate`].
+//! It never deletes or renames a config file (the one removal is a
+//! migration's, below), and it makes a new one only through a
+//! [`ConfigCreate`].
 //!
 //! [`ConfigWriter::create`] (a [`ConfigCreate`], story 2.1, AD-16) writes a
 //! new config file through the same intent and commit, under
@@ -47,6 +48,15 @@
 //! `reconcile` settles a crash after the rename. It commits History and its
 //! audit only, never an approved grant set (AD-16).
 //!
+//! Story 2.13 (AD-15 *Migrate*, AD-16): [`ConfigWriter::apply_migration`]
+//! applies a [`ConfigMigration`]: its Account renames (one `migration`
+//! entry per file) and then the removal of the old `models/accounts.yaml`,
+//! the one file the writer ever removes, as a `removal` entry whose intent
+//! is committed before the unlink (reconcile treats an absent file as
+//! written). [`ConfigWriter::restore_legacy_accounts`] puts that file back
+//! byte for byte from a backup (`accounts migrate --rollback`), as a
+//! `create`. Both are for the owner only, and only in a project.
+//!
 //! Story 1.10 (AD-7): the owner's accept of migration offers (see `migrate`)
 //! writes every offered file as one `migration` entry each through the same
 //! sequence, after one check of the whole migrated project; it is refused
@@ -64,10 +74,11 @@ use am_domain::{
 };
 use sha2::{Digest, Sha256};
 
+use crate::account_migration::{ConfigMigration, MigrationStep, plan_renames};
 use crate::canon::{self, FileKind};
 use crate::finding::Report;
 use crate::migrate::{self, MigrationOffer};
-use crate::user_accounts::USER_ACCOUNTS_FILE;
+use crate::user_accounts::{LEGACY_ACCOUNTS_FILE, USER_ACCOUNTS_FILE};
 use crate::{
     FOLDERS, Finding, LoadError, LoadOptions, MODEL_FILES, Severity, checks, linediff, load_exact,
     load_with,
@@ -317,7 +328,9 @@ fn secret_lines_of(kind: Option<FileKind>, file: &str, bytes: &[u8]) -> Vec<u32>
 const OWN_WRITES: usize = 1024;
 const TMP_SUFFIX: &str = ".am-tmp";
 
-pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
+/// The sha256 of `bytes` as 64 lowercase hex characters: the hash the
+/// writer, History and the `accounts migrate` backup compare.
+pub fn sha256_hex(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 
@@ -673,6 +686,7 @@ impl ConfigWriter {
     pub fn undo(&self, actor: Actor, id: &str) -> Result<HistoryEntry, WriteError> {
         let _one = self.serial()?;
         let entry = self.entry(id)?;
+        refuse_removal(&entry, "undo")?;
         refuse_absent(&entry, true)?;
         if entry.kind == HistoryKind::Create {
             return Err(WriteError::BadEdit(format!(
@@ -705,6 +719,7 @@ impl ConfigWriter {
     pub fn restore(&self, actor: Actor, id: &str) -> Result<HistoryEntry, WriteError> {
         let _one = self.serial()?;
         let entry = self.entry(id)?;
+        refuse_removal(&entry, "restore")?;
         refuse_absent(&entry, false)?;
         self.resolve(&entry.file)?;
         let current = self.read(&entry.file)?;
@@ -891,6 +906,330 @@ impl ConfigWriter {
         Ok(entries)
     }
 
+    /// Story 2.13 (AD-15 *Migrate*, AD-16): applies `migration`, every
+    /// step or none, for the owner only (`NotOwner` otherwise) and only in a
+    /// project (the user Accounts file's writer removes nothing). Before any
+    /// write: a removal must name exactly `models/accounts.yaml`, which must
+    /// still hold the bytes it names and no key; each rename's new id must be
+    /// an Account id; and the project with every step applied must add no
+    /// error. Then each renamed file is written as one `migration` entry,
+    /// and last the old file is removed as one `removal` entry, its intent
+    /// committed before the unlink. Returns the entries in that order.
+    /// An `Expects` step names the exact set of files the renames may write
+    /// and the bytes each must still hold (what the owner was shown; an
+    /// empty set included); a file outside it, or any difference, refuses
+    /// with nothing written. Every step is checked before any
+    /// is written; should a write still stop part-way, a re-run completes it
+    /// (a rename whose `old` is no longer named writes nothing). The old file
+    /// is resolved again (exact name, no link) right before its unlink.
+    pub fn apply_migration(
+        &self,
+        actor: Actor,
+        migration: ConfigMigration,
+    ) -> Result<Vec<HistoryEntry>, WriteError> {
+        if !matches!(actor, Actor::Human { .. }) {
+            return Err(WriteError::NotOwner {
+                actor: actor.describe(),
+            });
+        }
+        if self.user {
+            return Err(WriteError::BadEdit(
+                "the writer of this Mac's Accounts file makes no migration and removes no file; nothing was written".into(),
+            ));
+        }
+        if migration.steps.is_empty() {
+            return Err(WriteError::NoChange("the migration has no step".into()));
+        }
+        let _one = self.serial()?;
+        let mut removal: Option<(String, Vec<u8>)> = None;
+        let mut renames: Vec<(String, String)> = Vec::new();
+        let mut expects: Option<BTreeMap<String, String>> = None;
+        for step in migration.steps {
+            match step {
+                MigrationStep::Remove {
+                    file,
+                    before_sha256,
+                } => {
+                    if file != LEGACY_ACCOUNTS_FILE {
+                        return Err(WriteError::BadPath {
+                            file,
+                            reason: format!(
+                                "the only file a migration removes is a project's old {LEGACY_ACCOUNTS_FILE}; nothing was written"
+                            ),
+                        });
+                    }
+                    if removal.is_some() {
+                        return Err(WriteError::BadEdit(format!(
+                            "{file} is removed twice in one migration; nothing was written"
+                        )));
+                    }
+                    self.resolve(&file)?;
+                    let bytes = self.read(&file)?;
+                    if sha256_hex(&bytes) != before_sha256 {
+                        return Err(WriteError::ChangedSince {
+                            file,
+                            entry: String::new(),
+                        });
+                    }
+                    let lines = secret_lines(&file, &bytes);
+                    if !lines.is_empty() {
+                        return Err(WriteError::Secret { file, lines });
+                    }
+                    removal = Some((file, bytes));
+                }
+                MigrationStep::RenameAccount { old, new } => renames.push((old, new)),
+                MigrationStep::Expects { files } => {
+                    if expects.is_some() {
+                        return Err(WriteError::BadEdit(
+                            "a migration names its expected files once; nothing was written".into(),
+                        ));
+                    }
+                    expects = Some(files);
+                }
+            }
+        }
+        let disk = self.scan();
+        let planned = plan_renames(&self.root, &disk, &renames)?;
+        // What the owner was shown: every expected file still holds its
+        // bytes, and no other file would be written.
+        if let Some(holds) = &expects {
+            for (file, expected) in holds {
+                let now = std::fs::read(self.root.join(file))
+                    .map(|b| sha256_hex(&b))
+                    .unwrap_or_default();
+                if now != *expected {
+                    return Err(WriteError::ChangedSince {
+                        file: file.clone(),
+                        entry: String::new(),
+                    });
+                }
+            }
+            if let Some(r) = planned.iter().find(|r| !holds.contains_key(&r.file)) {
+                return Err(WriteError::ChangedSince {
+                    file: r.file.clone(),
+                    entry: String::new(),
+                });
+            }
+        }
+        for r in &planned {
+            let lines = secret_lines(&r.file, &r.before);
+            if !lines.is_empty() {
+                return Err(WriteError::Secret {
+                    file: r.file.clone(),
+                    lines,
+                });
+            }
+        }
+        // The whole migrated project adds no error (as for an accept).
+        let mut after = disk.clone();
+        for r in &planned {
+            after.insert(r.file.clone(), r.after.clone());
+        }
+        if let Some((file, _)) = &removal {
+            after.remove(file);
+        }
+        let new_errors = added_errors(self.errors_exact(disk)?, self.errors_exact(after)?);
+        if let Some(first) = new_errors.first() {
+            return Err(WriteError::Invalid {
+                file: first.file.clone(),
+                findings: new_errors,
+            });
+        }
+        let mut entries: Vec<HistoryEntry> = Vec::with_capacity(planned.len() + 1);
+        let stop = |file: &str, cause: WriteError, written: bool, entries: Vec<HistoryEntry>| {
+            if entries.is_empty() && !written {
+                return cause;
+            }
+            WriteError::MigrationStopped {
+                file: file.to_string(),
+                migrated: entries.into_iter().map(|e| e.file).collect(),
+                written,
+                cause: Box::new(cause),
+            }
+        };
+        for r in planned {
+            if let Err(e) = self.unchanged(&r.file, &r.before) {
+                return Err(stop(&r.file, e, false, entries));
+            }
+            let after_sha256 = sha256_hex(&r.after);
+            match self.write_step(
+                actor.clone(),
+                &r.file,
+                Change {
+                    kind: HistoryKind::Migration,
+                    ref_entry: None,
+                    before: r.before,
+                    after: r.after,
+                    audit: Vec::new(),
+                },
+            ) {
+                Ok(entry) => entries.push(entry),
+                Err(e) => {
+                    let written = std::fs::read(self.root.join(&r.file))
+                        .is_ok_and(|b| sha256_hex(&b) == after_sha256);
+                    return Err(stop(&r.file, e, written, entries));
+                }
+            }
+        }
+        if let Some((file, before)) = removal {
+            match self.remove_step(actor, &file, before) {
+                Ok(entry) => entries.push(entry),
+                Err(e) => {
+                    let written = !self.root.join(&file).exists();
+                    return Err(stop(&file, e, written, entries));
+                }
+            }
+        }
+        Ok(entries)
+    }
+
+    /// A removal's intent, unlink and commit (story 2.13): the intent is
+    /// committed first; the file is read once more, and a change since
+    /// refuses with nothing removed; a crash after the unlink leaves the
+    /// intent, which reconcile completes (the file is absent).
+    fn remove_step(
+        &self,
+        actor: Actor,
+        file: &str,
+        before: Vec<u8>,
+    ) -> Result<HistoryEntry, WriteError> {
+        let empty = sha256_hex(b"");
+        let intent = NewIntent {
+            file: file.to_string(),
+            kind: HistoryKind::Removal,
+            ref_entry: None,
+            before_sha256: sha256_hex(&before),
+            after_sha256: empty.clone(),
+            diff: linediff::unified(file, &before, b""),
+            before: before.clone(),
+            after: Vec::new(),
+            audit: Vec::new(),
+        };
+        for p in self.history.pending_intents()? {
+            if p.intent.file == file {
+                self.settle(p)?;
+            }
+        }
+        // Resolved again (exact name, no link) right before the read and
+        // the unlink: a link put in its place is never removed as the file.
+        self.resolve(file)?;
+        let id = self.history.begin_intent(actor.clone(), intent)?;
+        match self.read(file) {
+            Ok(now) if now == before => {}
+            Ok(_) => {
+                let _ = self.history.drop_intent(actor, id);
+                return Err(WriteError::ChangedOnDisk {
+                    files: vec![file.to_string()],
+                });
+            }
+            Err(e) => {
+                // Nothing was removed: the intent goes too.
+                let _ = self.history.drop_intent(actor, id);
+                return Err(e);
+            }
+        }
+        self.remember(file, &empty);
+        #[cfg(feature = "test-support")]
+        if self.failpoint(FailPoint::BeforeRename) {
+            return Err(WriteError::Interrupted(
+                "simulated crash before the file was removed".into(),
+            ));
+        }
+        let path = self.root.join(file);
+        if let Err(e) = self.resolve(file) {
+            let _ = self.history.drop_intent(actor, id);
+            return Err(e);
+        }
+        if let Err(e) = std::fs::remove_file(&path) {
+            let _ = self.history.drop_intent(actor, id);
+            return Err(WriteError::Io {
+                context: format!("cannot remove {file}"),
+                source: e,
+            });
+        }
+        let dir = path.parent().unwrap_or(&self.root).to_path_buf();
+        std::fs::File::open(&dir)
+            .and_then(|d| d.sync_all())
+            .map_err(io(format!("cannot sync the folder of {file}")))?;
+        #[cfg(feature = "test-support")]
+        if self.failpoint(FailPoint::AfterRename) {
+            return Err(WriteError::Interrupted(
+                "simulated crash after the file was removed".into(),
+            ));
+        }
+        Ok(self.history.commit_entry(actor, id)?)
+    }
+
+    /// Story 2.13 (`accounts migrate --rollback`; AD-15, AD-16): re-creates
+    /// the project's old `models/accounts.yaml` holding exactly `bytes` (a
+    /// backup's, never emitted canonically), as a `create` entry placed
+    /// without replacing anything, for the owner only and only in a
+    /// project. Refused, with nothing written, when anything stands at that
+    /// name or the bytes hold a secret-looking value. The project's check
+    /// is not run: the file is an error by design (it was the project's
+    /// state before the migration) and grants nothing.
+    pub fn restore_legacy_accounts(
+        &self,
+        actor: Actor,
+        bytes: Vec<u8>,
+    ) -> Result<HistoryEntry, WriteError> {
+        if !matches!(actor, Actor::Human { .. }) {
+            return Err(WriteError::NotOwner {
+                actor: actor.describe(),
+            });
+        }
+        if self.user {
+            return Err(WriteError::BadEdit(format!(
+                "the writer of this Mac's Accounts file never writes {LEGACY_ACCOUNTS_FILE}; nothing was written"
+            )));
+        }
+        let _one = self.serial()?;
+        let file = LEGACY_ACCOUNTS_FILE.to_string();
+        self.plain_config_path(&file)?;
+        for p in self.history.pending_intents()? {
+            if p.intent.file == file {
+                self.settle(p)?;
+            }
+        }
+        self.resolve_absent(&file)?;
+        let lines = secret_lines(&file, &bytes);
+        if !lines.is_empty() {
+            return Err(WriteError::BadEdit(format!(
+                "the {file} to restore holds a secret-looking value (line {}); nothing was written",
+                Joined(&lines)
+            )));
+        }
+        if bytes.is_empty() {
+            return Err(WriteError::NoChange(format!(
+                "the {file} to restore would be empty"
+            )));
+        }
+        let after_sha256 = sha256_hex(&bytes);
+        let intent = NewIntent {
+            file: file.clone(),
+            kind: HistoryKind::Create,
+            ref_entry: None,
+            before_sha256: sha256_hex(b""),
+            after_sha256: after_sha256.clone(),
+            diff: linediff::unified(&file, b"", &bytes),
+            before: Vec::new(),
+            after: bytes.clone(),
+            audit: Vec::new(),
+        };
+        let id = self.history.begin_intent(actor.clone(), intent)?;
+        self.remember(&file, &after_sha256);
+        match self.place(&file, &bytes) {
+            Ok(()) => {}
+            Err(Written::No(e)) => {
+                let _ = self.history.drop_intent(actor, id);
+                self.forget_own_writes(&file);
+                return Err(e);
+            }
+            Err(Written::Maybe(e)) => return Err(e),
+        }
+        Ok(self.history.commit_entry(actor, id)?)
+    }
+
     /// `ChangedSince` (for a migration) unless `file` still holds `before`.
     fn unchanged(&self, file: &str, before: &[u8]) -> Result<(), WriteError> {
         if self.read(file)? == before {
@@ -936,9 +1275,14 @@ impl ConfigWriter {
         actor: Actor,
         p: PendingIntent,
     ) -> Result<Option<HistoryEntry>, WriteError> {
+        let path = self.root.join(&p.intent.file);
         let holds_new = self.kind_of(&p.intent.file).is_some()
-            && std::fs::read(self.root.join(&p.intent.file))
-                .is_ok_and(|b| sha256_hex(&b) == p.intent.after_sha256);
+            && if p.intent.kind == HistoryKind::Removal {
+                // A removal is written once the file is gone (story 2.13).
+                matches!(std::fs::symlink_metadata(&path), Err(e) if e.kind() == std::io::ErrorKind::NotFound)
+            } else {
+                std::fs::read(&path).is_ok_and(|b| sha256_hex(&b) == p.intent.after_sha256)
+            };
         if holds_new {
             let entry = self.history.reconcile_intent(actor, p.id)?;
             self.remember(&entry.file, &entry.after_sha256);
@@ -1525,6 +1869,19 @@ fn insert_after_schema_version(text: &str, line: &str) -> Option<String> {
         done = true;
     }
     done.then_some(out)
+}
+
+/// Refuses an Undo or Restore of a `removal` entry (story 2.13): the one
+/// way back is `agentic accounts migrate --rollback`, which re-creates the
+/// file byte for byte from its backup.
+fn refuse_removal(entry: &HistoryEntry, action: &str) -> Result<(), WriteError> {
+    if entry.kind != HistoryKind::Removal {
+        return Ok(());
+    }
+    Err(WriteError::BadEdit(format!(
+        "{}: entry {} removed the file when its Accounts moved to this Mac, so an {action} of it is refused; put the file back with `agentic accounts migrate --project <folder> --rollback`, which re-creates it from its backup",
+        entry.file, entry.id
+    )))
 }
 
 /// Refuses an Undo or Restore of an outside edit that would create or

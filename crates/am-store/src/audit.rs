@@ -332,15 +332,18 @@ impl Reader {
             Ok(args)
         };
         let mut found = Vec::new();
-        // The `at` and file of the History entry whose notes may follow.
-        let mut open: Option<(String, String)> = None;
+        // The `at`, file and entry id of the History entry whose notes may
+        // follow.
+        let mut open: Option<(String, String, String)> = None;
         each_row(&self.conn, |row| {
             if ENTRIES.contains(&row.action.as_str()) {
-                let file = text_args(&row)?.remove("file").unwrap_or_default();
-                open = Some((row.at.clone(), file));
+                let mut args = text_args(&row)?;
+                let file = args.remove("file").unwrap_or_default();
+                let entry = args.remove("entry_id").unwrap_or_default();
+                open = Some((row.at.clone(), file, entry));
                 return Ok(());
             }
-            let Some((_, file)) = open.clone().filter(|(at, _)| *at == row.at) else {
+            let Some((_, file, entry_id)) = open.clone().filter(|(at, _, _)| *at == row.at) else {
                 open = None;
                 return Ok(());
             };
@@ -355,6 +358,8 @@ impl Reader {
             })?;
             found.push(ConfigNote {
                 seq: row.seq,
+                entry_hash: row.entry_hash.clone(),
+                entry_id,
                 actor,
                 file,
                 args: text_args(&row)?,
@@ -584,6 +589,12 @@ pub struct ConfigNote {
     /// The entry's place in the audit chain (its `seq`): later notes, of
     /// any action, have a higher one.
     pub seq: i64,
+    /// The entry's own hash in the chain (`entry_hash`): with `seq`, what a
+    /// carried-over record names as its source (story 2.13).
+    pub entry_hash: String,
+    /// The id of the History entry it was written with (story 2.13: where
+    /// a carried-over record starts in the file's History).
+    pub entry_id: String,
     /// Who confirmed the change: the intent's Actor.
     pub actor: Actor,
     /// The file of the History entry the note was written with.

@@ -58,6 +58,7 @@
 #![forbid(unsafe_code)]
 
 mod account_edit;
+mod account_migration;
 mod base_url;
 mod canon;
 mod checks;
@@ -84,6 +85,10 @@ pub use account_edit::{
     AccountUse, AccountsFile, account_uses, accounts_file, add_account_edit, is_config_id,
     new_accounts_file, outside_changes, remove_account_edit, reserved_account_ids,
 };
+pub use account_migration::{
+    ConfigMigration, LegacyAccounts, LegacyEntry, MigrationStep, RenamedFile, account_renames,
+    legacy_accounts,
+};
 pub use base_url::{COMPATIBLE_BASE_URL_FORMS, CompatibleBaseUrl, compatible_base_url};
 pub use entities::*;
 pub use finding::{Finding, Severity};
@@ -95,7 +100,7 @@ pub use user_accounts::{LEGACY_ACCOUNTS_FILE, USER_ACCOUNTS_FILE, UserAccounts, 
 pub use writer::FailPoint;
 pub use writer::{
     ConfigCreate, ConfigEdit, ConfigIdentityAssign, ConfigWriter, EditOp, ReconcileReport,
-    WriteError, canonical_bytes, config_files,
+    WriteError, canonical_bytes, config_files, sha256_hex,
 };
 
 use finding::Report;

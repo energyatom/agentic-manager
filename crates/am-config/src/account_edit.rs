@@ -97,7 +97,7 @@ impl AccountsFile {
 
 /// The first and last line of a node: its own line and those of every key
 /// and value under it.
-fn lines_of(node: &Node) -> (u32, u32) {
+pub(crate) fn lines_of(node: &Node) -> (u32, u32) {
     let mut span = (node.line, node.line);
     let mut widen = |(first, last): (u32, u32)| {
         span = (span.0.min(first), span.1.max(last));
@@ -222,6 +222,20 @@ impl std::fmt::Display for AccountUse {
 /// answers for a project with errors too (a seat naming an Account that is
 /// not declared yet).
 pub fn account_uses(root: &Path, id: &str) -> Vec<AccountUse> {
+    uses_in(root, id, None)
+}
+
+/// [`account_uses`] with the project's tracked files read only from
+/// `files` (story 2.13: a rename planned over earlier renames).
+pub(crate) fn account_uses_exact(
+    root: &Path,
+    id: &str,
+    files: BTreeMap<String, Vec<u8>>,
+) -> Vec<AccountUse> {
+    uses_in(root, id, Some(files))
+}
+
+fn uses_in(root: &Path, id: &str, exact: Option<BTreeMap<String, Vec<u8>>>) -> Vec<AccountUse> {
     let mut loader = Loader {
         places: kinds::Places {
             project: root.to_path_buf(),
@@ -229,6 +243,7 @@ pub fn account_uses(root: &Path, id: &str) -> Vec<AccountUse> {
             knowledge_root: None,
             recent_roots: Vec::new(),
         },
+        exact,
         ..Loader::default()
     };
     loader.read_all(root);

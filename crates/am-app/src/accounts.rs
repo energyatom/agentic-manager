@@ -1,4 +1,5 @@
-//! `agentic accounts add|remove|list|test` (story 2.1): AD-15's interim CLI
+//! `agentic accounts add|remove|list|test|migrate` (story 2.1; `migrate`,
+//! story 2.13, is in [`migrate`]): AD-15's interim CLI
 //! Account edit, and the two reads beside it. Story 2.3 adds the providers
 //! `openai` and `openai-compatible`; one function, [`endpoint_of`], derives
 //! an Account's endpoint (scheme, host, port, base URL) for every command.
@@ -77,6 +78,8 @@ use am_providers::openai_compat::{OPENAI_BASE_URL, OPENAI_HOST};
 use am_providers::{AnthropicProvider, OpenAiCompatProvider};
 use tokio_util::sync::CancellationToken;
 
+mod migrate;
+
 use crate::cli::{EXIT_ERRORS, EXIT_OK, EXIT_USAGE};
 use crate::key_use::{self, Refused};
 use crate::runtime::{Places, owner};
@@ -98,7 +101,7 @@ const OPENAI_COMPATIBLE: &str = "openai-compatible";
 const PROVIDERS: &str =
     "`--provider anthropic`, `--provider openai` or `--provider openai-compatible`";
 
-const USAGE: &str = "usage: agentic accounts add <id> --provider anthropic|openai|openai-compatible [--base-url <url>] [--name <text>]\n       agentic accounts remove <id> [--force]\n       agentic accounts list\n       agentic accounts test <id> [--model <model>]\n       (Accounts belong to this Mac: no command takes a project;\n        --base-url is for openai-compatible only: https://<host>[/path], or http://127.0.0.1:<port>[/path] for a server on this Mac;\n        --model is required for an openai or openai-compatible Account;\n        --force removes even while a project this Mac knows cannot be reached, never while a reference names the Account)";
+const USAGE: &str = "usage: agentic accounts add <id> --provider anthropic|openai|openai-compatible [--base-url <url>] [--name <text>]\n       agentic accounts remove <id> [--force]\n       agentic accounts list\n       agentic accounts test <id> [--model <model>]\n       agentic accounts migrate --project <path> [--as <old>=<new>]... [--dry-run | --rollback]\n       (Accounts belong to this Mac: no command but migrate takes a project;\n        migrate moves a project's old models/accounts.yaml to this Mac's Accounts, --as names a clashing id anew, --dry-run only shows what it would do, --rollback puts the file back from its backup;\n        --base-url is for openai-compatible only: https://<host>[/path], or http://127.0.0.1:<port>[/path] for a server on this Mac;\n        --model is required for an openai or openai-compatible Account;\n        --force removes even while a project this Mac knows cannot be reached, never while a reference names the Account)";
 
 /// Builds the egress client over a directory, reporting blocks to a sink.
 pub type EgressFactory = Arc<
@@ -137,12 +140,17 @@ enum Command {
         id: String,
         model: Option<String>,
     },
+    /// Story 2.13: `migrate --project <path> …`.
+    Migrate(migrate::Migrate),
 }
 
 fn parse(args: &[String]) -> Result<Command, String> {
     let Some(verb) = args.first().map(String::as_str) else {
-        return Err("accounts needs `add`, `remove`, `list` or `test`".into());
+        return Err("accounts needs `add`, `remove`, `list`, `test` or `migrate`".into());
     };
+    if verb == "migrate" {
+        return migrate::parse(&args[1..]).map(Command::Migrate);
+    }
     if !["add", "remove", "list", "test"].contains(&verb) {
         return Err(format!("unknown accounts command `{verb}`"));
     }
@@ -262,6 +270,7 @@ pub async fn accounts(
         Command::Remove { id, force } => remove(ctx, &id, force, out),
         Command::List => list(&ctx, out),
         Command::Test { id, model } => test(&ctx, &id, model, out).await,
+        Command::Migrate(m) => migrate::run(ctx, m, out),
     };
     match done {
         Ok(()) => EXIT_OK,
@@ -1211,6 +1220,10 @@ fn refused_words(id: &str, refused: &Refused, provider: Option<&str>, own: bool)
         Refused::Interrupted => format!(
             "the Account '{id}' is not called: {}. No key was read and nothing was sent",
             key_use::interrupted_words()
+        ),
+        Refused::Unconfirmed => format!(
+            "the Account '{id}' is not called: {}. No key was read and nothing was sent",
+            key_use::unconfirmed_words(id)
         ),
         Refused::NotConfirmed(why) => {
             let base_url = if own { " --base-url <url>" } else { "" };
