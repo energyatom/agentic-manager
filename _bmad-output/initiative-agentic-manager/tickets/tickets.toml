@@ -142,6 +142,7 @@ after = [
   { epic = 12, needs = "the Source health API and connector Accounts for Doctor (12.14), the crawl-service facts for the About page (12.12), every connector merged before the freeze (12.16), Local search and OCR status, a Local OCR service's health included (12.18, 12.20, 12.21), the capability expansion and switches (12.19)" },
   { epic = 7, needs = "the table grid and v_* views over granted tables for query_table (7.1)" },
   { epic = 8, needs = "the jailed read-only reader query_table reuses (8.1)" },
+  { epic = 2, needs = "the user store, its `recovered` marker and an Account's first confirmation, for recovering Accounts after a lost user database (2.12, 2.14; added 2026-11-22)" },
 ]
 
 [[epic]]
