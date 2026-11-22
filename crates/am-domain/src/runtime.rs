@@ -35,7 +35,8 @@ pub const APP_DATA_NAME: &str = "agentic-manager";
 
 /// Every path in the app data dir (AD-17, AD-32): this Mac's id, the folder
 /// of running servers, the user Accounts file, the user store, its lock and
-/// its pre-migration backups. Nothing else spells them (`cargo xtask
+/// its pre-migration backups, and each project's `accounts migrate` backups.
+/// Nothing else spells them (`cargo xtask
 /// runtime-paths`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppDataLayout {
@@ -84,6 +85,20 @@ impl AppDataLayout {
     /// (story 2.2, AD-12).
     pub fn serving_dir(&self) -> PathBuf {
         self.dir.join("serving")
+    }
+
+    /// One project's `agentic accounts migrate` backups (story 2.13, AD-15
+    /// *Migrate*): `backups/accounts-migrate/<project-id>/`, one copy of the
+    /// old `models/accounts.yaml` and its manifest per run, never pruned.
+    pub fn accounts_migrate_backups(&self, project: &ProjectId) -> PathBuf {
+        self.accounts_migrate_backups_root()
+            .join(project.to_string())
+    }
+
+    /// The folder holding every project's `accounts migrate` backups; its
+    /// presence when the user store is created marks the store `recovered`.
+    pub fn accounts_migrate_backups_root(&self) -> PathBuf {
+        self.dir.join("backups").join("accounts-migrate")
     }
 }
 

@@ -21,7 +21,7 @@
 use std::path::{Path, PathBuf};
 
 use am_domain::{Actor, RuntimeLayout};
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, Transaction, params};
 
 use crate::{StoreError, audit, fsx, now_ts};
 
@@ -142,7 +142,8 @@ pub(crate) fn backup_words(backup: &Option<PathBuf>) -> String {
 /// One migration in its own transaction, with `user_version`. When `report`
 /// is set, the step's report row (once `migration_reports` exists) and its
 /// audit entry (once `audit_log` exists, `args` NULL so it can be written
-/// at any version) commit in the same transaction.
+/// at any version) commit in the same transaction. `finish`, when given,
+/// runs last in the step's transaction (a new store's creating mark).
 fn apply_step(
     conn: &mut Connection,
     sql: &str,
@@ -150,9 +151,27 @@ fn apply_step(
     backup: Option<&Path>,
     report: bool,
     stamp: Option<i32>,
+    finish: Option<OnCreate<'_>>,
+) -> Result<(), StoreError> {
+    let tx = conn.transaction()?;
+    step_in(&tx, sql, from, backup, report, stamp)?;
+    if let Some(finish) = finish {
+        finish(&tx)?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+/// One migration step inside the caller's transaction (see [`apply_step`]).
+fn step_in(
+    tx: &Transaction,
+    sql: &str,
+    from: i64,
+    backup: Option<&Path>,
+    report: bool,
+    stamp: Option<i32>,
 ) -> Result<(), StoreError> {
     let to = from + 1;
-    let tx = conn.transaction()?;
     tx.execute_batch(sql)?;
     tx.pragma_update(None, "user_version", to)?;
     if let Some(id) = stamp {
@@ -161,13 +180,13 @@ fn apply_step(
     if report {
         let at = now_ts();
         let backup = backup.map(|b| b.display().to_string());
-        if table_exists(&tx, "migration_reports")? {
+        if table_exists(tx, "migration_reports")? {
             tx.execute(
                 "INSERT INTO migration_reports (from_version, to_version, backup, applied_at) VALUES (?1, ?2, ?3, ?4)",
                 params![from, to, backup, at],
             )?;
         }
-        if table_exists(&tx, "audit_log")? {
+        if table_exists(tx, "audit_log")? {
             let outcome = match &backup {
                 Some(b) => format!("from version {from} to {to}, backup: {b}"),
                 None => format!("from version {from} to {to}"),
@@ -176,7 +195,7 @@ fn apply_step(
                 component: "migrations".into(),
             };
             audit::append(
-                &tx,
+                tx,
                 &actor,
                 "store.migrated",
                 &format!("schema version {to}"),
@@ -186,9 +205,12 @@ fn apply_step(
             )?;
         }
     }
-    tx.commit()?;
     Ok(())
 }
+
+/// What a new database's last creating step also commits (story 2.13: the
+/// user store's `recovered` mark), in that step's transaction.
+pub(crate) type OnCreate<'a> = &'a dyn Fn(&Transaction) -> Result<(), StoreError>;
 
 fn table_exists(conn: &Connection, name: &str) -> Result<bool, StoreError> {
     Ok(conn.query_row(
@@ -201,7 +223,7 @@ fn table_exists(conn: &Connection, name: &str) -> Result<bool, StoreError> {
 /// Applies every migration the database lacks; `backups` is the folder for
 /// the pre-migration copy.
 pub(crate) fn migrate(conn: &mut Connection, backups: &Path) -> Result<OpenReport, StoreError> {
-    migrate_set(conn, backups, &PROJECT)
+    migrate_set(conn, backups, &PROJECT, None)
 }
 
 /// The database's `application_id`.
@@ -211,16 +233,25 @@ pub(crate) fn application_id(conn: &Connection) -> Result<i32, StoreError> {
 
 /// Applies every migration of `set` the database lacks, then stamps the
 /// set's `application_id` on a database that has none yet (a new one, or a
-/// project store from before the stamp).
+/// project store from before the stamp). `on_create` runs in the last
+/// step's transaction, and only when the database was new (version 0).
 pub(crate) fn migrate_set(
     conn: &mut Connection,
     backups: &Path,
     set: &MigrationSet,
+    on_create: Option<OnCreate<'_>>,
 ) -> Result<OpenReport, StoreError> {
     // A database with no id yet gets it in the transaction of its first
     // step, so no crash leaves a migrated database without it.
     let stamp = (application_id(conn)? == 0).then_some(set.application_id);
-    let report = migrate_with(conn, backups, set.migrations, set.backup_prefix, stamp)?;
+    let report = migrate_with(
+        conn,
+        backups,
+        set.migrations,
+        set.backup_prefix,
+        stamp,
+        on_create,
+    )?;
     if application_id(conn)? == 0 {
         // Nothing to migrate (a project store from before the stamp).
         conn.pragma_update(None, "application_id", set.application_id)?;
@@ -234,6 +265,7 @@ fn migrate_with(
     migrations: &[&str],
     prefix: &str,
     stamp: Option<i32>,
+    on_create: Option<OnCreate<'_>>,
 ) -> Result<OpenReport, StoreError> {
     let known = migrations.len() as i64;
     let found = user_version(conn)?;
@@ -244,10 +276,40 @@ fn migrate_with(
         None
     };
     let mut applied = Vec::new();
-    for (index, sql) in migrations.iter().enumerate().skip(found as usize) {
+    // A new database with a creating mark (story 2.13: the user store's
+    // `recovered`): every step and the mark in one transaction, so no crash
+    // leaves a created store unmarked.
+    if let (0, Some(finish)) = (found, on_create) {
+        let all = (|| -> Result<(), StoreError> {
+            let tx = conn.transaction()?;
+            for (index, sql) in migrations.iter().enumerate() {
+                let id = if index == 0 { stamp } else { None };
+                step_in(&tx, sql, index as i64, None, true, id)?;
+            }
+            finish(&tx)?;
+            tx.commit()?;
+            Ok(())
+        })();
+        all.map_err(|e| StoreError::MigrationFailed {
+            from: 0,
+            to: known,
+            backup: None,
+            source: Box::new(e),
+        })?;
+        applied = (0..known)
+            .map(|from| AppliedMigration {
+                from,
+                to: from + 1,
+                backup: None,
+            })
+            .collect();
+    }
+    // Otherwise each step in its own transaction.
+    let done = applied.len();
+    for (index, sql) in migrations.iter().enumerate().skip(found as usize + done) {
         let from = index as i64;
         let id = if applied.is_empty() { stamp } else { None };
-        apply_step(conn, sql, from, backup.as_deref(), true, id).map_err(|e| {
+        apply_step(conn, sql, from, backup.as_deref(), true, id, None).map_err(|e| {
             StoreError::MigrationFailed {
                 from,
                 to: from + 1,
@@ -367,7 +429,7 @@ pub(crate) fn database_at_version(path: &Path, version: i64) -> Result<(), Store
         .take(upto as usize)
         .skip(have.max(0) as usize)
     {
-        apply_step(&mut conn, sql, index as i64, None, false, None)?;
+        apply_step(&mut conn, sql, index as i64, None, false, None, None)?;
     }
     if version > SCHEMA_VERSION {
         conn.pragma_update(None, "user_version", version)?;
@@ -459,7 +521,7 @@ mod tests {
         let backups = dir.path().join("backups");
         let chain = [MIGRATIONS[0], MIGRATIONS[1], "THIS IS NOT SQL;"];
 
-        let err = migrate_with(&mut conn, &backups, &chain, "state", None).unwrap_err();
+        let err = migrate_with(&mut conn, &backups, &chain, "state", None, None).unwrap_err();
         let StoreError::MigrationFailed {
             from, to, backup, ..
         } = &err

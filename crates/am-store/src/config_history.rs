@@ -9,8 +9,8 @@
 //! - `CommitConfigEntry` deletes the intent and inserts the History entry in
 //!   one transaction, audited `config.edited`, `config.undone`,
 //!   `config.restored`, `config.outside_edit` (story 1.9),
-//!   `config.migrated` (story 1.10) or `config.created` (story 2.1) by its
-//!   kind;
+//!   `config.migrated` (story 1.10; also a `removal`, story 2.13) or
+//!   `config.created` (story 2.1) by its kind;
 //!   `ReconcileConfigIntent` does the same at
 //!   startup, audited `config.reconciled`; `DropConfigIntent` deletes an
 //!   intent whose file was never written, audited `config.intent_dropped`.
@@ -137,6 +137,11 @@ pub(crate) fn begin(
     if i.kind == HistoryKind::Create && !i.before.is_empty() {
         return Err(invalid("a create starts from no bytes"));
     }
+    if i.kind == HistoryKind::Removal && (i.before.is_empty() || !i.after.is_empty()) {
+        return Err(invalid(
+            "a removal records the removed bytes before and none after",
+        ));
+    }
     for note in &i.audit {
         if note.action.trim().is_empty() || note.target.trim().is_empty() {
             return Err(invalid("an audit note needs an action and a target"));
@@ -148,9 +153,13 @@ pub(crate) fn begin(
             HistoryKind::Edit
             | HistoryKind::OutsideEdit
             | HistoryKind::Migration
-            | HistoryKind::Create,
+            | HistoryKind::Create
+            | HistoryKind::Removal,
             None,
         ) => {}
+        (HistoryKind::Removal, Some(_)) => {
+            return Err(invalid("a removal names no earlier entry"));
+        }
         (HistoryKind::Create, Some(_)) => {
             return Err(invalid("a create names no earlier entry"));
         }
@@ -285,6 +294,8 @@ pub(crate) fn complete(
             Some(HistoryKind::OutsideEdit) => "config.outside_edit",
             Some(HistoryKind::Migration) => "config.migrated",
             Some(HistoryKind::Create) => "config.created",
+            // A removal is a step of a `ConfigMigration` (story 2.13).
+            Some(HistoryKind::Removal) => "config.migrated",
             None => return Err(invalid(format!("unknown kind '{}'", s.kind))),
         }
     };

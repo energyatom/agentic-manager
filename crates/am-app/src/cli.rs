@@ -15,7 +15,7 @@
 use std::io::Write;
 use std::path::Path;
 
-/// `agentic accounts add|remove|list|test` (story 2.1, AD-15's interim CLI
+/// `agentic accounts add|remove|list|test|migrate` (stories 2.1 and 2.13, AD-15's interim CLI
 /// Account edit); see [`crate::accounts`].
 pub use crate::accounts::{AccountsContext, accounts};
 /// `agentic run <workflow>` and `agentic status` (epic 3 story 1); see

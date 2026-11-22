@@ -15,6 +15,10 @@
 //!   the pending intents of the user store, read-only and without the lock.
 //! - [`scan`]: every project of the runtime base's root records whose root
 //!   is reachable, read only through am-config.
+//! - Story 2.13: [`Locked::take`] creates the user store marked `recovered`
+//!   when this Mac's Accounts file or the `accounts migrate` backups already
+//!   exist ([`would_be_recovered`]); [`recovered`] reads the mark, or what
+//!   it would be, without the lock.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -189,6 +193,25 @@ pub fn outside_words(places: &Places, did_not: &str) -> String {
     )
 }
 
+/// Whether a user store created now would be marked `recovered` (story
+/// 2.13): this Mac's Accounts file or the `accounts migrate` backups already
+/// exist. Only a store that is created is ever marked.
+pub fn would_be_recovered(places: &Places) -> bool {
+    places.user.accounts_file().exists() || places.user.accounts_migrate_backups_root().exists()
+}
+
+/// Whether the user store is marked `recovered`, or would be when the next
+/// write creates it (read-only; story 2.13). A store from before the mark
+/// reads as not marked.
+pub fn recovered(places: &Places) -> Result<bool, String> {
+    let reader = reader(places)?;
+    if reader.is_created() {
+        reader.is_recovered().map_err(|e| e.to_string())
+    } else {
+        Ok(would_be_recovered(places))
+    }
+}
+
 /// `user.lock` held, the user store open under it, and the writer of the
 /// user Accounts file. Dropping it releases the lock.
 pub struct Locked {
@@ -205,7 +228,12 @@ impl Locked {
     pub fn take(places: &Places) -> Result<Locked, String> {
         owner_only(&places.user)?;
         crate::runtime::ensure_private_dir(places.user.dir()).map_err(|e| e.to_string())?;
-        let guard = UserStore::locked(&places.user, LOCK_WAIT).map_err(|e| e.to_string())?;
+        // Story 2.13 (AD-15 *Migrate*, AD-17 *Recovery*): a store created
+        // while this Mac's Accounts file or the `accounts migrate` backups
+        // already exist is marked `recovered` in its creating transaction.
+        let guard =
+            UserStore::locked_marking_new(&places.user, LOCK_WAIT, would_be_recovered(places))
+                .map_err(|e| e.to_string())?;
         owner_only(&places.user)?;
         let history = Arc::new(guard);
         let writer = am_config::ConfigWriter::for_user_accounts(places.user.dir(), history.clone())

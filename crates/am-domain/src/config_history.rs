@@ -41,11 +41,16 @@ pub enum HistoryKind {
     /// `before` is empty and it names no earlier entry. The writer never
     /// deletes a file, so a create has no Undo.
     Create,
+    /// The one file removal the writer makes (story 2.13, AD-15 *Migrate*,
+    /// AD-16): a project's old `models/accounts.yaml`, removed as a step of
+    /// a `ConfigMigration`. `before` is the removed bytes, `after` empty,
+    /// and it names no earlier entry.
+    Removal,
 }
 
 impl HistoryKind {
     /// The stored name: `edit`, `undo`, `restore`, `outside_edit`,
-    /// `migration` or `create`.
+    /// `migration`, `create` or `removal`.
     pub fn as_str(self) -> &'static str {
         match self {
             HistoryKind::Edit => "edit",
@@ -54,6 +59,7 @@ impl HistoryKind {
             HistoryKind::OutsideEdit => "outside_edit",
             HistoryKind::Migration => "migration",
             HistoryKind::Create => "create",
+            HistoryKind::Removal => "removal",
         }
     }
 
@@ -65,6 +71,7 @@ impl HistoryKind {
             "outside_edit" => Some(HistoryKind::OutsideEdit),
             "migration" => Some(HistoryKind::Migration),
             "create" => Some(HistoryKind::Create),
+            "removal" => Some(HistoryKind::Removal),
             _ => None,
         }
     }

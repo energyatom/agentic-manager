@@ -4,3 +4,17 @@ accounts:
     provider: anthropic
     name: Cloud account
     secret_ref: cloud
+  - id: spare
+    provider: anthropic
+    name: Spare account
+    secret_ref: spare
+  - id: same
+    provider: openai-compatible
+    name: Same account
+    base_url: https://same.example/v1
+    secret_ref: same
+  - id: clash
+    provider: openai-compatible
+    name: Clashing account
+    base_url: https://old-host.example/v1
+    secret_ref: clash
