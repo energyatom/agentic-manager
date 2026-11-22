@@ -131,7 +131,10 @@ pub(crate) fn begin(
             return Err(invalid(format!("`{name}` is not the sha256 of its bytes")));
         }
     }
-    if i.before_sha256 == i.after_sha256 {
+    // Story 2.14 (AD-15 *Record*): an edit whose before equals its after is
+    // accepted only to carry notes (a confirmation of what the file already
+    // holds, committed with its History entry).
+    if i.before_sha256 == i.after_sha256 && !(i.kind == HistoryKind::Edit && !i.audit.is_empty()) {
         return Err(invalid("the file would not change"));
     }
     if i.kind == HistoryKind::Create && !i.before.is_empty() {

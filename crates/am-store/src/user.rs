@@ -43,7 +43,7 @@ use am_domain::runtime::AppDataLayout;
 use am_domain::{
     Actor, AuditEvent, ConfigHistory, HistoryEntry, HistoryError, NewIntent, PendingIntent,
 };
-use rusqlite::{Connection, Transaction, TransactionBehavior};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior};
 use serde_json::Value;
 
 use crate::audit::{ConfigNote, GENESIS};
@@ -290,6 +290,111 @@ impl UserStore {
                 args.as_ref(),
                 &now_ts(),
             )?;
+            tx.commit()?;
+            Ok(())
+        })
+    }
+
+    /// Story 2.14 (AD-15 *Change*, *Record*): commits `notes` (records that
+    /// grant nothing: `account_removed`, `account_key_set`) for `file` with
+    /// no History entry, in their own transaction: one `config.recorded`
+    /// entry by `actor` naming the file's latest History entry (its id and
+    /// after-hash), then each note with `actor`, so
+    /// [`UserReader::config_note_args`] reads them as it reads the notes of
+    /// a commit. Used when the file already holds what is confirmed, or
+    /// before the file is written. Refused, writing nothing, unless `file`
+    /// has a History entry whose after-hash is `after_sha256` (the bytes the
+    /// caller saw), no intent of `file` is pending, there is at least one
+    /// note, and each note has an action, a target and a `kind` that grants
+    /// nothing ([`crate::audit::RECORDED_KINDS`]: `account_removed`,
+    /// `account_key_set`); a confirmation never commits this way.
+    pub fn record_config_notes(
+        &self,
+        actor: &Actor,
+        file: &str,
+        after_sha256: &str,
+        notes: &[am_domain::AuditNote],
+    ) -> Result<(), StoreError> {
+        let refused = |why: String| StoreError::Invalid(format!("refused config record: {why}"));
+        if notes.is_empty() {
+            return Err(refused("there is no note to record".into()));
+        }
+        if notes
+            .iter()
+            .any(|n| n.action.is_empty() || n.target.is_empty())
+        {
+            return Err(refused("a note has no action or no target".into()));
+        }
+        // Review fix G-record: a confirmation (`account_added`,
+        // `account_changed`) commits only with its History entry; only the
+        // kinds that grant nothing are recorded alone.
+        if let Some(n) = notes.iter().find(|n| {
+            !crate::audit::RECORDED_KINDS.contains(&n.args.get("kind").map_or("", String::as_str))
+        }) {
+            return Err(refused(format!(
+                "a `{}` note is written only with a History entry",
+                n.args.get("kind").map_or("", String::as_str)
+            )));
+        }
+        self.with(|db| {
+            let tx = Transaction::new_unchecked(&db.conn, TransactionBehavior::Immediate)?;
+            check(&self.path, &tx)?;
+            let pending: i64 = tx.query_row(
+                "SELECT COUNT(*) FROM config_intents WHERE file = ?1",
+                rusqlite::params![file],
+                |r| r.get(0),
+            )?;
+            if pending != 0 {
+                return Err(refused(format!(
+                    "a write of {file} is pending; settle it first"
+                )));
+            }
+            let latest: Option<(String, String)> = tx
+                .query_row(
+                    "SELECT id, after_sha256 FROM config_history WHERE file = ?1 ORDER BY seq DESC LIMIT 1",
+                    rusqlite::params![file],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?;
+            let Some((entry_id, after)) = latest else {
+                return Err(refused(format!("{file} has no History entry")));
+            };
+            if after != after_sha256 {
+                return Err(refused(format!(
+                    "{file} no longer holds what its latest History entry wrote"
+                )));
+            }
+            let at = now_ts();
+            let mut head = serde_json::Map::new();
+            head.insert("after_sha256".into(), Value::String(after));
+            head.insert("entry_id".into(), Value::String(entry_id.clone()));
+            head.insert("file".into(), Value::String(file.to_string()));
+            head.insert("kind".into(), Value::String("record".into()));
+            crate::audit::append(
+                &tx,
+                actor,
+                "config.recorded",
+                &entry_id,
+                "ok",
+                Some(&Value::Object(head)),
+                &at,
+            )?;
+            for note in notes {
+                let args: serde_json::Map<String, Value> = note
+                    .args
+                    .iter()
+                    .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+                    .collect();
+                crate::audit::append(
+                    &tx,
+                    actor,
+                    &note.action,
+                    &note.target,
+                    "ok",
+                    Some(&Value::Object(args)),
+                    &at,
+                )?;
+            }
             tx.commit()?;
             Ok(())
         })

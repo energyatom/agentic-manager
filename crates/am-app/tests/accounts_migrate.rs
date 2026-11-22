@@ -2894,3 +2894,128 @@ async fn a_dry_run_shows_no_value_of_a_duplicated_id_with_an_unclean_copy() {
         );
     }
 }
+
+// ============================================================ story 2.14
+
+/// A `tools.yaml` enabling one `transport: http` MCP server `id` at `url`.
+fn http_tools(id: &str, url: &str) -> String {
+    format!(
+        "schema_version: 2\nmcp_servers:\n  - id: {id}\n    transport: http\n    url: {url}\n    version: 1.0.0\n    network: none\n    tools:\n      - name: list_notes\n        class: read\n"
+    )
+}
+
+/// Story 2.14 (AD-15 *Open*, owner 2026-11-22): an enabled `transport:
+/// http` MCP server on this Mac (`http://127.0.0.1:<port>`,
+/// `https://localhost`) counts exactly as a stdio one for `migrate`: in the
+/// project itself, or in another reachable project, it refuses the command
+/// before anything is asked, naming the project and the server, and nothing
+/// is written. A remote `https` server does not.
+#[tokio::test]
+async fn a_loopback_http_mcp_server_refuses_migrate() {
+    for url in ["http://127.0.0.1:3001/mcp", "https://localhost/mcp"] {
+        // In the project itself.
+        let s = setup(false, false).await;
+        std::fs::write(s.root.join("tools.yaml"), http_tools("loop-notes", url)).unwrap();
+        let state = State::of(&s.env, &s.root);
+        let (ran, kit) = migrate(&s.env, &s.keychain, &s.root, &["cloud", "spare"], &[]).await;
+        assert_ne!(ran.code, 0, "{url}: {}", ran.all());
+        assert!(ran.all().contains("loop-notes"), "{url}: {}", ran.all());
+        assert!(
+            ran.all().contains(&s.root.display().to_string()),
+            "{url}: {}",
+            ran.all()
+        );
+        assert_eq!(kit.term.reads(), 0, "{url}");
+        assert_eq!(kit.calls(), 0, "{url}");
+        assert_eq!(State::of(&s.env, &s.root), state, "{url}");
+
+        // In another reachable project.
+        let s = setup(false, false).await;
+        let child = s.env.project(
+            "child",
+            &[
+                ("company.yaml", COMPANY.to_string()),
+                ("tools.yaml", http_tools("loop-notes", url)),
+            ],
+        );
+        let state = State::of(&s.env, &s.root);
+        let (ran, kit) = migrate(&s.env, &s.keychain, &s.root, &["cloud", "spare"], &[]).await;
+        assert_ne!(ran.code, 0, "{url}: {}", ran.all());
+        assert!(
+            ran.all().contains(&child.display().to_string()),
+            "{url}: {}",
+            ran.all()
+        );
+        assert!(ran.all().contains("loop-notes"), "{url}: {}", ran.all());
+        assert_eq!(kit.term.reads(), 0, "{url}");
+        assert_eq!(State::of(&s.env, &s.root), state, "{url}");
+    }
+
+    // A remote https server counts for nothing.
+    let s = setup(false, false).await;
+    std::fs::write(
+        s.root.join("tools.yaml"),
+        http_tools("far-notes", "https://mcp.example/mcp"),
+    )
+    .unwrap();
+    let (ran, _kit) = migrate(&s.env, &s.keychain, &s.root, &["cloud", "spare"], &[]).await;
+    assert_eq!(ran.code, 0, "{}", ran.all());
+}
+
+/// Story 2.14, First confirmation: `spare`, which `migrate` moved to this
+/// Mac unconfirmed, is confirmed with `agentic accounts change spare` and
+/// no flags: typed id, `yes`, a new key. The Keychain gets `delete` then
+/// `set` (no read), the user store `account_removed` (`reason:
+/// provider_change`) then `account_added` (`typed_id_yes_new_key`), and
+/// `accounts test spare` then sends.
+#[tokio::test]
+async fn an_account_migrate_left_unconfirmed_is_confirmed_by_change() {
+    let (s, ran, _kit) = migrated_without_clash().await;
+    let env = &s.env;
+    assert_eq!(ran.code, 0, "{}", ran.all());
+    let new_key = "sk-ant-canary-migrate-new-5e5e5e5e-NEWK";
+
+    let kit = Kit::new(FakeTerminal::new(), &s.keychain);
+    kit.term.line("spare");
+    kit.term.line("yes");
+    kit.term.line(new_key);
+    let ran = kit.run(env, &["change", "spare"]).await;
+
+    assert_eq!(ran.code, 0, "{}", ran.all());
+    assert_eq!(kit.gets(), 0, "the old key is never read");
+    assert_eq!(kit.calls(), 2, "delete, then set");
+    assert_eq!(
+        s.keychain
+            .get("spare")
+            .unwrap()
+            .map(|k| k.expose().to_string())
+            .as_deref(),
+        Some(new_key)
+    );
+    let audit = env.audit();
+    let removed = records_of(&audit, "account_removed", "spare");
+    assert_eq!(removed.len(), 1, "{audit}");
+    assert!(
+        has(&removed[0], "reason", "provider_change"),
+        "{}",
+        removed[0]
+    );
+    let added = records_of(&audit, "account_added", "spare");
+    assert_eq!(added.len(), 1, "{audit}");
+    assert!(
+        has(&added[0], "confirmation", "typed_id_yes_new_key"),
+        "{}",
+        added[0]
+    );
+    assert!(has(&added[0], "host", "api.anthropic.com"), "{}", added[0]);
+
+    let tester = Kit::new(FakeTerminal::piped(), &s.keychain);
+    tester
+        .egress
+        .replay("api.anthropic.com", "anthropic/c1_count_stream.sse");
+    let ran = tester.run(env, &["test", "spare"]).await;
+    assert_eq!(ran.code, 0, "{}", ran.all());
+    assert_eq!(tester.egress.requests().len(), 1);
+    assert!(!ran.all().contains(new_key));
+    assert!(!env.audit().contains(new_key));
+}

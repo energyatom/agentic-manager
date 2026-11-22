@@ -475,6 +475,21 @@ impl ConfigWriter {
         self.apply_checked(actor, edit, Some(before_sha256), audit)
     }
 
+    /// Story 2.14 (review follow-up): every check [`ConfigWriter::apply_with_audit`]
+    /// runs on `edit` (the bytes it was built on, a secret-looking value in
+    /// the file now or after the edit, an error the edit adds), writing and
+    /// recording nothing; a caller runs it before an effect it cannot take
+    /// back.
+    pub fn check_edit(&self, edit: ConfigEdit, before_sha256: &str) -> Result<(), WriteError> {
+        let _one = self.serial()?;
+        let (file, before, after) = self.edited(edit, Some(before_sha256))?;
+        let lines = secret_lines_of(self.kind_of(&file), &file, &after);
+        if !lines.is_empty() {
+            return Err(WriteError::Secret { file, lines });
+        }
+        self.step_checks(&file, &before, &after)
+    }
+
     fn apply_checked(
         &self,
         actor: Actor,
@@ -483,6 +498,26 @@ impl ConfigWriter {
         audit: Vec<AuditNote>,
     ) -> Result<HistoryEntry, WriteError> {
         let _one = self.serial()?;
+        let (file, before, after) = self.edited(edit, before_sha256)?;
+        self.step(
+            actor,
+            &file,
+            Change {
+                kind: HistoryKind::Edit,
+                ref_entry: None,
+                before,
+                after,
+                audit,
+            },
+        )
+    }
+
+    /// The file `edit` names, its bytes now and its bytes after `edit`.
+    fn edited(
+        &self,
+        edit: ConfigEdit,
+        before_sha256: Option<&str>,
+    ) -> Result<(String, Vec<u8>, Vec<u8>), WriteError> {
         let kind = self.resolve(&edit.file)?;
         let file = edit.file;
         let before = self.read(&file)?;
@@ -521,17 +556,7 @@ impl ConfigWriter {
                 "the edit changes nothing in {file}"
             )));
         }
-        self.step(
-            actor,
-            &file,
-            Change {
-                kind: HistoryKind::Edit,
-                ref_entry: None,
-                before,
-                after,
-                audit,
-            },
-        )
+        Ok((file, before, after))
     }
 
     /// Creates the config file `create.file` holding `create.bytes` (written
@@ -681,6 +706,139 @@ impl ConfigWriter {
         )
     }
 
+    /// Story 2.14 (AD-15 *Change*, *Every path*; review fix Adversarial 3):
+    /// in user mode, refuses an Undo or Restore that would write `target`
+    /// over `current` while it adds, removes or moves (another provider or
+    /// `base_url`) any Account: "Undo of a user-file change goes through the
+    /// same confirming handler", so an Account is added again only by
+    /// `agentic accounts add`, removed by `remove` and moved by `change`.
+    /// Only a change that leaves every Account where it is (a name) passes.
+    fn refuse_account_move(
+        &self,
+        entry: &HistoryEntry,
+        current: &[u8],
+        target: &[u8],
+        action: &str,
+    ) -> Result<(), WriteError> {
+        if !self.user {
+            return Ok(());
+        }
+        // The secret check first (review follow-up): no id of a file that
+        // holds a secret-looking value is ever named.
+        for bytes in [current, target] {
+            let lines = secret_lines_of(self.kind_of(&entry.file), &entry.file, bytes);
+            if !lines.is_empty() {
+                return Err(WriteError::Secret {
+                    file: entry.file.clone(),
+                    lines,
+                });
+            }
+        }
+        let mut shown_ids: BTreeSet<String> = BTreeSet::new();
+        let mut destinations = |bytes: &[u8]| -> BTreeMap<String, (String, Option<String>)> {
+            let loaded = crate::user_accounts::load_bytes(USER_ACCOUNTS_FILE, bytes);
+            let accounts = loaded.accounts.accounts();
+            shown_ids.extend(crate::user_accounts::valid_ids(accounts));
+            accounts
+                .iter()
+                .map(|a| (a.id.clone(), (a.provider.clone(), a.base_url.clone())))
+                .collect()
+        };
+        let now = destinations(current);
+        let then = destinations(target);
+        // Only an id that loaded as a valid Account is named.
+        let named = |ids: Vec<&String>| {
+            ids.iter()
+                .map(|id| {
+                    if shown_ids.contains(*id) {
+                        format!("'{id}'")
+                    } else {
+                        "(an entry whose id is not shown)".to_string()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let added: Vec<&String> = then.keys().filter(|id| !now.contains_key(*id)).collect();
+        let removed: Vec<&String> = now.keys().filter(|id| !then.contains_key(*id)).collect();
+        let moved: Vec<&String> = then
+            .iter()
+            .filter(|(id, to)| now.get(*id).is_some_and(|from| from != *to))
+            .map(|(id, _)| id)
+            .collect();
+        let mut why = Vec::new();
+        if !added.is_empty() {
+            why.push(format!(
+                "add the Account {} again, which only `agentic accounts add` does (it asks for the typed id and the key)",
+                named(added)
+            ));
+        }
+        if !removed.is_empty() {
+            why.push(format!(
+                "remove the Account {}, which only `agentic accounts remove` does",
+                named(removed)
+            ));
+        }
+        if !moved.is_empty() {
+            why.push(format!(
+                "change the provider or address of the Account {}, which is confirmed only with `agentic accounts change <id>` (a new key when the provider changes)",
+                named(moved)
+            ));
+        }
+        if why.is_empty() {
+            return Ok(());
+        }
+        Err(WriteError::BadEdit(format!(
+            "{}: the {action} of entry {} would {} on this Mac; nothing was written",
+            entry.file,
+            entry.id,
+            why.join(", and would ")
+        )))
+    }
+
+    /// Story 2.14 (AD-15 *Record*; review fix G-record): in user mode, a
+    /// History entry whose before equals its after, carrying `audit` (a
+    /// confirmation of what the file already holds) through the same
+    /// intent, write and commit sequence as an edit, so the confirmation
+    /// commits in the transaction of its History entry. Applied only while
+    /// the file holds the bytes whose sha256 is `before_sha256`; refused in
+    /// project mode and with no note.
+    pub fn apply_unchanged_with_audit(
+        &self,
+        actor: Actor,
+        before_sha256: &str,
+        audit: Vec<AuditNote>,
+    ) -> Result<HistoryEntry, WriteError> {
+        if !self.user {
+            return Err(WriteError::BadEdit(
+                "only the writer of this Mac's Accounts file records a confirmation of an unchanged file".into(),
+            ));
+        }
+        if audit.is_empty() {
+            return Err(WriteError::NoChange(format!(
+                "nothing to record for {USER_ACCOUNTS_FILE}"
+            )));
+        }
+        let _one = self.serial()?;
+        let file = USER_ACCOUNTS_FILE.to_string();
+        self.resolve(&file)?;
+        let before = self.read(&file)?;
+        if sha256_hex(&before) != before_sha256 {
+            return Err(WriteError::ChangedOnDisk { files: vec![file] });
+        }
+        self.step(
+            actor,
+            &file,
+            Change {
+                kind: HistoryKind::Edit,
+                ref_entry: None,
+                after: before.clone(),
+                before,
+                audit,
+            },
+        )
+    }
+
     /// Writes entry `id`'s before-bytes back, as a new `undo` entry. Refused
     /// when the file no longer holds that entry's after-bytes.
     pub fn undo(&self, actor: Actor, id: &str) -> Result<HistoryEntry, WriteError> {
@@ -702,6 +860,7 @@ impl ConfigWriter {
                 entry: entry.id,
             });
         }
+        self.refuse_account_move(&entry, &current, &entry.before, "undo")?;
         self.step(
             actor,
             &entry.file,
@@ -729,6 +888,7 @@ impl ConfigWriter {
                 entry.file, entry.id
             )));
         }
+        self.refuse_account_move(&entry, &current, &entry.after, "restore")?;
         self.step(
             actor,
             &entry.file,
@@ -1478,9 +1638,15 @@ impl ConfigWriter {
     /// Checks the project with `after` in place of `file`, then runs the
     /// intent, write and commit sequence.
     fn step(&self, actor: Actor, file: &str, change: Change) -> Result<HistoryEntry, WriteError> {
+        self.step_checks(file, &change.before, &change.after)?;
+        self.write_step(actor, file, change)
+    }
+
+    /// [`ConfigWriter::step`]'s checks of a change from `before` to `after`.
+    fn step_checks(&self, file: &str, before: &[u8], after: &[u8]) -> Result<(), WriteError> {
         // No key may reach History, an intent or a diff through the bytes
         // the file holds now: the owner removes it by hand first.
-        let lines = secret_lines_of(self.kind_of(file), file, &change.before);
+        let lines = secret_lines_of(self.kind_of(file), file, before);
         if !lines.is_empty() {
             return Err(WriteError::Secret {
                 file: file.to_string(),
@@ -1493,8 +1659,7 @@ impl ConfigWriter {
         // at a time. Errors are compared without their line, which an edit
         // may shift.
         let errors_now = self.errors(BTreeMap::new())?;
-        let errors_after =
-            self.errors(BTreeMap::from([(file.to_string(), change.after.clone())]))?;
+        let errors_after = self.errors(BTreeMap::from([(file.to_string(), after.to_vec())]))?;
         let new_errors = added_errors(errors_now, errors_after);
         if !new_errors.is_empty() {
             return Err(WriteError::Invalid {
@@ -1502,7 +1667,7 @@ impl ConfigWriter {
                 findings: new_errors,
             });
         }
-        self.write_step(actor, file, change)
+        Ok(())
     }
 
     /// The intent, write and commit sequence of a change already checked

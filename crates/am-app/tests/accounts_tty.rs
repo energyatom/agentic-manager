@@ -157,6 +157,79 @@ fn add_and_remove_with_stdin_that_is_not_a_terminal_are_refused() {
     }
 }
 
+/// Story 2.14: an Account on this Mac written by the app with no
+/// confirmation record (as `accounts migrate` leaves one), so `change`
+/// takes the new-key path. Returns its id.
+fn unconfirmed_account(e: &Env) -> String {
+    let id = unique_id();
+    let guard =
+        am_store::user::UserStore::locked(&e.places.user, std::time::Duration::from_secs(10))
+            .unwrap();
+    let writer =
+        am_config::ConfigWriter::for_user_accounts(e.places.user.dir(), std::sync::Arc::new(guard))
+            .unwrap();
+    writer
+        .create(
+            am_domain::Actor::Human {
+                person: "owner".into(),
+                hat: "Owner".into(),
+            },
+            am_config::ConfigCreate {
+                file: "accounts.yaml".into(),
+                bytes: am_config::new_accounts_file(&id, "anthropic", None, None).unwrap(),
+                audit: Vec::new(),
+            },
+        )
+        .unwrap();
+    id
+}
+
+/// Story 2.14, Not interactive: `change` with piped or redirected stdin
+/// (the id, `yes` and a key ready on it) is refused in words naming the
+/// terminal rule; the user file is unchanged.
+#[test]
+fn change_with_stdin_that_is_not_a_terminal_is_refused() {
+    let e = env();
+    let id = unconfirmed_account(&e);
+    let before = std::fs::read(e.accounts_file()).unwrap();
+    let input = format!("{id}\nyes\n{CANARY}\n");
+    let args = ["change", id.as_str(), "--provider", "openai"];
+
+    let mut child = e
+        .command(&args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let _ = child.stdin.take().unwrap().write_all(input.as_bytes());
+    let out = child.wait_with_output().unwrap();
+    let all = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(out.status.code(), Some(1), "{all}");
+    assert!(all.contains("interactive terminal"), "{all}");
+    assert!(!all.contains(CANARY), "{all}");
+
+    let file = e.dir.path().join("typed.txt");
+    std::fs::write(&file, &input).unwrap();
+    let out = e
+        .command(&args)
+        .stdin(Stdio::from(std::fs::File::open(&file).unwrap()))
+        .output()
+        .unwrap();
+    let all = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(out.status.code(), Some(1), "{all}");
+    assert!(all.contains("interactive terminal"), "{all}");
+    assert_eq!(std::fs::read(e.accounts_file()).unwrap(), before);
+}
+
 #[cfg(target_os = "macos")]
 mod pty {
     use std::io::{Read, Write};
@@ -267,11 +340,15 @@ mod pty {
     }
 
     fn start(e: &super::Env, id: &str) -> OnPty {
+        start_with(e, &["add", id, "--provider", "anthropic"])
+    }
+
+    fn start_with(e: &super::Env, args: &[&str]) -> OnPty {
         let pty = nix::pty::openpty(None, None).unwrap();
         let slave = pty.slave;
         let master = std::fs::File::from(pty.master);
         let child = e
-            .command(&["add", id, "--provider", "anthropic"])
+            .command(args)
             .stdin(Stdio::from(slave.try_clone().unwrap()))
             .stdout(Stdio::from(slave.try_clone().unwrap()))
             .stderr(Stdio::from(slave.try_clone().unwrap()))
@@ -309,6 +386,11 @@ mod pty {
 
     fn assert_nothing_stored(e: &super::Env, id: &str, on: &OnPty) {
         assert!(!e.accounts_file().exists(), "nothing written");
+        assert_nothing_stored_for(e, id, on);
+    }
+
+    /// No Keychain item for `id` and no key on the terminal.
+    fn assert_nothing_stored_for(e: &super::Env, id: &str, on: &OnPty) {
         // The temporary HOME's keychain (the one the binary used) must hold
         // no item for the id: the lookup fails saying it was not found.
         let found = security(e, &["find-generic-password", "-s", SERVICE, "-a", id]);
@@ -345,6 +427,33 @@ mod pty {
         assert!(flags.contains(LocalFlags::ICANON), "canonical mode is back");
         assert!(flags.contains(LocalFlags::ISIG), "signals are back");
         assert_nothing_stored(&e, &id, &on);
+    }
+
+    /// Story 2.14, Echo: `change` of an Account with no confirmation record
+    /// takes the new-key path; `^C` typed at its hidden key prompt (after
+    /// the id and `yes`) ends the command non-zero with the terminal's
+    /// settings back; the user file is unchanged and no key is stored.
+    #[test]
+    fn typed_ctrl_c_at_the_change_key_prompt_restores_echo_and_writes_nothing() {
+        let e = env();
+        temp_keychain(&e);
+        let id = super::unconfirmed_account(&e);
+        let before = std::fs::read(e.accounts_file()).unwrap();
+        let mut on = start_with(&e, &["change", id.as_str(), "--provider", "openai"]);
+        on.wait_until("the id prompt", |p| p.seen().contains(id.as_str()));
+        on.master
+            .write_all(format!("{id}\nyes\n").as_bytes())
+            .unwrap();
+        on.wait_until("echo off at the key prompt", |p| !p.echo());
+        on.master.write_all(&[0x03]).unwrap();
+        let code = on.exit_code();
+        assert_eq!(code, Some(130), "terminal: {}", on.seen());
+        assert!(on.echo(), "ECHO is set again; terminal: {}", on.seen());
+        let flags = tcgetattr(&on.slave).unwrap().local_flags;
+        assert!(flags.contains(LocalFlags::ICANON), "canonical mode is back");
+        assert!(flags.contains(LocalFlags::ISIG), "signals are back");
+        assert_eq!(std::fs::read(e.accounts_file()).unwrap(), before);
+        assert_nothing_stored_for(&e, &id, &on);
     }
 
     /// Interrupt: SIGINT (`kill -INT`) at the key prompt also ends the

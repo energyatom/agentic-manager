@@ -1368,6 +1368,41 @@ async fn an_enabled_stdio_mcp_server_or_rendering_source_refuses_the_run() {
     }
 }
 
+/// Story 2.14 (AD-15 *Open*): an enabled `transport: http` MCP server on
+/// this Mac (`http://127.0.0.1:<port>`, `https://localhost`) refuses the
+/// Account commands like a stdio one, but `agentic run` keeps the stdio
+/// rule: such a server does not refuse the run, which succeeds.
+#[tokio::test]
+async fn a_loopback_http_mcp_server_does_not_refuse_the_run() {
+    let env = env();
+    for (name, url) in [
+        ("loopback", "http://127.0.0.1:3001/mcp"),
+        ("localhost", "https://localhost/mcp"),
+    ] {
+        let root = env.copy_as("one-step", name);
+        write(
+            &root,
+            "tools.yaml",
+            &format!(
+                "schema_version: 2\nmcp_servers:\n  - id: loop-notes\n    transport: http\n    url: {url}\n    version: 1.0.0\n    network: none\n    tools:\n      - name: list_notes\n        class: read\n"
+            ),
+        );
+        assert!(
+            am_config::load(&root).unwrap().snapshot.is_some(),
+            "{url}: the config itself is valid"
+        );
+        let llm = fake(ScriptedTurn::text("done"));
+        let kit = Kit::local(llm.clone());
+
+        let ran = kit.run(&env, &root, &["hello"]).await;
+
+        assert_eq!(ran.code, 0, "{url}: {}", ran.all());
+        assert_eq!(ran.run_line().1, "succeeded", "{url}");
+        assert_eq!(env.runs(&root).len(), 1, "{url}");
+        env.assert_closed(&root);
+    }
+}
+
 /// A file error is not an enabled child (review of story 3.1): when
 /// `tools.yaml` has an error, the refusal says the file has an error and
 /// points at `agentic validate`; it does not say a server is enabled or to

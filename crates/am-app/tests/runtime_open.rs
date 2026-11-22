@@ -856,6 +856,52 @@ fn another_macs_marker_refuses_until_a_take_over_on_a_terminal() {
     );
 }
 
+/// Story 2.14 (AD-15 *Open*, *Project-open decisions*): `--take-over` is
+/// refused naming the UI while the project enables a stdio MCP server, and
+/// keeps that stdio-only rule: an enabled `transport: http` MCP server on
+/// this Mac (`http://127.0.0.1:<port>`, `https://localhost`), which the
+/// Account commands now refuse on, does not refuse it.
+#[test]
+fn a_loopback_http_mcp_server_does_not_refuse_a_take_over() {
+    let tools = |transport: &str| {
+        format!(
+            "schema_version: 2\nmcp_servers:\n  - id: loop-notes\n{transport}    version: 1.0.0\n    network: none\n    tools:\n      - name: list_notes\n        class: read\n"
+        )
+    };
+    let company = "schema_version: 2\nname: Example\ntimezone: UTC\ncurrency: EUR\n";
+    let e = env();
+    let stdio = e.project("stdio", company);
+    drop(e.open(&stdio).unwrap());
+    std::fs::write(
+        stdio.join("tools.yaml"),
+        tools("    transport: stdio\n    command: example-notes-server\n"),
+    )
+    .unwrap();
+    write_marker(&stdio, &MacId::mint().to_string(), 4242, "Studio Mac");
+    let msg = err(e.open_with(&stdio, false, true, &mut Answers::terminal(&[true])));
+    assert!(msg.contains("loop-notes"), "the stdio rule holds: {msg}");
+
+    for (name, url) in [
+        ("loopback", "http://127.0.0.1:3001/mcp"),
+        ("localhost", "https://localhost/mcp"),
+    ] {
+        let a = e.project(name, company);
+        drop(e.open(&a).unwrap());
+        std::fs::write(
+            a.join("tools.yaml"),
+            tools(&format!("    transport: http\n    url: {url}\n")),
+        )
+        .unwrap();
+        assert_eq!(am_config::decisions_locked(&a), None, "{url}");
+        write_marker(&a, &MacId::mint().to_string(), 4242, "Studio Mac");
+        let mut yes = Answers::terminal(&[true]);
+        let o = e
+            .open_with(&a, false, true, &mut yes)
+            .unwrap_or_else(|r| panic!("{url}: {}", err(Err(r))));
+        assert_eq!(actions(&audit(&o), "project.taken_over").len(), 1, "{url}");
+    }
+}
+
 #[test]
 fn this_macs_marker_is_refused_only_while_its_process_holds_the_project() {
     let e = env();

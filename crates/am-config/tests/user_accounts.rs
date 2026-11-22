@@ -761,3 +761,317 @@ fn the_secret_value_fix_names_this_macs_accounts_not_the_old_project_file() {
         );
     }
 }
+
+// ------------------------------------------------------------ story 2.14
+
+/// Story 2.14 (AD-15 *Change*, *Every path*): in user mode the writer
+/// refuses an Undo or a Restore of a user-file entry that would change any
+/// Account's provider or endpoint, naming `agentic accounts change`, and
+/// writes and records nothing; an Undo or Restore that changes only a name
+/// still applies. A project writer is untouched by this rule.
+#[test]
+fn undo_or_restore_that_moves_an_account_is_refused_naming_change() {
+    let dir = app_data();
+    let history = Arc::new(InMemoryConfigHistory::default());
+    let w = ConfigWriter::for_user_accounts(dir.path(), history.clone()).unwrap();
+    let path = dir.path().join(USER_ACCOUNTS_FILE);
+    let created = w
+        .create(
+            owner(),
+            ConfigCreate {
+                file: USER_ACCOUNTS_FILE.into(),
+                bytes: am_config::new_accounts_file(
+                    "router",
+                    "openai-compatible",
+                    Some("Router"),
+                    Some("https://openrouter.example/api/v1"),
+                )
+                .unwrap(),
+                audit: Vec::new(),
+            },
+        )
+        .unwrap();
+    let set = |path: &[&str], value: &str| am_config::ConfigEdit {
+        file: USER_ACCOUNTS_FILE.into(),
+        ops: vec![EditOp::Set {
+            path: path.iter().map(|s| s.to_string()).collect(),
+            value: serde_json::json!(value),
+        }],
+        body: None,
+    };
+
+    // An address change, then a provider change (each as an app write).
+    let moved = w
+        .apply(
+            owner(),
+            set(
+                &["accounts", "0", "base_url"],
+                "https://router2.example/api/v1",
+            ),
+        )
+        .unwrap();
+    // Undo of the address change, while it is the latest entry.
+    let at_move = std::fs::read(&path).unwrap();
+    let err = w.undo(owner(), &moved.id).unwrap_err();
+    assert!(err.to_string().contains("agentic accounts change"), "{err}");
+    assert_eq!(std::fs::read(&path).unwrap(), at_move, "nothing written");
+    assert_eq!(history.entries(None).unwrap().len(), 2);
+
+    let reprovided = w
+        .apply(
+            owner(),
+            am_config::ConfigEdit {
+                file: USER_ACCOUNTS_FILE.into(),
+                ops: vec![
+                    EditOp::Set {
+                        path: vec!["accounts".into(), "0".into(), "provider".into()],
+                        value: serde_json::json!("openai"),
+                    },
+                    EditOp::Remove {
+                        path: vec!["accounts".into(), "0".into(), "base_url".into()],
+                    },
+                ],
+                body: None,
+            },
+        )
+        .unwrap();
+    let entries = history.entries(None).unwrap().len();
+    let bytes = std::fs::read(&path).unwrap();
+
+    // Undo of the provider change.
+    let err = w.undo(owner(), &reprovided.id).unwrap_err();
+    assert!(err.to_string().contains("agentic accounts change"), "{err}");
+    assert_eq!(std::fs::read(&path).unwrap(), bytes, "nothing written");
+    assert_eq!(history.entries(None).unwrap().len(), entries);
+    assert!(history.pending_intents().unwrap().is_empty());
+
+    // Restore of the create (its after-bytes name the first endpoint).
+    let err = w.restore(owner(), &created.id).unwrap_err();
+    assert!(err.to_string().contains("agentic accounts change"), "{err}");
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    assert_eq!(history.entries(None).unwrap().len(), entries);
+
+    // A name edit: its Undo, then a Restore of it, apply.
+    let named = w
+        .apply(owner(), set(&["accounts", "0", "name"], "Renamed"))
+        .unwrap();
+    let undone = w.undo(owner(), &named.id).unwrap();
+    assert_eq!(undone.kind, HistoryKind::Undo);
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    let restored = w.restore(owner(), &named.id).unwrap();
+    assert_eq!(restored.kind, HistoryKind::Restore);
+    assert!(
+        std::fs::read_to_string(&path).unwrap().contains("Renamed"),
+        "the name is back"
+    );
+}
+
+/// Review fix Adversarial 3 (2026-11-23; AD-15: "Undo of a user-file change
+/// goes through the same confirming handler", "Undoing a remove re-adds an
+/// Account, which is widening"): in user mode an Undo or a Restore that
+/// would add, remove or move any Account is refused, writing nothing. Two
+/// Restores that would drop an Account and then re-add it elsewhere are
+/// both refused; an Undo of a remove is refused naming `agentic accounts
+/// add`; an Undo of a name-only edit still applies.
+#[test]
+fn undo_or_restore_that_adds_or_drops_an_account_is_refused() {
+    let dir = app_data();
+    let history = Arc::new(InMemoryConfigHistory::default());
+    let w = ConfigWriter::for_user_accounts(dir.path(), history.clone()).unwrap();
+    let path = dir.path().join(USER_ACCOUNTS_FILE);
+    // E1: cloud; E2: router added at elsewhere.example.
+    w.create(
+        owner(),
+        ConfigCreate {
+            file: USER_ACCOUNTS_FILE.into(),
+            bytes: am_config::new_accounts_file("cloud", "anthropic", None, None).unwrap(),
+            audit: Vec::new(),
+        },
+    )
+    .unwrap();
+    let now = am_config::accounts_file(dir.path());
+    let e2 = w
+        .apply_with_audit(
+            owner(),
+            am_config::add_account_edit(
+                &now,
+                "router",
+                "openai-compatible",
+                None,
+                Some("https://elsewhere.example/v1"),
+            ),
+            now.sha256.as_deref().unwrap(),
+            Vec::new(),
+        )
+        .unwrap();
+    // E3: router dropped; E4: router added again at openrouter.example.
+    let now = am_config::accounts_file(dir.path());
+    let e3 = w
+        .apply_with_audit(
+            owner(),
+            am_config::remove_account_edit(&now, "router").unwrap(),
+            now.sha256.as_deref().unwrap(),
+            Vec::new(),
+        )
+        .unwrap();
+    let now = am_config::accounts_file(dir.path());
+    w.apply_with_audit(
+        owner(),
+        am_config::add_account_edit(
+            &now,
+            "router",
+            "openai-compatible",
+            None,
+            Some("https://openrouter.example/api/v1"),
+        ),
+        now.sha256.as_deref().unwrap(),
+        Vec::new(),
+    )
+    .unwrap();
+    let refused = |result: Result<am_domain::HistoryEntry, WriteError>, what: &str| {
+        let bytes = std::fs::read(&path).unwrap();
+        let entries = history.entries(None).unwrap().len();
+        let err = result.expect_err(what);
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            bytes,
+            "{what}: nothing written"
+        );
+        assert_eq!(history.entries(None).unwrap().len(), entries, "{what}");
+        err
+    };
+
+    // Restore of E3 would drop router.
+    refused(w.restore(owner(), &e3.id), "a Restore that drops router");
+    // With router dropped by an app edit, Restore of E2 would re-add it at
+    // elsewhere.example (the second half of the two-Restore move).
+    let now = am_config::accounts_file(dir.path());
+    let dropped = w
+        .apply_with_audit(
+            owner(),
+            am_config::remove_account_edit(&now, "router").unwrap(),
+            now.sha256.as_deref().unwrap(),
+            Vec::new(),
+        )
+        .unwrap();
+    refused(
+        w.restore(owner(), &e2.id),
+        "a Restore that re-adds router elsewhere",
+    );
+    // Undo of the remove would re-add router: refused naming `add`.
+    let err = refused(w.undo(owner(), &dropped.id), "an Undo of a remove");
+    assert!(err.to_string().contains("agentic accounts add"), "{err}");
+
+    // A name-only edit: its Undo applies.
+    let named = w
+        .apply(
+            owner(),
+            am_config::ConfigEdit {
+                file: USER_ACCOUNTS_FILE.into(),
+                ops: vec![EditOp::Set {
+                    path: vec!["accounts".into(), "0".into(), "name".into()],
+                    value: serde_json::json!("Renamed"),
+                }],
+                body: None,
+            },
+        )
+        .unwrap();
+    let undone = w.undo(owner(), &named.id).unwrap();
+    assert_eq!(undone.kind, HistoryKind::Undo);
+}
+
+/// Review fix Quick 5 (2026-11-23): the user-mode refusal leaves a project
+/// writer untouched: the Undo and the Restore of a seat edit that moves the
+/// seat to another Account still apply.
+#[test]
+fn a_project_writers_undo_of_a_seat_edit_is_unaffected() {
+    let dir = copy_of("valid");
+    let root = dir.path();
+    let history = Arc::new(InMemoryConfigHistory::default());
+    let w = ConfigWriter::open(root, history.clone()).unwrap();
+    let seat = "seats/alpha.md";
+    let before = std::fs::read(root.join(seat)).unwrap();
+    let edited = w
+        .apply(
+            owner(),
+            am_config::ConfigEdit {
+                file: seat.into(),
+                ops: vec![EditOp::Set {
+                    path: vec!["model".into(), "account".into()],
+                    value: serde_json::json!("local-ollama"),
+                }],
+                body: None,
+            },
+        )
+        .unwrap();
+    let undone = w.undo(owner(), &edited.id).unwrap();
+    assert_eq!(undone.kind, HistoryKind::Undo);
+    assert_eq!(std::fs::read(root.join(seat)).unwrap(), before);
+    let restored = w.restore(owner(), &edited.id).unwrap();
+    assert_eq!(restored.kind, HistoryKind::Restore);
+    assert_eq!(std::fs::read(root.join(seat)).unwrap(), edited.after);
+}
+
+/// Follow-up review fix (2026-11-23, low): a user-mode Restore whose target
+/// removes an Account whose id is key-shaped (an entry put in the file by
+/// hand, kebab-case so the loader reads it as an Account, with an error:
+/// its `secret_ref` names another entry) is refused with the secret refusal, writing
+/// nothing, and the id is never echoed: the secret check runs before the
+/// Account comparison names any id.
+#[test]
+fn a_restore_that_drops_a_key_shaped_id_never_echoes_it() {
+    const KEY_ID: &str = "sk-ant-api03-idcanary-0a0a0a0a0a0a0a0a0a0a";
+    let dir = app_data();
+    let history = Arc::new(InMemoryConfigHistory::default());
+    let w = ConfigWriter::for_user_accounts(dir.path(), history.clone()).unwrap();
+    let created = w
+        .create(
+            owner(),
+            ConfigCreate {
+                file: USER_ACCOUNTS_FILE.into(),
+                bytes: VALID.as_bytes().to_vec(),
+                audit: Vec::new(),
+            },
+        )
+        .unwrap();
+    let named = w
+        .apply(
+            owner(),
+            am_config::ConfigEdit {
+                file: USER_ACCOUNTS_FILE.into(),
+                ops: vec![EditOp::Set {
+                    path: vec!["accounts".into(), "0".into(), "name".into()],
+                    value: serde_json::json!("Renamed"),
+                }],
+                body: None,
+            },
+        )
+        .unwrap();
+    let path = dir.path().join(USER_ACCOUNTS_FILE);
+    let text = std::fs::read_to_string(&path).unwrap();
+    std::fs::write(
+        &path,
+        format!("{text}  - id: {KEY_ID}\n    provider: anthropic\n    secret_ref: other\n"),
+    )
+    .unwrap();
+    let bytes = std::fs::read(&path).unwrap();
+    let entries = history.entries(None).unwrap().len();
+
+    for target in [&created.id, &named.id] {
+        let err = w.restore(owner(), target).unwrap_err();
+        let words = err.to_string();
+        assert!(
+            words.contains("secret-looking"),
+            "{}",
+            words.replace(KEY_ID, "<id>")
+        );
+        assert!(
+            !words.contains(KEY_ID),
+            "the id is echoed: {}",
+            words.replace(KEY_ID, "<id>")
+        );
+        assert!(!format!("{err:?}").contains(KEY_ID), "nor in Debug");
+        assert_eq!(std::fs::read(&path).unwrap(), bytes, "nothing written");
+        assert_eq!(history.entries(None).unwrap().len(), entries);
+    }
+}
