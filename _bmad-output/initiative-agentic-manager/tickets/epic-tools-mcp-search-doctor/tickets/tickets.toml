@@ -3,14 +3,15 @@
 # and each epic line names its source as 'parent R<m>'. Outside the initiative file, write initiative ids as 'init R<m>' (final review coverage F8).
 # Retired 2026-11-18 (moved to epic-connectors-sources, never reused here): 1 -> 12.3, 2 -> 12.4, 3 -> 12.5, 4 -> 12.6, 14 -> 12.11, 15 -> 12.10. next id: 20 (17 and 18 added 2026-11-18, 19 on 2026-11-22).
 # 2026-11-22 owner answers 2: entry 19 (Recover Accounts after a lost user database) added after 9, before 10; entry 11 restated in place (the Account residuals).
+# 2026-11-22 owner (MCP servers: warn, don't refuse): entries 5 and 7 restated in place (the add and re-approval confirmation states that the server's tools may run commands on this Mac).
 # MCP lane (5–7) shares am-mcp; Doctor lane (8, 9) shares the health module.
 
 [[entry]]
 id = 5
 type = "story"
 title = "Add an MCP server after seeing its exact spec"
-description = "Settings › Tools & MCP (spine-only; the Connectors catalogue's MCP card opens it) adds a server record to tools.yaml with command, args, env var names, cwd (the workspace), pinned version and declared network use; the add dialog shows all of them before Add, and Add is privilege-widening; approval stores the hash of the spec and its tool descriptions; its tools reach no seat until assigned in the seat sheet, default to external-effect, and assignment or lowering a class goes through the privilege-widening confirmation; the declared network use appears in each assigned seat's What this seat can touch panel. Matches key-mcp-add.html."
-verify = "Playwright: adding a fixture stdio server shows the exact command, args, env names, cwd, pinned version and network use; Return keeps current access and writes nothing; after approval the server is in tools.yaml with no secret and its hash stored; no seat can call its tools until one is assigned through the confirmation; the seat's panel then lists the declared network use."
+description = "Settings › Tools & MCP (spine-only; the Connectors catalogue's MCP card opens it) adds a server record to tools.yaml with command, args, env var names, cwd (the workspace), pinned version and declared network use; the add dialog shows all of them before Add, and Add is privilege-widening; for a stdio and an HTTP server alike, the confirmation states that its tools may run commands on this Mac and that agents given those tools could start processes, weakening the terminal-only guarantee for Account commands, and Add is never refused for that reason (owner, 2026-11-22, verbatim: \"MCP servers: warn, don't refuse. When adding any MCP server (epic 9), the confirmation states that its tools may run commands on this Mac, and that agents given those tools could start processes — weakening the terminal-only guarantee for Account commands (AD-13).\"; arch AD-13, AD-15, AD-26); approval stores the hash of the spec and its tool descriptions; its tools reach no seat until assigned in the seat sheet, default to external-effect, and assignment or lowering a class goes through the privilege-widening confirmation; the declared network use appears in each assigned seat's What this seat can touch panel. Matches key-mcp-add.html."
+verify = "Playwright: adding a fixture stdio server shows the exact command, args, env names, cwd, pinned version and network use; the confirmation for that stdio server and for a fixture loopback HTTP server each states that its tools may run commands on this Mac and that agents given those tools could start processes, weakening the terminal-only guarantee for Account commands, and both can be added; Return keeps current access and writes nothing; after approval the server is in tools.yaml with no secret and its hash stored; no seat can call its tools until one is assigned through the confirmation; the seat's panel then lists the declared network use."
 covers = ["R5", "R8"]
 after = ["5.9", "5.12", "5.13"]
 hitl = false
@@ -32,8 +33,8 @@ risk = "high"
 id = 7
 type = "story"
 title = "A changed MCP tool description forces re-approval"
-description = "On every connect the tool descriptions are re-hashed against the approval; a mismatch disables the server, raises a re-approval Inbox item showing the before and after descriptions, and keeps its tools unavailable until the owner re-approves through the privilege-widening confirmation; the RULE-13 rug-pull test is written to fail first."
-verify = "A fixture server that changes one tool description on reconnect is disabled; the Inbox shows the re-approval item with the diff; a seat's call to that tool is refused until re-approval; after re-approval the new hash is stored and the call works; the trust test passes."
+description = "On every connect the tool descriptions are re-hashed against the approval; a mismatch disables the server, raises a re-approval Inbox item showing the before and after descriptions, and keeps its tools unavailable until the owner re-approves through the privilege-widening confirmation, which repeats story 5's warning that the server's tools may run commands on this Mac (owner, 2026-11-22; arch AD-26); the RULE-13 rug-pull test is written to fail first."
+verify = "A fixture server that changes one tool description on reconnect is disabled; the Inbox shows the re-approval item with the diff; its confirmation states story 5's run-commands warning; a seat's call to that tool is refused until re-approval; after re-approval the new hash is stored and the call works; the trust test passes."
 covers = ["R7"]
 after = [6, "6.8"]
 hitl = false
