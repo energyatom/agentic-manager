@@ -1,5 +1,6 @@
-//! `agentic accounts add|remove|list|test|migrate` (story 2.1; `migrate`,
-//! story 2.13, is in [`migrate`]): AD-15's interim CLI
+//! `agentic accounts add|change|remove|list|test|migrate` (story 2.1;
+//! `migrate`, story 2.13, is in [`migrate`]; `change`, story 2.14, the only
+//! way to confirm or re-confirm an Account, is in [`change`]): AD-15's interim CLI
 //! Account edit, and the two reads beside it. Story 2.3 adds the providers
 //! `openai` and `openai-compatible`; one function, [`endpoint_of`], derives
 //! an Account's endpoint (scheme, host, port, base URL) for every command.
@@ -78,6 +79,7 @@ use am_providers::openai_compat::{OPENAI_BASE_URL, OPENAI_HOST};
 use am_providers::{AnthropicProvider, OpenAiCompatProvider};
 use tokio_util::sync::CancellationToken;
 
+mod change;
 mod migrate;
 
 use crate::cli::{EXIT_ERRORS, EXIT_OK, EXIT_USAGE};
@@ -101,7 +103,7 @@ const OPENAI_COMPATIBLE: &str = "openai-compatible";
 const PROVIDERS: &str =
     "`--provider anthropic`, `--provider openai` or `--provider openai-compatible`";
 
-const USAGE: &str = "usage: agentic accounts add <id> --provider anthropic|openai|openai-compatible [--base-url <url>] [--name <text>]\n       agentic accounts remove <id> [--force]\n       agentic accounts list\n       agentic accounts test <id> [--model <model>]\n       agentic accounts migrate --project <path> [--as <old>=<new>]... [--dry-run | --rollback]\n       (Accounts belong to this Mac: no command but migrate takes a project;\n        migrate moves a project's old models/accounts.yaml to this Mac's Accounts, --as names a clashing id anew, --dry-run only shows what it would do, --rollback puts the file back from its backup;\n        --base-url is for openai-compatible only: https://<host>[/path], or http://127.0.0.1:<port>[/path] for a server on this Mac;\n        --model is required for an openai or openai-compatible Account;\n        --force removes even while a project this Mac knows cannot be reached, never while a reference names the Account)";
+const USAGE: &str = "usage: agentic accounts add <id> --provider anthropic|openai|openai-compatible [--base-url <url>] [--name <text>]\n       agentic accounts change <id> [--provider anthropic|openai|openai-compatible] [--base-url <url>]\n       agentic accounts remove <id> [--force]\n       agentic accounts list\n       agentic accounts test <id> [--model <model>]\n       agentic accounts migrate --project <path> [--as <old>=<new>]... [--dry-run | --rollback]\n       (Accounts belong to this Mac: no command but migrate takes a project;\n        migrate moves a project's old models/accounts.yaml to this Mac's Accounts, --as names a clashing id anew, --dry-run only shows what it would do, --rollback puts the file back from its backup;\n        --base-url is for openai-compatible only: https://<host>[/path], or http://127.0.0.1:<port>[/path] for a server on this Mac;\n        change confirms an Account again: a new address of the same provider keeps its key, a new provider (or an Account with no confirmation) asks for a new key and deletes the old one;\n        --model is required for an openai or openai-compatible Account;\n        --force removes even while a project this Mac knows cannot be reached, never while a reference names the Account)";
 
 /// Builds the egress client over a directory, reporting blocks to a sink.
 pub type EgressFactory = Arc<
@@ -135,6 +137,12 @@ enum Command {
         id: String,
         force: bool,
     },
+    /// Story 2.14: `change <id> [--provider P] [--base-url U]`.
+    Change {
+        id: String,
+        provider: Option<String>,
+        base_url: Option<String>,
+    },
     List,
     Test {
         id: String,
@@ -146,12 +154,12 @@ enum Command {
 
 fn parse(args: &[String]) -> Result<Command, String> {
     let Some(verb) = args.first().map(String::as_str) else {
-        return Err("accounts needs `add`, `remove`, `list`, `test` or `migrate`".into());
+        return Err("accounts needs `add`, `change`, `remove`, `list`, `test` or `migrate`".into());
     };
     if verb == "migrate" {
         return migrate::parse(&args[1..]).map(Command::Migrate);
     }
-    if !["add", "remove", "list", "test"].contains(&verb) {
+    if !["add", "change", "remove", "list", "test"].contains(&verb) {
         return Err(format!("unknown accounts command `{verb}`"));
     }
     let mut positional: Vec<String> = Vec::new();
@@ -170,6 +178,8 @@ fn parse(args: &[String]) -> Result<Command, String> {
             ("--provider", "add") => "--provider",
             ("--name", "add") => "--name",
             ("--base-url", "add") => "--base-url",
+            ("--provider", "change") => "--provider",
+            ("--base-url", "change") => "--base-url",
             ("--model", "test") => "--model",
             ("--project", _) => {
                 return Err(format!(
@@ -214,6 +224,11 @@ fn parse(args: &[String]) -> Result<Command, String> {
         "remove" => Command::Remove {
             id: one_id("the Account's id")?,
             force,
+        },
+        "change" => Command::Change {
+            id: one_id("the Account's id")?,
+            provider: flags.remove("--provider"),
+            base_url: flags.remove("--base-url"),
         },
         "test" => Command::Test {
             id: one_id("the Account's id")?,
@@ -268,6 +283,11 @@ pub async fn accounts(
             out,
         ),
         Command::Remove { id, force } => remove(ctx, &id, force, out),
+        Command::Change {
+            id,
+            provider,
+            base_url,
+        } => change::change(ctx, &id, provider.as_deref(), base_url.as_deref(), out),
         Command::List => list(&ctx, out),
         Command::Test { id, model } => test(&ctx, &id, model, out).await,
         Command::Migrate(m) => migrate::run(ctx, m, out),
@@ -465,7 +485,7 @@ fn require_terminal(ctx: &AccountsContext, what: &str, did_not: &str) -> Result<
         return Ok(());
     }
     refuse(format!(
-        "`agentic accounts {what}` runs only in an interactive terminal: stdin and stdout must both be a terminal, not a pipe, a file or another program, because adding or removing an Account changes what this Mac's projects may call and only you decide that. {did_not}; run the command yourself in a terminal"
+        "`agentic accounts {what}` runs only in an interactive terminal: stdin and stdout must both be a terminal, not a pipe, a file or another program, because adding, changing or removing an Account changes what this Mac's projects may call and only you decide that. {did_not}; run the command yourself in a terminal"
     ))
 }
 
@@ -1172,6 +1192,26 @@ fn list(ctx: &AccountsContext, out: &mut dyn Write) -> Result<(), Stop> {
                 Ok(None) => "  confirmed: nothing".to_string(),
                 Err(why) => format!("  confirmed: unknown ({why})"),
             }
+        } else if file.entry_errors(&account.id).is_empty() && is_model_provider(&account.provider)
+        {
+            // Story 2.14: an Account with no live confirmation record, or one
+            // for another provider or endpoint than the file's, is not called.
+            let endpoint =
+                endpoint_of(&account.provider, account.base_url.as_deref(), "base_url").ok();
+            match key_use::live_record(places, &account.id) {
+                Ok(Some((d, _)))
+                    if endpoint
+                        .as_ref()
+                        .is_some_and(|e| d.names(&account.provider, e)) =>
+                {
+                    String::new()
+                }
+                Ok(_) => format!(
+                    "  unconfirmed: no key is used until `{}` confirms it",
+                    key_use::change_command(places, &account.id)
+                ),
+                Err(why) => format!("  confirmed: unknown ({why})"),
+            }
         } else {
             String::new()
         };
@@ -1198,7 +1238,13 @@ impl EventSink for Forward {
 const TEST_PROMPT: &str = "Count from one to three in words, one word per line, and nothing else.";
 
 /// `test`'s refusal of an Account the key-use check refused.
-fn refused_words(id: &str, refused: &Refused, provider: Option<&str>, own: bool) -> String {
+fn refused_words(
+    id: &str,
+    refused: &Refused,
+    provider: Option<&str>,
+    own: bool,
+    confirm: &str,
+) -> String {
     match refused {
         Refused::Store(why) => format!("{why}; no key was read and nothing was sent"),
         Refused::NoAccount => format!(
@@ -1228,7 +1274,7 @@ fn refused_words(id: &str, refused: &Refused, provider: Option<&str>, own: bool)
         Refused::NotConfirmed(why) => {
             let base_url = if own { " --base-url <url>" } else { "" };
             format!(
-                "the Account '{id}' is not called: it was not confirmed by `agentic accounts add` on this Mac, or {USER_ACCOUNTS_FILE} changed since ({why}). No key was read or sent. If {USER_ACCOUNTS_FILE} was changed by hand, put it back as the app last wrote it; otherwise remove the Account and add it again in a terminal (`agentic accounts remove {id}`, then `agentic accounts add {id} --provider {}{base_url}`)",
+                "the Account '{id}' is not called: it was not confirmed by `agentic accounts add` on this Mac, or {USER_ACCOUNTS_FILE} changed since ({why}). No key was read or sent. If {USER_ACCOUNTS_FILE} was changed by hand, put it back as the app last wrote it; otherwise confirm it in a terminal with `{confirm}` (a new key is asked for when it has no confirmation), or remove the Account and add it again (`agentic accounts remove {id}`, then `agentic accounts add {id} --provider {}{base_url}`)",
                 provider.unwrap_or("<provider>")
             )
         }
@@ -1244,7 +1290,13 @@ fn checked(places: &Places, id: &str) -> Result<key_use::Confirmed, Stop> {
         let own = account.is_some_and(|a| a.base_url.is_some());
         Stop(
             EXIT_ERRORS,
-            refused_words(id, &refused, account.map(|a| a.provider.as_str()), own),
+            refused_words(
+                id,
+                &refused,
+                account.map(|a| a.provider.as_str()),
+                own,
+                &key_use::change_command(places, id),
+            ),
         )
     })
 }

@@ -99,9 +99,7 @@ pub fn compatible_base_url(text: &str) -> Result<CompatibleBaseUrl, String> {
     let host = host.to_ascii_lowercase();
     let address = host.parse::<IpAddr>().ok();
     let is_address = address.is_some() || bracketed;
-    let this_mac = host == "localhost"
-        || host.ends_with(".localhost")
-        || address.is_some_and(|ip| ip.is_loopback());
+    let this_mac = names_this_mac(&host);
 
     let accepted = if https {
         if this_mac {
@@ -165,6 +163,31 @@ pub fn compatible_base_url(text: &str) -> Result<CompatibleBaseUrl, String> {
         ));
     }
     Ok(accepted)
+}
+
+/// True when `host` names this Mac: `localhost` or a `*.localhost` name
+/// (with or without a trailing dot, any case), or a loopback or unspecified
+/// address, IPv4-mapped included (brackets allowed). The one "this Mac"
+/// rule of a compatible `base_url` and of the loopback-HTTP MCP list
+/// (story 2.14).
+pub(crate) fn names_this_mac(host: &str) -> bool {
+    let host = host.to_ascii_lowercase();
+    let host = host
+        .strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(&host);
+    let name = host.strip_suffix('.').unwrap_or(host);
+    if name == "localhost" || name.ends_with(".localhost") {
+        return true;
+    }
+    let local = |ip: IpAddr| ip.is_loopback() || ip.is_unspecified();
+    match host.parse::<IpAddr>() {
+        Ok(IpAddr::V6(v6)) => {
+            local(IpAddr::V6(v6)) || v6.to_ipv4_mapped().is_some_and(|v4| local(IpAddr::V4(v4)))
+        }
+        Ok(ip) => local(ip),
+        Err(_) => false,
+    }
 }
 
 /// True when the `url` crate reads `text` as exactly `accepted`: the same

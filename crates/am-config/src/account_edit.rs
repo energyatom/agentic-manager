@@ -10,7 +10,8 @@
 //!   model or fallback, a capability's provider, a Source's account, the
 //!   search provider), whether or not the project is valid: an Account is
 //!   often added because seats already name it.
-//! - [`add_account_edit`], [`remove_account_edit`] and [`new_accounts_file`]
+//! - [`add_account_edit`], [`change_account_edit`] (story 2.14),
+//!   [`remove_account_edit`] and [`new_accounts_file`]
 //!   build the one patch the CLI may write, for the writer to check and
 //!   apply ([`crate::ConfigWriter::apply_with_audit`],
 //!   [`crate::ConfigWriter::create`]).
@@ -72,6 +73,8 @@ pub struct AccountsFile {
     list: bool,
     /// The loader's errors on each item of `accounts:`, in file order.
     errors: Vec<Vec<String>>,
+    /// Whether each item of `accounts:` has a `base_url` key, in file order.
+    base_urls: Vec<bool>,
 }
 
 impl AccountsFile {
@@ -141,6 +144,7 @@ pub fn accounts_file(app_data: &Path) -> AccountsFile {
         accounts: Vec::new(),
         list: false,
         errors: Vec::new(),
+        base_urls: Vec::new(),
     };
     let bytes = match std::fs::read(app_data.join(USER_ACCOUNTS_FILE)) {
         Ok(b) => b,
@@ -173,6 +177,10 @@ pub fn accounts_file(app_data: &Path) -> AccountsFile {
             out.ids = items
                 .iter()
                 .map(|item| at(item, "id").and_then(text_of))
+                .collect();
+            out.base_urls = items
+                .iter()
+                .map(|item| at(item, "base_url").is_some())
                 .collect();
             spans = items.iter().map(lines_of).collect();
             out.lines = spans.iter().map(|(first, _)| *first).collect();
@@ -326,6 +334,43 @@ pub fn remove_account_edit(file: &AccountsFile, id: &str) -> Option<ConfigEdit> 
         ops: vec![EditOp::Remove {
             path: vec!["accounts".into(), index.to_string()],
         }],
+        body: None,
+    })
+}
+
+/// Story 2.14 (AD-15 *Change*): the edit that sets the Account `id`'s
+/// `provider` and `base_url` in `file` (by its number in the list `file`
+/// saw, so it is applied with `file.sha256`), keeping its id, name and
+/// `secret_ref`. `base_url` is `None` for a provider with one fixed
+/// endpoint, and then a `base_url` the item holds is removed. `None` when no
+/// item has that id.
+pub fn change_account_edit(
+    file: &AccountsFile,
+    id: &str,
+    provider: &str,
+    base_url: Option<&str>,
+) -> Option<ConfigEdit> {
+    let index = file.ids.iter().position(|i| i.as_deref() == Some(id))?;
+    let at = |key: &str| vec!["accounts".to_string(), index.to_string(), key.to_string()];
+    let mut ops = vec![EditOp::Set {
+        path: at("provider"),
+        value: json!(provider),
+    }];
+    match base_url {
+        Some(url) => ops.push(EditOp::Set {
+            path: at("base_url"),
+            value: json!(url),
+        }),
+        None if file.base_urls.get(index).copied().unwrap_or(false) => {
+            ops.push(EditOp::Remove {
+                path: at("base_url"),
+            });
+        }
+        None => {}
+    }
+    Some(ConfigEdit {
+        file: USER_ACCOUNTS_FILE.into(),
+        ops,
         body: None,
     })
 }

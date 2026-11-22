@@ -219,6 +219,9 @@ pub struct Locked {
     pub history: Arc<UserStore>,
     /// What settling interrupted writes did, as printed.
     pub lines: Vec<String>,
+    /// The History entry ids settling completed (story 2.14: their notes
+    /// are not a change made since a command's sentence).
+    pub settled: Vec<String>,
 }
 
 impl Locked {
@@ -267,6 +270,7 @@ impl Locked {
             writer,
             history,
             lines,
+            settled: settled.completed.iter().map(|e| e.id.clone()).collect(),
         })
     }
 
@@ -314,7 +318,9 @@ pub struct Scan {
     pub uses: Vec<(PathBuf, AccountUse)>,
     /// Recorded projects whose root could not be reached (not checked).
     pub unreachable: Vec<PathBuf>,
-    /// Projects that enable a child that runs as the owner, with why.
+    /// Projects that enable a child that runs as the owner, with why (a
+    /// stdio MCP server, a Source with `render: true`, a file with an error,
+    /// or, since story 2.14, an MCP server over HTTP on this Mac).
     pub children: Vec<(PathBuf, String)>,
 }
 
@@ -363,7 +369,9 @@ pub fn scan(places: &Places, id: &str) -> Scan {
         for u in am_config::account_uses(&root, id) {
             out.uses.push((root.clone(), u));
         }
-        if let Some(why) = am_config::owner_children(&root).words() {
+        // The Account commands' rule: stdio and `render: true` children and,
+        // since story 2.14, loopback-HTTP MCP servers.
+        if let Some(why) = am_config::owner_children(&root).account_words() {
             out.children.push((root.clone(), why));
         }
     }

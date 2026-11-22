@@ -82,8 +82,8 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 pub use account_edit::{
-    AccountUse, AccountsFile, account_uses, accounts_file, add_account_edit, is_config_id,
-    new_accounts_file, outside_changes, remove_account_edit, reserved_account_ids,
+    AccountUse, AccountsFile, account_uses, accounts_file, add_account_edit, change_account_edit,
+    is_config_id, new_accounts_file, outside_changes, remove_account_edit, reserved_account_ids,
 };
 pub use account_migration::{
     ConfigMigration, LegacyAccounts, LegacyEntry, MigrationStep, RenamedFile, account_renames,
@@ -861,6 +861,16 @@ pub struct OwnerChildren {
     /// `tools.yaml` and Source files with an error: each is read as
     /// enabling a child (fails closed), though nothing says it does.
     pub broken: Vec<String>,
+    /// Story 2.14 (AD-15 *Open*, owner 2026-11-22): one reason per enabled
+    /// `transport: http` MCP server (http or https, any port) whose `url`
+    /// host names this Mac by the rule of a compatible `base_url`: any
+    /// loopback or unspecified address (`127.0.0.0/8`, `0.0.0.0`, `[::1]`,
+    /// `[::]`, IPv4-mapped forms of these included), `localhost` or a
+    /// `*.localhost` name, with or without a trailing dot; or whose `url`
+    /// cannot be read (fails closed). Only the Account commands read this list
+    /// ([`OwnerChildren::account_words`]); [`OwnerChildren::words`], and so
+    /// `agentic run`, `--take-over` and `--confirm-move`, keep the stdio rule.
+    pub loopback_http: Vec<String>,
 }
 
 impl OwnerChildren {
@@ -872,6 +882,38 @@ impl OwnerChildren {
         }));
         (!reasons.is_empty()).then(|| reasons.join("; "))
     }
+
+    /// The reasons the Account commands refuse on (`add`, `change`,
+    /// `remove`, `migrate`): [`OwnerChildren::words`] and the loopback-HTTP
+    /// MCP servers, joined; `None` when there is none.
+    pub fn account_words(&self) -> Option<String> {
+        let mut reasons: Vec<String> = self.words().into_iter().collect();
+        reasons.extend(self.loopback_http.iter().cloned());
+        (!reasons.is_empty()).then(|| reasons.join("; "))
+    }
+}
+
+pub(crate) fn loopback_http_words(id: &str) -> String {
+    format!("the MCP server `{id}` on this Mac (transport: http at a loopback address) is enabled")
+}
+
+/// True when an http MCP server's `url` reaches this Mac: its host names
+/// this Mac by the rule of a compatible `base_url` (http or https, any
+/// port). A `url`
+/// that is missing or cannot be read counts as reaching it (fails closed).
+fn loopback_http(url: Option<&str>) -> bool {
+    let Some(parsed) = url.and_then(|u| url::Url::parse(u).ok()) else {
+        return true;
+    };
+    // The one "this Mac" rule of a compatible `base_url` (review fix,
+    // Adversarial 5): every loopback and unspecified address, IPv4-mapped
+    // included, and `localhost` / `*.localhost` with or without a dot.
+    match parsed.host() {
+        Some(url::Host::Domain(name)) => base_url::names_this_mac(name),
+        Some(url::Host::Ipv4(ip)) => base_url::names_this_mac(&ip.to_string()),
+        Some(url::Host::Ipv6(ip)) => base_url::names_this_mac(&ip.to_string()),
+        None => true,
+    }
 }
 
 pub(crate) fn stdio_server_words(id: &str) -> String {
@@ -880,6 +922,14 @@ pub(crate) fn stdio_server_words(id: &str) -> String {
 
 pub(crate) fn rendering_source_words(id: &str) -> String {
     format!("the Source `{id}` has render: true")
+}
+
+/// True when `text` holds a secret-looking value (a key prefix such as
+/// `sk-ant-`, or a private key block) by the one rule the writer's secret
+/// check applies to config files (story 2.14: a `--base-url` is checked
+/// before it is shown, recorded or written).
+pub fn looks_like_a_secret(text: &str) -> bool {
+    checks::has_secret_prefix(text)
 }
 
 /// What the project's files at `root` enable now (see [`OwnerChildren`]).
@@ -899,6 +949,8 @@ pub fn owner_children(root: &Path) -> OwnerChildren {
     for s in &loader.tools.mcp_servers {
         if s.transport == "stdio" {
             found.enabled.push(stdio_server_words(&s.id));
+        } else if s.transport == "http" && loopback_http(s.url.as_deref()) {
+            found.loopback_http.push(loopback_http_words(&s.id));
         }
     }
     for s in loader.sources.values() {

@@ -752,7 +752,7 @@ fn scans(places: &Places, entries: &[Entry]) -> BTreeMap<String, Scan> {
 /// Refuses while this project or any reachable project enables a child
 /// that runs as the owner (AD-13, AD-15).
 fn no_children(root: &Path, scan: &Scan, what: &str, did_not: &str) -> Result<(), Stop> {
-    let own = am_config::owner_children(root).words();
+    let own = am_config::owner_children(root).account_words();
     let found = own
         .map(|why| (root.to_path_buf(), why))
         .or_else(|| scan.children.first().cloned());

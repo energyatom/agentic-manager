@@ -302,14 +302,17 @@ impl Reader {
     /// intent's) and the file of its History entry, so a caller can accept
     /// only the owner's note on the right file. An entry put into the log
     /// any other way is left out (story 2.2: the Account confirmation of
-    /// AD-15's Key use).
+    /// AD-15's Key use). Story 2.14: also the notes of a `config.recorded`
+    /// entry ([`crate::user::UserStore::record_config_notes`]).
     pub fn config_note_args(
         &self,
         action: &str,
         target: &str,
     ) -> Result<Vec<ConfigNote>, StoreError> {
         migrations::refuse_newer(migrations::user_version(&self.conn)?)?;
-        const ENTRIES: [&str; 7] = [
+        // `config.recorded` (story 2.14): notes committed with no History
+        // entry, naming the file's latest one.
+        const ENTRIES: [&str; 8] = [
             "config.edited",
             "config.undone",
             "config.restored",
@@ -317,6 +320,7 @@ impl Reader {
             "config.migrated",
             "config.created",
             "config.reconciled",
+            "config.recorded",
         ];
         let text_args = |row: &Row| -> Result<BTreeMap<String, String>, StoreError> {
             let mut args = BTreeMap::new();
@@ -333,22 +337,34 @@ impl Reader {
         };
         let mut found = Vec::new();
         // The `at`, file and entry id of the History entry whose notes may
-        // follow.
-        let mut open: Option<(String, String, String)> = None;
+        // follow, and whether the head is a `config.recorded` one.
+        let mut open: Option<(String, String, String, bool)> = None;
         each_row(&self.conn, |row| {
             if ENTRIES.contains(&row.action.as_str()) {
                 let mut args = text_args(&row)?;
                 let file = args.remove("file").unwrap_or_default();
                 let entry = args.remove("entry_id").unwrap_or_default();
-                open = Some((row.at.clone(), file, entry));
+                let recorded = row.action == "config.recorded";
+                open = Some((row.at.clone(), file, entry, recorded));
                 return Ok(());
             }
-            let Some((_, file, entry_id)) = open.clone().filter(|(at, _, _)| *at == row.at) else {
+            let Some((_, file, entry_id, recorded)) =
+                open.clone().filter(|(at, _, _, _)| *at == row.at)
+            else {
                 open = None;
                 return Ok(());
             };
             if row.action != action || row.target != target {
                 return Ok(());
+            }
+            // Review fix G-record: a record-only head carries only the kinds
+            // that grant nothing; anything else after it is never read.
+            if recorded {
+                let args = text_args(&row)?;
+                let kind = args.get("kind").map_or("", String::as_str);
+                if !RECORDED_KINDS.contains(&kind) {
+                    return Ok(());
+                }
             }
             let actor: Actor = serde_json::from_str(&row.actor).map_err(|e| {
                 StoreError::Invalid(format!(
@@ -582,6 +598,11 @@ mod tests {
         assert_eq!(b.to_string(), "line 2: is not JSON");
     }
 }
+
+/// The note kinds a `config.recorded` head may carry (story 2.14, review
+/// fix G-record): records that grant nothing. A confirmation
+/// (`account_added`, `account_changed`) commits only with a History entry.
+pub const RECORDED_KINDS: [&str; 2] = ["account_removed", "account_key_set"];
 
 /// A note a committed config intent wrote ([`Reader::config_note_args`]).
 #[derive(Debug, Clone, PartialEq, Eq)]

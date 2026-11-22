@@ -82,7 +82,9 @@ impl Refused {
             Refused::Endpoint(why) => why.clone(),
             Refused::SecretRef(_) => "its `secret_ref` names another Keychain entry; a key is only ever read from the entry named by the Account's own id".to_string(),
             Refused::NotConfirmed(why) => {
-                format!("it is not confirmed by `agentic accounts add` on this Mac ({why})")
+                format!(
+                    "it is not confirmed on this Mac ({why}); confirm it with `agentic accounts change {id}` in a terminal"
+                )
             }
             Refused::Interrupted => interrupted_words(),
             Refused::Unconfirmed => unconfirmed_words(id),
@@ -93,7 +95,7 @@ impl Refused {
 /// The words for a write of the user file that was interrupted.
 pub fn interrupted_words() -> String {
     format!(
-        "a write of this Mac's {USER_ACCOUNTS_FILE} was interrupted before its History entry was recorded, so no key is read until it is settled; the next `agentic accounts add` or `agentic accounts remove` settles it, then run this command again"
+        "a write of this Mac's {USER_ACCOUNTS_FILE} was interrupted before its History entry was recorded, so no key is read until it is settled; the next `agentic accounts add`, `change` or `remove` settles it, then run this command again"
     )
 }
 
@@ -247,6 +249,32 @@ impl Destination {
         })
     }
 
+    /// The destination an `account_key_set` names in its `key_for_…`
+    /// fields (story 2.14, review fix G-keyfor: written only after the
+    /// Keychain `set` succeeded); `None` for any other record.
+    fn key_set(note: &ConfigNote) -> Option<Destination> {
+        if note.args.get("kind").map(String::as_str) != Some("account_key_set") {
+            return None;
+        }
+        let get = |key: &str| note.args.get(&format!("key_for_{key}")).cloned();
+        Some(Destination {
+            provider: get("provider")?,
+            scheme: get("scheme")?,
+            host: get("host")?,
+            port: get("port")?,
+            key: "stored".into(),
+        })
+    }
+
+    /// The destination as `account_added`'s `replaces` names it (story
+    /// 2.14): `<provider> <scheme>://<host>:<port>`.
+    pub fn replaces(&self) -> String {
+        format!(
+            "{} {}://{}:{}",
+            self.provider, self.scheme, self.host, self.port
+        )
+    }
+
     /// True when this names `provider` at `endpoint`, with a stored key.
     pub fn names(&self, provider: &str, endpoint: &AccountEndpoint) -> bool {
         self.provider == provider
@@ -274,11 +302,154 @@ pub(crate) fn confirmed_destination(
     Ok(records(&reader, id)?.last().and_then(Destination::of))
 }
 
-/// Where the key of `id` was last confirmed: the latest `account_added` or
-/// `account_changed` record, also when an `account_removed` follows it.
+/// Every note of `id` on the user file by the owner that the change
+/// command compares or reads: `account_added`, `account_changed`,
+/// `account_removed`, `account_listed` and `account_key_set`, oldest first.
+fn all_notes(reader: &am_store::user::UserReader, id: &str) -> Result<Vec<ConfigNote>, String> {
+    let mut all = Vec::new();
+    for action in ["config.widened", "config.narrowed"] {
+        all.extend(
+            reader
+                .config_note_args(action, id)
+                .map_err(|e| e.to_string())?,
+        );
+    }
+    all.retain(|n| {
+        matches!(n.actor, Actor::Human { .. })
+            && n.file == USER_ACCOUNTS_FILE
+            && matches!(
+                n.args.get("kind").map(String::as_str),
+                Some(
+                    "account_added"
+                        | "account_changed"
+                        | "account_removed"
+                        | "account_listed"
+                        | "account_key_set"
+                )
+            )
+    });
+    all.sort_by_key(|n| n.seq);
+    Ok(all)
+}
+
+/// Where the key the Keychain holds for `id` was last confirmed or typed
+/// for: the latest `account_added` or `account_changed` record, also when
+/// an `account_removed` follows it, or a later `account_key_set` (story
+/// 2.14: the entry was replaced for that destination). An
+/// `account_removed`'s `key_for_…` never names it (the Keychain may have
+/// refused the replacement).
 pub(crate) fn last_confirmed(places: &Places, id: &str) -> Result<Option<Destination>, String> {
     let reader = crate::user::reader(places)?;
-    Ok(records(&reader, id)?.iter().rev().find_map(Destination::of))
+    Ok(all_notes(&reader, id)?.iter().rev().find_map(|n| {
+        match n.args.get("kind").map(String::as_str) {
+            Some("account_added" | "account_changed") => Destination::of(n),
+            Some("account_key_set") => Destination::key_set(n),
+            _ => None,
+        }
+    }))
+}
+
+/// The Account's live confirmation record (story 2.14, AD-15 *Change*): its
+/// latest `account_added` or `account_changed`, with no `account_removed`
+/// and no `account_listed` after it, and that record's sequence number.
+/// `None` when it has none (never confirmed, listed unconfirmed by
+/// `accounts migrate`, removed, or a change cut short).
+pub(crate) fn live_record(places: &Places, id: &str) -> Result<Option<(Destination, i64)>, String> {
+    Ok(record_state(places, id)?.0)
+}
+
+/// The live record ([`live_record`]) and the sequence number of the latest
+/// note of `id` ([`all_notes`]; 0 with none), both from one read of the
+/// notes (review follow-up: never two snapshots).
+pub(crate) fn record_state(
+    places: &Places,
+    id: &str,
+) -> Result<(Option<(Destination, i64)>, i64), String> {
+    let reader = crate::user::reader(places)?;
+    let all = all_notes(&reader, id)?;
+    let latest = all.last().map_or(0, |n| n.seq);
+    let kind = |n: &ConfigNote| n.args.get("kind").cloned().unwrap_or_default();
+    let Some(record) = all.iter().rev().find(|n| {
+        matches!(
+            kind(n).as_str(),
+            "account_added" | "account_changed" | "account_removed"
+        )
+    }) else {
+        return Ok((None, latest));
+    };
+    let listed = all
+        .iter()
+        .any(|n| n.seq > record.seq && kind(n) == "account_listed");
+    if listed {
+        return Ok((None, latest));
+    }
+    Ok((Destination::of(record).map(|d| (d, record.seq)), latest))
+}
+
+/// The History entry ids of the notes of `id` after `seq` ([`all_notes`]).
+pub(crate) fn notes_after(places: &Places, id: &str, seq: i64) -> Result<Vec<String>, String> {
+    let reader = crate::user::reader(places)?;
+    Ok(all_notes(&reader, id)?
+        .into_iter()
+        .filter(|n| n.seq > seq)
+        .map(|n| n.entry_id)
+        .collect())
+}
+
+/// Where an interrupted provider change of `id` was going (story 2.14,
+/// review fix Adversarial 1): its latest records are a `provider_change`
+/// `account_removed` and then an `account_key_set`, so the Keychain entry
+/// holds a key typed for that destination.
+pub(crate) struct Pending {
+    pub dest: Destination,
+    /// The `base_url` typed for it (none for a provider with one endpoint).
+    pub base_url: Option<String>,
+}
+
+impl Pending {
+    /// The flags that finish the change: `--provider P[ --base-url U]`.
+    pub fn flags(&self) -> String {
+        match &self.base_url {
+            Some(url) => format!("--provider {} --base-url {url}", self.dest.provider),
+            None => format!("--provider {}", self.dest.provider),
+        }
+    }
+}
+
+/// The interrupted provider change of `id`, if any (see [`Pending`]).
+pub(crate) fn pending_change(places: &Places, id: &str) -> Result<Option<Pending>, String> {
+    let reader = crate::user::reader(places)?;
+    let all = all_notes(&reader, id)?;
+    let kind = |n: &ConfigNote| n.args.get("kind").cloned().unwrap_or_default();
+    let mut rev = all.iter().rev();
+    let (Some(set), Some(removed)) = (rev.next(), rev.next()) else {
+        return Ok(None);
+    };
+    if kind(set) != "account_key_set"
+        || kind(removed) != "account_removed"
+        || removed.args.get("reason").map(String::as_str) != Some("provider_change")
+    {
+        return Ok(None);
+    }
+    let base_url = set.args.get("key_for_base_url").cloned();
+    // Never a URL the secret check flags (review follow-up): no flags are
+    // offered for it.
+    if base_url
+        .as_deref()
+        .is_some_and(am_config::looks_like_a_secret)
+    {
+        return Ok(None);
+    }
+    Ok(Destination::key_set(set).map(|dest| Pending { dest, base_url }))
+}
+
+/// The command that confirms `id`: `agentic accounts change <id>`, with the
+/// exact flags of an interrupted provider change when there is one.
+pub(crate) fn change_command(places: &Places, id: &str) -> String {
+    match pending_change(places, id) {
+        Ok(Some(p)) => format!("agentic accounts change {id} {}", p.flags()),
+        _ => format!("agentic accounts change {id}"),
+    }
 }
 
 fn done(result: Result<Confirmed, Refused>) -> Once {
@@ -356,9 +527,15 @@ fn once(places: &Places, id: &str) -> Once {
         ))));
     };
     let Some(confirmed) = Destination::of(latest) else {
-        return done(Err(Refused::NotConfirmed(format!(
-            "'{id}' was removed with `agentic accounts remove` after it was last added"
-        ))));
+        let why = if latest.args.get("reason").map(String::as_str) == Some("provider_change") {
+            format!(
+                "a confirmation of '{id}' with a new key ended its last confirmation and did not finish; finish it with `{}`",
+                change_command(places, id)
+            )
+        } else {
+            format!("'{id}' was removed with `agentic accounts remove` after it was last added")
+        };
+        return done(Err(Refused::NotConfirmed(why)));
     };
     if !confirmed.names(&account.provider, &endpoint) {
         return done(Err(Refused::NotConfirmed(format!(

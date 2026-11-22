@@ -1213,12 +1213,19 @@ async fn remove_of_an_unreferenced_account_has_history_and_undo() {
         "the project store is not written"
     );
 
-    // Undo through the user file's writer brings the Account back.
+    // Story 2.14 (AD-15: "Undoing a remove re-adds an Account, which is
+    // widening"; coordinator decision 2026-11-23): an Undo of the remove
+    // through the user file's writer is refused, naming `agentic accounts
+    // add`, and writes nothing; the Account is added again only by `add`.
+    let text = env.user_text();
     let writer = env.user_writer();
-    writer.undo(owner(), &history[0].id).unwrap();
+    let err = writer.undo(owner(), &history[0].id).unwrap_err();
     drop(writer);
+    assert!(err.to_string().contains("agentic accounts add"), "{err}");
+    assert_eq!(env.user_text(), text, "nothing written");
+    assert_eq!(env.history().len(), 1);
     let ids: Vec<String> = loaded_accounts(&env).into_iter().map(|a| a.0).collect();
-    assert_eq!(ids, vec!["cloud".to_string(), "spare".to_string()]);
+    assert_eq!(ids, vec!["cloud".to_string()]);
     assert_no_key_leaked(&env, &root, &ran);
 }
 
@@ -2997,15 +3004,6 @@ async fn test_never_follows_a_hand_written_base_url_outside_the_endpoint_rules()
 // of the Account names the same provider, scheme, host and port. It still
 // runs from any stdin.
 
-/// The History entries of the user Accounts file the commands made,
-/// oldest first.
-fn accounts_history(env: &Env) -> Vec<HistoryEntry> {
-    env.history()
-        .into_iter()
-        .filter(|e| e.file == USER_FILE)
-        .collect()
-}
-
 /// The Accounts the user file holds now, as its reader reads them (entries
 /// with an error included).
 fn file_accounts(env: &Env) -> Vec<Held> {
@@ -3020,8 +3018,15 @@ fn file_accounts(env: &Env) -> Vec<Held> {
 /// Writes an older entry's bytes back through the app's writer of the user
 /// file (History's Restore), under `user.lock`: a write the app made, which
 /// carries no `account_added` note.
-fn restore(env: &Env, entry: &HistoryEntry) {
-    env.user_writer().restore(owner(), &entry.id).unwrap();
+/// Writes the Account's earlier provider and endpoint back through an app
+/// edit with no confirmation record (story 2.14: a History Restore that
+/// moves an Account is refused, naming `accounts change`; this sets up the
+/// same file state the old Restore did).
+fn app_edit_back(env: &Env, id: &str, provider: &str, base_url: Option<&str>) {
+    let writer = env.user_writer();
+    let file = am_config::accounts_file(env.places.user.dir());
+    let edit = am_config::change_account_edit(&file, id, provider, base_url).unwrap();
+    writer.apply(owner(), edit).unwrap();
 }
 
 async fn remove_account(env: &Env, root: &Path, id: &str) {
@@ -3209,8 +3214,7 @@ async fn test_refuses_what_the_latest_add_of_the_account_did_not_record() {
         ROUTER_CANARY,
     )
     .await;
-    let first_add = accounts_history(&env).remove(0);
-    restore(&env, &first_add);
+    app_edit_back(&env, "router", "openai-compatible", Some(REMOTE_URL));
     assert_eq!(
         file_accounts(&env),
         vec![held("router", "openai-compatible", None, Some(REMOTE_URL))],
@@ -3234,8 +3238,7 @@ async fn test_refuses_what_the_latest_add_of_the_account_did_not_record() {
     .await;
     remove_account(&env, &root, "oa").await;
     add_account(&env, &root, "oa", "openai", None, OA_CANARY).await;
-    let first_add = accounts_history(&env).remove(0);
-    restore(&env, &first_add);
+    app_edit_back(&env, "oa", "openai-compatible", Some(OPENAI_URL));
     assert_eq!(
         file_accounts(&env),
         vec![held("oa", "openai-compatible", None, Some(OPENAI_URL))]
