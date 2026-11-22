@@ -1,6 +1,7 @@
 # Epic 2 — Accounts and model routing. Table order is build order; `id` is permanent.
 # `covers` cites this epic's own requirement ids (its epic file's Requirements), not the initiative's: per BMad, every container numbers its own R<n>
 # and each epic line names its source as 'parent R<m>'. Outside the initiative file, write initiative ids as 'init R<m>' (final review coverage F8).
+# 2026-11-22 owner: story 12 split into 12 (core), 13 (migrate) and 14 (change), built back to back.
 # 2026-11-19 owner folder-access direction: entry 9 (native file parts, file chips and their probes) added after 7, before the sweep (8).
 
 [[entry]]
@@ -40,10 +41,32 @@ risk = "medium"
 id = 12
 type = "story"
 title = "Accounts belong to this Mac"
-description = "Owner decision 2026-11-22 (arch AD-17, AD-35, AD-15, AD-6): Accounts are user-level, one per provider key, reusable across projects. They live in one file per macOS user, `~/Library/Application Support/agentic-manager/accounts.yaml`, owned by am-config, with its History and confirmation records in a user store `user.db` beside it, written only under `user.lock`. Projects keep no `models/accounts.yaml`: seats, capability providers and Sources keep `account: <id>`, an id the owner chooses and that is unique on this Mac. An id missing on this Mac is a validate warning and a run needing it is refused, and exports carry references only. `agentic accounts add|remove|list|test` move to the user list with story 1's and story 3's rules unchanged (terminal, typed name, Keychain service `agentic-manager` and account `<id>` as today). The confirmed check reads the user record: the latest `account_added` for the id with no `account_removed` after it, and the user file unchanged since the app wrote it. `agentic accounts change` re-confirms a changed provider or `base_url`, a widening kind (AD-15). A project that still holds `models/accounts.yaml` gets a validate error, and the file is never read to send a key; `agentic accounts migrate` moves each entry to the user list through the confirmed add (`--as old=new` on an id clash), then removes the file. The Company A sample and the fixtures drop the file, except one legacy fixture kept for the migrate tests. Each project records where each Account it uses sends calls, and a change holds it until confirmed (AD-15, AD-16)."
-verify = "Written first, failing: an Account added in one project is listed, tested and usable from a second project with no second add or key; the user file and `user.db` hold it and no project file does; a hand edit of the user file refuses every key use until it is put back; `accounts change` of provider or `base_url` without the typed id and key leaves the old record, and a changed definition with no new record is refused before any key read; a project with `models/accounts.yaml` fails `agentic validate` at that file with the migrate fix, and `accounts migrate` moves its entries (an id clash refused until `--as`) and removes the file; two processes adding Accounts at once both succeed, one after the other, under `user.lock`; `agentic validate` passes on templates and fixtures with no `models/accounts.yaml` (except the legacy fixture)."
+description = "Owner decision 2026-11-22 (arch AD-17, AD-35, AD-15, AD-6); split the same day into this core, story 13 (`accounts migrate`) and story 14 (`accounts change`), built back to back in that order. Accounts are user-level, one per provider key, reusable across projects. They live in one file per macOS user, `~/Library/Application Support/agentic-manager/accounts.yaml`, owned by am-config, with its History and confirmation records in a user store `user.db` beside it, written only under `user.lock`. Projects keep no `models/accounts.yaml`: seats, capability providers and Sources keep `account: <id>`, an id the owner chooses and that is unique on this Mac. An id missing on this Mac is a validate warning and a run needing it is refused, and exports carry references only. `agentic accounts add|remove|list|test` move to the user list with story 1's and story 3's rules unchanged (terminal, typed name, the History entry and confirmation record). Each entry's `secret_ref` equals its id (Keychain service `agentic-manager`, account `<id>`, as today); keys stay only in the Keychain and never reach the user file, `user.db`, History or audit. The confirmed check reads the user record: the latest confirmation record for the id (`account_added`; story 14 adds `account_changed`) with no `account_removed` after it names the same provider, scheme, host and port, and the user file is unchanged since the app wrote it; `remove` records `account_removed`. A project that still holds `models/accounts.yaml` gets a validate error naming `agentic accounts migrate` (story 13) as the fix, and the file is never read to send a key. The Company A sample and the fixtures drop the file, except one legacy fixture kept for story 13's tests. The per-project record of where each Account a project uses sends calls, holding the project until a change is confirmed, is epic 4 story 18's (owner, 2026-11-22)."
+verify = "Written first, failing: an Account added in one project is listed, tested and usable from a second project with no second add or key; the user file and `user.db` hold it and no project file does, and the canary key appears in neither; an entry whose `secret_ref` is not its id is refused; a hand edit of the user file refuses every key use, before any Keychain read, until it is put back; `remove` records `account_removed` and a later key use of that id is refused; a project with `models/accounts.yaml` fails `agentic validate` at that file with the migrate fix and no command reads a key through it; a seat naming an id missing on this Mac validates with a warning and a run needing it is refused; two processes adding Accounts at once both succeed, one after the other, under `user.lock`; `agentic validate` passes on templates and fixtures with no `models/accounts.yaml` (the legacy fixture fails as above)."
 covers = ["R1"]
 after = [3]
+hitl = false
+risk = "high"
+
+[[entry]]
+id = 13
+type = "story"
+title = "Move a project's Accounts to this Mac"
+description = "Split from story 12 (owner, 2026-11-22: \"make accounts migrate non-destructive\"; arch AD-17, AD-15). `agentic accounts migrate` moves each entry of a project's old `models/accounts.yaml` to the user list through story 12's confirmed add (interactive terminal, the Account's name typed, History and `account_added`) and never reads a key from the file: the key stays in the Keychain under the same id. Non-destructive: before the file is removed it writes a backup of it to `<app data dir>/backups/accounts-migrate/<project-id>/` (never pruned), fsyncs it and checks the copy's hash against the original; the file is then removed through the config writer with History. `--dry-run` lists what would move (id, provider, host, and whether it is new, already present or a clash) and writes nothing. Running it twice is safe: an entry already on the user list with the same provider and endpoint is skipped, a different one is a clash. On an id clash nothing is written until `--as old=new`, which adds the Account under the new id (its key typed at story 1's hidden prompt, since the Keychain entry of the old id belongs to the existing Account) and rewrites the project's references through the config writer with History. `--rollback` restores the file byte for byte from its backup, with any references `--as` rewrote, and leaves user Accounts and Keychain entries alone. Keys stay only in the Keychain."
+verify = "Written first, failing, on the legacy fixture with FakeSecretStore and a canary key: `--dry-run` lists each entry and changes nothing (project files, user file and `user.db` byte-identical); `migrate` writes a backup whose hash equals the original's before removing the file, adds each entry through the confirmed add with History and `account_added`, and the canary appears in no file, store row, History or audit; a second run reports nothing to move and writes nothing; an id clash is refused with nothing written until `--as old=new`, which adds under the new id and rewrites the project's references; `--rollback` restores the file byte for byte and leaves the user list and Keychain unchanged; a non-terminal stdin is refused with nothing written (`--dry-run` only reads and runs anywhere)."
+covers = ["R1"]
+after = [12]
+hitl = false
+risk = "high"
+
+[[entry]]
+id = 14
+type = "story"
+title = "Re-confirm a changed Account"
+description = "Split from story 12 (owner, 2026-11-22; arch AD-15). `agentic accounts change <id>` changes an Account's provider or `base_url`, a widening kind. Owner, verbatim: \"confirm by typing the Account name and seeing old vs new provider/address with an explicit yes — don't require typing the full stored key; if a key check is kept, use a hidden prompt and never echo, log or store it.\" On a real interactive terminal only (refused in words with nothing written otherwise), it shows the old and new provider and address side by side, requires the Account's name typed and an explicit `yes`, then writes the user file through the config writer with History and a confirmation record `account_changed` (id, old and new provider, scheme, host and port, the references, the key state and `confirmation: typed_id_yes`, never the key), which the Key-use check reads as the Account's latest confirmation record. It never asks for the stored key and never reads or overwrites the Keychain entry; for a keyed Account its sentence says the key stored under the id will now go to the new endpoint, and a keyless Account's change to a remote endpoint is refused. Until epic 4 story 18 builds the per-project destination record, it also refuses a change from a loopback to a remote endpoint, or to another host, while a reachable project names the Account (arch AD-15). Until a change is confirmed, every key use (runs, `accounts test`, Doctor) refuses a changed definition with no matching record, before any Keychain read. The per-project record of where each Account sends calls is epic 4 story 18's (owner, 2026-11-22)."
+verify = "Written first, failing: on a terminal, `accounts change` shows old and new provider and address; a wrong name, or any answer but `yes`, writes nothing and the old record still governs; a confirmed change writes History and `account_changed` with no key, and `accounts test` then reaches only the new endpoint; a change from a loopback to a remote endpoint, or to another host, while a reachable project names the Account is refused with nothing written; a hand edit of provider or `base_url` with no record is refused before any Keychain read; a non-terminal stdin is refused with nothing written; the command never prompts for the key, and no key, key prefix or key hash appears in its output, logs, History or audit."
+covers = ["R1"]
+after = [13]
 hitl = false
 risk = "high"
 
@@ -54,7 +77,7 @@ title = "Keyless Accounts on this Mac"
 description = "Owner decision 2026-11-22 (arch AD-15): an `openai-compatible` Account whose endpoint is `http://127.0.0.1:<port>` (a llama.cpp- or vLLM-style server on this Mac) may be added with no key, so no fake key is typed; a remote endpoint always needs a key. Story 3's add path is otherwise unchanged (interactive terminal, the Account's name typed to confirm, History and the `account_added` audit note): the add's sentence says the calls carry no credential and stay on this Mac, the Account holds no `secret_ref` in the user-level Account list (story 12), the user record notes `key: none`, and `accounts test` sends no credential once story 3's confirmed check passes; `list` shows the Account as keyless."
 verify = "Written first, failing: on a terminal, adding a compatible Account at `http://127.0.0.1:8080/v1` with no key (the owner's explicit choice at the prompt) writes no `secret_ref`, stores nothing in the Keychain, records `key: none` and names the endpoint as on this Mac with no credential; `accounts test` on it sends a request with no `Authorization` header to that port only; the same choice on an `https://` endpoint is refused in words with nothing written; a hand edit that removes `secret_ref` from a keyed remote Account is refused by the confirmed check; `list` shows the Account as keyless."
 covers = ["R1"]
-after = [3, 12]
+after = [3, 12, 14]
 hitl = false
 risk = "medium"
 
@@ -65,7 +88,7 @@ title = "LM Studio and Ollama appear on their own"
 description = "The reserved Accounts local-lmstudio (127.0.0.1:1234) and local-ollama (127.0.0.1:11434) always resolve; discovery toggles their health, lists their models and reads each loaded context window (LM Studio's models endpoint, Ollama's running-model field as the spike confirmed); calls go through the compatible adapter and the egress loopback exception; nothing else is probed. Epic 3 sets the window on calls and handles overflow. Owner step: confirm on the owner's Mac with both servers running."
 verify = "With LM Studio and Ollama running, `agentic accounts list` shows both healthy, badged On this Mac, with their models and loaded context windows; with both stopped they show unhealthy and `agentic validate` still passes; a test proves only 127.0.0.1:1234 and :11434 were contacted."
 covers = ["R2"]
-after = [2, 3, 12]
+after = [2, 3, 12, 14]
 hitl = true
 risk = "medium"
 
@@ -76,7 +99,7 @@ title = "Keys never leave the keychain"
 description = "Hardens SecretStore over keyring's macOS Keychain store (the only v1 store, arch AD-17, AD-47; its port contract tests also run against FakeSecretStore in the Linux portability job), makes SecretString unprintable and unserialisable and materialised only in am-net request building, adds the always-on redaction layer for tracing and audit (registered secrets and known key patterns), and runs the canary leak scan over logs, journal, audit and config in CI; epic 4 extends the scan to exports. Owner step (moved here from story 1 so a real key first meets the redaction layer and the leak scan, final review F7a): add the owner's real Anthropic key with `agentic accounts add`, run `agentic accounts test` once, then run the leak scan over the owner's own logs and journal."
 verify = "The rule_12 trust tests fail before and pass after: a canary key added as an Account appears in no log, audit entry, journal table or config file, a forced error that embeds it is redacted, and printing or serialising a SecretString fails to compile; keychain store, read and delete pass on the macOS runner and the port contract tests pass in the Linux portability job; the owner's record shows the owner's real key streamed a reply and the leak scan over the owner's logs and journal found it nowhere."
 covers = ["R6"]
-after = [2, 12]
+after = [2, 12, 14]
 hitl = true
 risk = "high"
 
@@ -87,7 +110,7 @@ title = "OpenAI calls send the output limit the model expects"
 description = "Owner decision 2026-11-22: story 3's OpenAI-chat-compatible adapter sends the spike's `max_tokens`, which newer OpenAI cloud models may refuse in favour of `max_completion_tokens`. For an `openai` Account the adapter sends the output-limit field the model accepts, chosen from the shipped capabilities file (or a refusal answer naming the field, retried once with the other field), and `accounts test` asks for enough output tokens that a reasoning model can answer; compatible endpoints keep `max_tokens` unless their capabilities say otherwise. Proven with a real key once story 5's redaction layer and leak scan exist."
 verify = "Written first, failing: on recorded fixtures, an `openai` request for a model the capabilities file marks as using `max_completion_tokens` carries that field and not `max_tokens`; a recorded refusal naming the field is retried once with the other field and succeeds; a compatible endpoint keeps `max_tokens`; `accounts test` on a reasoning model's recording prints its answer text. The owner runs `accounts test` once against a real OpenAI Account after story 5 and records the result."
 covers = ["R1", "R4"]
-after = [3, 5, 12]
+after = [3, 5, 12, 14]
 hitl = false
 risk = "low"
 
@@ -98,7 +121,7 @@ title = "Seat model, fallback and Recommended model"
 description = "(Owner, 2026-11-22: no paid-key run before epic 4 story 18. Until that story is built, `agentic run` refuses, in words and before any Keychain read, a step whose Account is a cloud Account (any Account but the reserved local ones and a keyless loopback Account), naming the story that lifts the refusal; local runs are not affected.) Resolves each seat to Account › Model and fallback from one model list grouped by Account with local Accounts first, pre-fills the company default model, picks the role's Recommended model from the role template's preferences among existing Accounts, and returns worded capability warnings without refusing; a FallbackProvider wrapper switches a call to the fallback on error, timeout or refusal and audits the switch. Epic 3's agent loop calls it; epic 5 renders the picker from it."
 verify = "Resolving each Company A sample seat returns Account › Model, its fallback, the Recommended model and any warning in EXPERIENCE.md's wording, never a refusal; a seat with no model gets the company default; a FakeLlm error makes the wrapper call the fallback and the switch is in the audit log."
 covers = ["R3"]
-after = [4, "1.5", 12]
+after = [4, "1.5", 12, 14]
 hitl = false
 risk = "medium"
 
@@ -131,6 +154,6 @@ title = "Refactor sweep"
 description = "Cleanup only, scoped at its start from the plans and review findings this epic deferred: no new behaviour; scope pushed out of another story becomes a new story."
 verify = "`just check` and CI on main are green, including the rule_09 and rule_12 suites, and every deferred finding from this epic is closed or named in a new story."
 covers = []
-after = [1, 2, 3, 4, 5, 6, 7, 9, 10, 11, 12]
+after = [1, 2, 3, 4, 5, 6, 7, 9, 10, 11, 12, 13, 14]
 hitl = false
 risk = "low"

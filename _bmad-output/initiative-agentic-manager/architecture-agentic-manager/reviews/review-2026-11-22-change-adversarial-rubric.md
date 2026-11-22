@@ -1,0 +1,64 @@
+# Review 2026-11-22: AD-15 *Change* / *Migrate* amendment (adversarial + rubric)
+
+Scope: AD-15 Rule (line 222): *Change*, *Migrate*, *Record*, *Key use*, *Later confirmations*, *Key state*, the grant-set sentence "which the grant set stores beside each Account id"; AD-16 (line 228); AD-17 (line 234); AD-7 (line 149); Structural Seed app data dir (line ~603); last Open Questions bullet. Tickets: epic 2 stories 12, 13, 14; epic 4 stories 17, 18. No spine text was edited.
+
+**Verdict:** the change to `change` (typed id plus `yes`, old vs new shown, `account_changed`) and the *Key use* switch to "latest `account_added` or `account_changed`, no `account_removed` after" are consistent across *Change*, *Record*, *Key use* and *Later confirmations*. *Migrate* is not ready to build. `--as` and `--rollback` contradict the rule that a migration keeps the same ids. The migrate backup sits in a folder that AD-7 prunes. Ticket 13 and the spine disagree on whether migrate makes the owner type the stored key, and only the spine's reading blocks a key from reaching a host the owner never confirmed. Fix these before story 13 starts. Story 14 can start once F4 and F5 are settled.
+
+## Findings
+
+### F1 (High): `--as` and `--rollback` break "keeps the same Account ids"
+- Text: AD-15 says "a `ConfigMigration` that moves a project's Account definitions to the user list keeps the same ids and is not widening". AD-16 says "its `migrate` aside, whose `ConfigMigration` keeps the same Account ids and destinations". *Migrate* `--as` "renames every reference to it in that project inside the same `ConfigMigration`".
+- Two incompatible builds: AD-15 says a `ConfigMigration` is "classified by comparing the old and new snapshots' grants". From story 4.17 on, a builder who follows that sees the renamed seat, fallback, capability and Source references name an id the grant set does not list. That is project-level widening. The CLI cannot present the confirm token, and "The typed name ... stands in for the confirm token only for a patch that adds or changes that one Account", which does not cover a project-file rename. So `--as` is refused once 4.17 ships. A second builder treats every migrate as not widening, citing the AD-16 aside, and lets it through. `--rollback` is worse. It renames the references back to `<old>`, but in the user list `<old>` is the *other* Account, with a different provider and endpoint. The project now points at a destination it never used, and before story 4.18 nothing holds it.
+- Fix: in AD-15 *Migrate*, add: "`--as` writes the new id into the project's approved grant set with the destination of the project entry it replaces (from story 4.18), so its rename is not widening. `--rollback` refuses while any id it would restore names a user-list Account whose provider, scheme, host or port differs from the backed-up entry. Otherwise its reverse rename is classified like any `ConfigMigration`." In AD-16, change "keeps the same Account ids and destinations" to "keeps each entry's destination, under the same id or its `--as` id".
+
+### F2 (High): ticket 13 drops the stored-key check, which opens a path for a key to reach an unconfirmed host
+- Spine *Migrate*: "any other entry is added exactly as *Add*". Under *Add*, a reused keychain entry with no user-store confirmation needs "the owner must type the stored key". That covers every migrated entry, because "The project store's `account_added` entries are never copied". Ticket 13 lists only "interactive terminal, the Account's name typed, History and `account_added`". The last Open Questions bullet flags the gap but leaves it open.
+- Attack on a ticket-following build: a cloned, synced or tampered legacy `models/accounts.yaml` sets `anthropic` to `provider: openai-compatible, base_url: https://other.example`. Migrate shows the sentence, the owner types `anthropic`, and the existing keychain entry `anthropic`, which holds the real Anthropic key, is reused and confirmed for `other.example`. The project file is untrusted input, so the typed key is the only proof that this key belongs to that host.
+- Fix (owner call): either (a) ticket 13 states that the stored key is typed at the hidden prompt for each reused entry and adds a failing test for the tampered-host case, or (b) the spine allows typed id plus `yes` only when the project store's own latest `account_added` for that id, read only, names the same provider, scheme, host and port as the file entry, and requires the typed key otherwise. Either way, the add sentence names the host the key was last confirmed for.
+
+### F3 (High): the migrate backup is in a folder that AD-7 prunes
+- *Migrate* writes to `<app data dir>/backups/pre-migration/<project-id>/`. AD-7 (line 149) keeps the user store's "pre-migration backups kept in `<app data dir>/backups/pre-migration/`" under the same rules: "only the three newest are kept, older ones deleted once a migration commits".
+- Risk: a user-store schema migration can delete the accounts backup, and then `--rollback` cannot work. Two builders will also disagree on whether the pruning covers subfolders.
+- Fix: put the backup in its own path, `<app data dir>/backups/accounts-migrate/<project-id>/accounts.yaml` (`AppDataLayout`), and state "never pruned by the app". Also state what a second backup does to the first: one file, overwritten only after a successful `--rollback`.
+
+### F4 (Medium): `change` does not say where "old" comes from, and a crash can leave the owner stuck
+- *Later confirmations* says a "reconciled intent" commits History only, and that "the confirmation-record comparison alone refuses a provider or endpoint the owner did not confirm". So the file can legitimately differ from the record. Example: `change` crashes after the rename and before `account_changed` commits. *Key use* sends the owner to "re-confirms it (`change` ...)". A builder who reads "old" from the file sees old equal to new and either does nothing or refuses, and the owner cannot recover. *Open* also refuses `change` on an outside change "until the owner reverts it", which contradicts "re-confirm" for a hand edit.
+- Fix: "`change` reads 'old' from the latest confirmation record. When the file already holds the requested values, it writes `account_changed` with old taken from the record. A hand edit is reverted first, then confirmed with `change`." Also say whether reconciling a `change` intent may write `account_changed` (recommended: no).
+
+### F5 (Medium): changing the provider or host forwards the old provider's key, and the CLI cannot replace a key
+- `change` "never reads or overwrites the keychain entry". `remove` "leaves the keychain entry in place". *Add* reuses an existing entry and never overwrites it. So after `change anthropic --provider openai-compatible --base-url https://gw.example`, the Anthropic key goes to `gw.example`. The sentence never says so, and before story 5.5 no CLI path can set a different key.
+- Fix: the *Change* sentence says "the key stored for `<id>` will be sent to `<new host>`". Either add `change --replace-key`, with the key read at the hidden prompt and recorded as `account_changed` with `key state: stored (replaced)`, or record the gap in Open Questions as an owner item.
+
+### F6 (Medium): what `--rollback` and `--dry-run` require is not stated
+- *Terminal* covers commands that write. `--dry-run` "runs from any stdin", but nothing says whether it takes the project store lock, which would refuse it while `agentic serve` runs, or the stdio MCP refusal. `--rollback` does not say whether it needs a terminal, the typed id, the project lock, the stdio MCP / `render: true` refusal, or what happens when there is no backup, when `models/accounts.yaml` already exists again, or when the renamed references were edited after the migrate. It also does not say where the list of renamed references is stored. Restoring a file is a new file, and AD-16 says "Every new config file is a `ConfigCreate`" (hard-link, no replace), but the text says it goes through "one `ConfigMigration`".
+- Fix: "`--dry-run` takes no lock and is not a CLI-class decision. `--rollback` follows `migrate`'s *Terminal*, lock and refusal rules, requires the project id typed, places the file as a `ConfigCreate` (refused if it exists), takes the rename list from the migrate's History entry, and refuses if any renamed line changed since."
+
+### F7 (Medium): a partial `--as` run cannot be re-run, and its keychain handling is unclear
+- Entries commit to the user store one by one, so a timeout on a later entry leaves `<new>` already added. On a re-run with the same `--as`, `<new>` "adds the entry under the new id", but *Add* "refuses ... an id already in the user list". The "needs nothing" rule checks `<old>`, not `<new>`. A leftover keychain entry under `<new>`, for example one left by `remove`, triggers *Add*'s reuse rule, which conflicts with "its key typed at the add's hidden prompt".
+- Fix: "With `--as`, a `<new>` already listed with the entry's provider, scheme, host and port needs nothing except the rename. An existing keychain entry under `<new>` follows *Add*'s reuse rule."
+
+### F8 (Low): before story 4.18, the change refusal skips unreachable projects
+- The refusal applies "while a reachable project names the Account". A project on an unmounted drive is skipped. Before 4.18 nothing holds it when it is opened later, so its data goes to the new host without a project-level confirmation. The key is still confirmed at user level, so *Key use* holds. Also, "to another host" does not say whether a port change on the same host counts. Port matters for a loopback Account, which is open question (f).
+- Fix: before 4.18, also refuse while any indexed project is unreachable, or state that this is accepted. Write "to another host or port".
+
+### F9 (Low): record shapes and stale text
+- *Record* says `account_changed` has "key state (unchanged)", but *Later confirmations* lets story 4.18's Reload and story 5.5 write `account_changed` for a change of provider or endpoint, which could change the key state too. Write "its key state (the new one; unchanged for the CLI `change`)".
+- "each with its own `confirmation` kind": only `typed_id` and `typed_id_yes` are named. Name migrate's kind (with and without a typed key) and the kinds for 4.18 and 5.5 as a closed enum.
+- The Open Questions "Resolved" bullet still says "the confirmation record is the user store's `account_added` entry". Add "(since amended: or `account_changed`)".
+- Story 4.17's text says the interim edit writes "the same `account_added` audit entry shape". It should also name `account_changed` and `account_removed`.
+- `change` does not say what happens with a reserved id (`local-lmstudio`, `local-ollama`). State that it is refused, as *Add* and *Remove* do.
+- After story 5.5 retires `migrate`, `--rollback` and its backups are orphaned. Say whether 5.5 offers the rollback.
+
+## Rubric
+
+| Check | Result |
+|---|---|
+| *Change* is enforceable and testable | Yes: terminal, typed id, `yes`, timeout, no key prompt and no key in output can each be tested. The "old" source (F4) and key forwarding (F5) are not stated. |
+| *Key use* reads `account_changed` consistently | Yes in *Key use*, *Record*, *Later confirmations* and the run's journaled-destination check. The text is stale in Open Questions and story 4.17 (F9). |
+| *Migrate* is enforceable | Partly: dry-run, idempotence and the backup hash can be tested. `--rollback` (F6), `--as` classification (F1) and backup retention (F3) are underspecified. |
+| Ticket 14 fully covered | The spine covers the ticket. The ticket omits the spine's pre-4.18 refusal (already open), the references in the sentence, the keyless-to-remote refusal, the 2-minute timeout, the outside-change and stdio MCP refusals, and the reserved-id behaviour. Add tests for these or point to the spine. |
+| Ticket 13 fully covered | No: stored-key typing (F2), lock and `serve` refusal, the rollback preconditions (F6), the partial `--as` re-run (F7) and the crash ordering ("user store first") are missing from the verify list. |
+| Lock order | Consistent: the project store lock, then `user.lock`. `add` and `change` hold no lock during prompts. Rollback's lock is not stated (F6). |
+| Terminal rule | Consistent for add, change, remove and migrate. `--dry-run` is excepted. `--rollback` is not stated (F6). |
+| Keyless state | Consistent: `change` keeps the key state and refuses a keyless Account moving to a remote endpoint. There is no CLI path from keyless to keyed or to a new key (F5). |
+| Contradictions with AD-16 and AD-17 | AD-16's "keeps the same Account ids and destinations" contradicts `--as` (F1). AD-7's pre-migration folder clashes with the backup path (F3). AD-17's "each definition the user list lacks enters it only through the owner's add confirmation" agrees with the spine and conflicts with ticket 13 (F2). |
