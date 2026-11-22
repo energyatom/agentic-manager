@@ -63,13 +63,16 @@
 //! Keychain read or request it checks, through a read-only store reader,
 //! that `models/accounts.yaml` holds exactly the bytes the app last wrote
 //! and that the latest `account_added` audit note of the Account names the
-//! same provider, scheme, host and port ([`confirmed`]); an entry of the
-//! file that has an error is not called either. A key is read only from the Keychain entry named by the Account's
-//! own id (AD-17): a `secret_ref` naming another entry is reported by
-//! `list` and refused by `test`, and never followed. `test` streams one
-//! short reply through an egress client whose policy admits only the
-//! Account's pinned endpoint: its one host over https and no loopback port,
-//! or, for an endpoint on this Mac, its one loopback port and no host.
+//! same provider, scheme, host and port ([`crate::egress::confirmed`], the
+//! check the project's egress directory makes for every caller since story
+//! 2.2); an entry of the file that has an error is not called either. A
+//! key is read only from the Keychain entry named by the Account's own id
+//! (AD-17): a `secret_ref` naming another entry is reported by `list` and
+//! refused by `test`, and never followed. `test` streams one short reply
+//! through an egress client over the project's egress directory
+//! ([`crate::egress::ProjectDirectory`]), which pins the Account to its
+//! endpoint (scheme, host and port); a block the client reports is printed
+//! and said not to be in the audit log, since `test` opens no store.
 
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -79,12 +82,11 @@ use std::time::Duration;
 
 use am_config::{ACCOUNTS_FILE, AccountUse, ConfigCreate};
 use am_domain::{
-    AuditNote, AuthRef, AuthScheme, ChatRequest, ConfigHistory, EgressClient, EventSink,
-    Instruction, LlmProvider, Message, Part, ProjectIdentity, Role, SecretStore, StreamEvent,
-    Terminal, TerminalError,
+    AuditEvent, AuditNote, AuditSink, AuthRef, AuthScheme, ChatRequest, ConfigHistory,
+    EgressClient, EgressDirectory, EventSink, Instruction, LlmProvider, Message, Part,
+    ProjectIdentity, Role, SecretStore, StreamEvent, Terminal, TerminalError,
 };
 use am_engine::TokenSignal;
-use am_net::EgressPolicy;
 use am_providers::anthropic::ANTHROPIC_HOST;
 use am_providers::openai_compat::{OPENAI_BASE_URL, OPENAI_HOST};
 use am_providers::{AnthropicProvider, OpenAiCompatProvider};
@@ -111,6 +113,11 @@ const PROVIDERS: &str =
 
 const USAGE: &str = "usage: agentic accounts add <id> --provider anthropic|openai|openai-compatible [--base-url <url>] [--name <text>] [--project <folder>]\n       agentic accounts remove <id> [--project <folder>]\n       agentic accounts list [--project <folder>]\n       agentic accounts test <id> [--model <model>] [--project <folder>]\n       (--base-url is for openai-compatible only: https://<host>[/path], or http://127.0.0.1:<port>[/path] for a server on this Mac;\n        --model is required for an openai or openai-compatible Account; --project defaults to the current folder)";
 
+/// Builds the egress client over a directory, reporting blocks to a sink.
+pub type EgressFactory = Arc<
+    dyn Fn(Arc<dyn EgressDirectory>, Arc<dyn AuditSink>) -> Arc<dyn EgressClient> + Send + Sync,
+>;
+
 /// What `agentic accounts` runs with. `main` builds it with the owner's real
 /// terminal, the Keychain, the OS identity adapter and `am-net`'s client;
 /// tests pass am-testkit's fakes.
@@ -121,8 +128,9 @@ pub struct AccountsContext {
     pub identity: Arc<dyn ProjectIdentity>,
     pub terminal: Box<dyn Terminal>,
     pub secrets: Arc<dyn SecretStore>,
-    /// Builds the egress client for a policy (`test`: the Account's host only).
-    pub egress: Arc<dyn Fn(EgressPolicy) -> Arc<dyn EgressClient> + Send + Sync>,
+    /// Builds the egress client over the project's egress directory,
+    /// reporting blocks to the command's audit sink (story 2.2).
+    pub egress: EgressFactory,
 }
 
 /// The parsed command line.
@@ -268,33 +276,33 @@ pub async fn accounts(
 
 // --------------------------------------------------------- the endpoint
 
-fn is_model_provider(provider: &str) -> bool {
+pub(crate) fn is_model_provider(provider: &str) -> bool {
     [ANTHROPIC, OPENAI, OPENAI_COMPATIBLE].contains(&provider)
 }
 
-/// Where an Account's calls go (AD-12, AD-48): the one endpoint its egress
-/// policy admits.
+/// Where an Account's calls go (AD-12, AD-48): the one endpoint the egress
+/// directory pins it to.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Endpoint {
+pub(crate) struct AccountEndpoint {
     /// `https`, or `http` for an endpoint on this Mac.
-    scheme: &'static str,
+    pub(crate) scheme: &'static str,
     /// The DNS name in lowercase, or `127.0.0.1`.
-    host: String,
+    pub(crate) host: String,
     /// 443 for https; the explicit port of an endpoint on this Mac.
-    port: u16,
+    pub(crate) port: u16,
     /// The base URL: the provider's fixed one, or a compatible Account's
     /// `base_url` as typed.
-    base_url: String,
+    pub(crate) base_url: String,
     /// True for `http://127.0.0.1:<port>`: the calls stay on this Mac.
-    loopback: bool,
+    pub(crate) loopback: bool,
     /// True when the base URL comes from the Account (`base_url` in the
     /// file), not from its provider.
-    own: bool,
+    pub(crate) own: bool,
 }
 
-impl Endpoint {
-    fn fixed(host: &str, base_url: &str) -> Endpoint {
-        Endpoint {
+impl AccountEndpoint {
+    fn fixed(host: &str, base_url: &str) -> AccountEndpoint {
+        AccountEndpoint {
             scheme: "https",
             host: host.to_string(),
             port: 443,
@@ -336,22 +344,13 @@ impl Endpoint {
         self.base_url.trim_end_matches('/')
     }
 
-    /// The egress policy of a call to this endpoint and nothing else: the
-    /// one host over https and no loopback port, or the one loopback port
-    /// and no host.
-    fn policy(&self) -> EgressPolicy {
-        if self.loopback {
-            EgressPolicy {
-                allowed_hosts: Vec::new(),
-                loopback_ports: vec![self.port],
-                ..EgressPolicy::default()
-            }
-        } else {
-            EgressPolicy {
-                allowed_hosts: vec![self.host.clone()],
-                loopback_ports: Vec::new(),
-                ..EgressPolicy::default()
-            }
+    /// The endpoint the egress client pins this Account to (AD-12, AD-48):
+    /// its scheme, host and port, compared exactly at every call.
+    pub(crate) fn to_domain(&self) -> am_domain::Endpoint {
+        am_domain::Endpoint {
+            scheme: self.scheme.to_string(),
+            host: self.host.clone(),
+            port: self.port,
         }
     }
 }
@@ -368,9 +367,13 @@ impl Endpoint {
 ///
 /// Everything else is refused in words; `flag` is how the refusal names the
 /// base URL (`--base-url` on the command line, `base_url` in the file).
-fn endpoint_of(provider: &str, base_url: Option<&str>, flag: &str) -> Result<Endpoint, String> {
+pub(crate) fn endpoint_of(
+    provider: &str,
+    base_url: Option<&str>,
+    flag: &str,
+) -> Result<AccountEndpoint, String> {
     let fixed = |host: &str, url: &str| match base_url {
-        None => Ok(Endpoint::fixed(host, url)),
+        None => Ok(AccountEndpoint::fixed(host, url)),
         Some(_) => Err(format!(
             "`{flag}` is not accepted for an {provider} Account: its calls go only to {url}. For another endpoint use an {OPENAI_COMPATIBLE} Account (`--provider {OPENAI_COMPATIBLE} --base-url <url>`)"
         )),
@@ -398,14 +401,14 @@ fn endpoint_of(provider: &str, base_url: Option<&str>, flag: &str) -> Result<End
             };
             let endpoint = compatible_endpoint(typed)
                 .map_err(|why| format!("{said} is not accepted: {why}"))?;
-            // The check the egress client makes at call time must read the
-            // URL as the same endpoint, or it is not one.
+            // The egress client must read the URL of a call as the same
+            // endpoint at call time, or it is not one.
             let call = format!("{}/chat/completions", endpoint.call_base());
-            match am_net::check_url(&endpoint.policy(), &call) {
-                Ok((host, port, loopback))
-                    if host == endpoint.host
-                        && port == endpoint.port
-                        && loopback == endpoint.loopback =>
+            match am_net::url_target(&call) {
+                Ok(read)
+                    if read.endpoint() == Some(endpoint.to_domain())
+                        && !read.userinfo
+                        && (read.ip.is_some() == endpoint.loopback) =>
                 {
                     Ok(endpoint)
                 }
@@ -427,9 +430,9 @@ const ACCEPTED_FORMS: &str = am_config::COMPATIBLE_BASE_URL_FORMS;
 /// A compatible Account's base URL, read by the one rule the loader applies
 /// too ([`am_config::compatible_base_url`]): only the two accepted forms
 /// pass, and the reason is given for everything else.
-fn compatible_endpoint(typed: &str) -> Result<Endpoint, String> {
+fn compatible_endpoint(typed: &str) -> Result<AccountEndpoint, String> {
     let accepted = am_config::compatible_base_url(typed)?;
-    Ok(Endpoint {
+    Ok(AccountEndpoint {
         scheme: if accepted.loopback { "http" } else { "https" },
         host: accepted.host,
         port: accepted.port,
@@ -574,7 +577,7 @@ fn patchable(root: &Path, did_not: &str) -> Result<am_config::AccountsFile, Stop
     }
 }
 
-fn reserved(id: &str) -> bool {
+pub(crate) fn reserved(id: &str) -> bool {
     am_config::reserved_account_ids().iter().any(|r| r == id)
 }
 
@@ -1080,88 +1083,6 @@ impl EventSink for Forward {
     }
 }
 
-/// Whether `account` is one the owner confirmed with `agentic accounts
-/// add` on this Mac, and nothing changed since (AD-15, AD-16, AD-48). Both
-/// must hold, or the reason is given in words:
-///
-/// 1. `models/accounts.yaml` holds exactly the bytes the app last wrote
-///    (`file` is the read the endpoint was derived from, so the bytes
-///    checked are the bytes used);
-/// 2. the latest `account_added` audit note of the Account names the same
-///    provider, scheme, host and port.
-///
-/// Read-only and without the project's lock, as `agentic status` reads:
-/// the runtime folder is found, never made, and the database is never
-/// migrated. No runtime folder, no database, an older database, no History
-/// entry of the file and no note each mean "not confirmed".
-fn confirmed(
-    ctx: &AccountsContext,
-    project: &Path,
-    file: &am_config::AccountsFile,
-    account: &am_config::Account,
-    endpoint: &Endpoint,
-) -> Result<(), String> {
-    let layout = crate::runtime::find_runtime(&ctx.places, project).map_err(|e| e.to_string())?;
-    let db = layout.state_db();
-    if !db.is_file() {
-        return Err("this project has no database on this Mac yet".into());
-    }
-    am_store::check_database(&db).map_err(|e| e.to_string())?;
-    let reader = am_store::Reader::open(&db).map_err(|e| e.to_string())?;
-    let found = reader.schema_version().map_err(|e| e.to_string())?;
-    if found < am_store::SCHEMA_VERSION {
-        return Err(format!(
-            "the project's database is at version {found}, older than this app's version {}, and `agentic accounts test` never migrates it",
-            am_store::SCHEMA_VERSION
-        ));
-    }
-    let history = reader
-        .config_history(Some(ACCOUNTS_FILE))
-        .map_err(|e| e.to_string())?;
-    let Some(last) = history.last() else {
-        return Err(format!(
-            "the app has never written {ACCOUNTS_FILE} in this project"
-        ));
-    };
-    if file.sha256.as_deref() != Some(last.after_sha256.as_str()) {
-        return Err(format!(
-            "{ACCOUNTS_FILE} was changed on disk outside the app since the app last wrote it"
-        ));
-    }
-    let notes = reader
-        .audit_args("config.widened", &account.id)
-        .map_err(|e| e.to_string())?;
-    let Some(note) = notes
-        .iter()
-        .rfind(|args| args.get("kind").map(String::as_str) == Some("account_added"))
-    else {
-        return Err(format!(
-            "no `agentic accounts add` of '{}' is recorded for this project",
-            account.id
-        ));
-    };
-    let recorded = |key: &str| note.get(key).map(String::as_str);
-    let port = endpoint.port.to_string();
-    if recorded("provider") != Some(account.provider.as_str())
-        || recorded("scheme") != Some(endpoint.scheme)
-        || recorded("host") != Some(endpoint.host.as_str())
-        || recorded("port") != Some(port.as_str())
-    {
-        return Err(format!(
-            "the last `agentic accounts add` of '{}' recorded provider {} at {}://{}:{}, and {ACCOUNTS_FILE} now holds provider {} at {}://{}:{port}",
-            account.id,
-            recorded("provider").unwrap_or("(none)"),
-            recorded("scheme").unwrap_or("?"),
-            recorded("host").unwrap_or("?"),
-            recorded("port").unwrap_or("?"),
-            account.provider,
-            endpoint.scheme,
-            endpoint.host,
-        ));
-    }
-    Ok(())
-}
-
 const TEST_PROMPT: &str = "Count from one to three in words, one word per line, and nothing else.";
 
 async fn test(
@@ -1217,7 +1138,18 @@ async fn test(
     // before any Keychain read, the file must be as the app last wrote it
     // and the latest `account_added` note of this Account must name its
     // provider and endpoint.
-    if let Err(why) = confirmed(ctx, project, &file, account, &endpoint) {
+    // The project's egress directory, read now: the client is built over
+    // it, and the app's own port it records (while `agentic serve` runs)
+    // is refused before any Keychain read (AD-12).
+    let directory = crate::egress::ProjectDirectory::open(project, &ctx.places)
+        .map_err(|why| Stop(EXIT_ERRORS, format!("{why}; nothing was sent")))?;
+    if endpoint.loopback && directory.own_ports().contains(&endpoint.port) {
+        return refuse(format!(
+            "the Account '{id}' is not called: {}, and an Account never reaches the app itself. No key was read and nothing was sent",
+            crate::egress::own_server_words(endpoint.port)
+        ));
+    }
+    if let Err(why) = crate::egress::confirmed(&ctx.places, project, &file, account, &endpoint) {
         let base_url = if endpoint.own {
             " --base-url <url>"
         } else {
@@ -1253,9 +1185,13 @@ async fn test(
             ));
         }
     }
-    // Only the Account's pinned endpoint (AD-12, AD-48): its host over
-    // https and no loopback port, or its one loopback port and no host.
-    let egress = (ctx.egress)(endpoint.policy());
+    // Only the Account's pinned endpoint (AD-12, AD-48): the client asks
+    // the project's egress directory, which answers this Account only while
+    // it is confirmed. `test` opens no store (it works while `serve` holds
+    // the project), so a block is collected and printed, not audited
+    // (owner decision 3, 2026-11-22).
+    let blocks = Arc::new(Blocks::default());
+    let egress = (ctx.egress)(Arc::new(directory), blocks.clone());
     // The adapter by provider. OpenAI and compatible Accounts authenticate
     // with `Bearer` from the Keychain entry named by the Account's id.
     let provider: Box<dyn LlmProvider> = if account.provider == ANTHROPIC {
@@ -1320,8 +1256,42 @@ async fn test(
             Ok(())
         }
         Err(e) => refuse(format!(
-            "the test call of the Account '{id}' (model {model}) failed: {e}"
+            "the test call of the Account '{id}' (model {model}) failed: {e}{}",
+            blocks.words()
         )),
+    }
+}
+
+/// The blocks the egress client reported during `test`: printed, because
+/// the command opens no store to audit them in.
+#[derive(Default)]
+struct Blocks(std::sync::Mutex<Vec<AuditEvent>>);
+
+impl AuditSink for Blocks {
+    fn record(&self, event: AuditEvent) {
+        if let Ok(mut all) = self.0.lock() {
+            all.push(event);
+        }
+    }
+}
+
+impl Blocks {
+    /// Each block's destination and reason, and that it is not in the
+    /// audit log; empty when there was none.
+    fn words(&self) -> String {
+        let all = self.0.lock().map(|a| a.clone()).unwrap_or_default();
+        let mut words = String::new();
+        for event in all.iter().filter(|e| e.action == "egress.blocked") {
+            let arg = |k: &str| event.args.get(k).map(String::as_str).unwrap_or("?");
+            words.push_str(&format!(
+                ". The app's network check blocked {}://{}:{} ({}); this block is not in the audit log, because `agentic accounts test` opens no store, so that it works while `agentic serve` holds the project",
+                arg("scheme"),
+                arg("host"),
+                arg("port"),
+                arg("reason"),
+            ));
+        }
+        words
     }
 }
 
@@ -1329,7 +1299,7 @@ async fn test(
 mod tests {
     use super::*;
 
-    fn compatible(url: &str) -> Result<Endpoint, String> {
+    fn compatible(url: &str) -> Result<AccountEndpoint, String> {
         endpoint_of(OPENAI_COMPATIBLE, Some(url), "--base-url")
     }
 
@@ -1343,8 +1313,14 @@ mod tests {
         );
         assert_eq!(remote.base_url, "https://Relay.Example/api/v1/", "as typed");
         assert_eq!(remote.call_base(), "https://Relay.Example/api/v1");
-        assert_eq!(remote.policy().allowed_hosts, vec!["relay.example"]);
-        assert!(remote.policy().loopback_ports.is_empty());
+        assert_eq!(
+            remote.to_domain(),
+            am_domain::Endpoint {
+                scheme: "https".into(),
+                host: "relay.example".into(),
+                port: 443
+            }
+        );
         assert_eq!(compatible("https://relay.example:443").unwrap().port, 443);
 
         let local = compatible("http://127.0.0.1:80").unwrap();
@@ -1357,8 +1333,14 @@ mod tests {
             ),
             ("http", "127.0.0.1", 80, true)
         );
-        assert!(local.policy().allowed_hosts.is_empty());
-        assert_eq!(local.policy().loopback_ports, vec![80]);
+        assert_eq!(
+            local.to_domain(),
+            am_domain::Endpoint {
+                scheme: "http".into(),
+                host: "127.0.0.1".into(),
+                port: 80
+            }
+        );
         assert_eq!(local.host_shown(), "127.0.0.1:80");
     }
 

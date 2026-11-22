@@ -29,6 +29,7 @@
 //! [`StoreConfigHistory`].
 #![forbid(unsafe_code)]
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, mpsc};
 use std::thread;
@@ -44,7 +45,7 @@ pub mod legacy;
 mod migrations;
 pub mod project;
 
-pub use audit::{ChainBreak, ChainOk, verify_jsonl};
+pub use audit::{ChainBreak, ChainOk, ConfigNote, verify_jsonl};
 pub use config_history::StoreConfigHistory;
 pub use fsx::stream_copy;
 pub use migrations::{AppliedMigration, OpenReport, PRE_MIGRATION_KEPT, SCHEMA_VERSION};
@@ -214,12 +215,15 @@ pub enum WriteCommand {
     },
     /// An audit-only entry (refusals, blocked egress). `target` names what
     /// was acted on (ids, root and relative path), never content; `hash` is
-    /// the content's sha256 hex when relevant (as `AuditEvent::hash`).
+    /// the content's sha256 hex when relevant (as `AuditEvent::hash`);
+    /// `args` are its named arguments (as `AuditEvent::args`: ids, hosts,
+    /// ports, reasons), stored as the entry's `args` next to `sha256`.
     Audit {
         action: String,
         target: String,
         outcome: String,
         hash: Option<String>,
+        args: BTreeMap<String, String>,
     },
     /// Config History (AD-16, story 1.8, see [`StoreConfigHistory`]): the
     /// intent row, committed before the file is written. `id` becomes the
@@ -385,12 +389,22 @@ impl WriteCommand {
                 action,
                 target,
                 hash,
+                args,
                 ..
-            } => (
-                action.clone(),
-                target.clone(),
-                hash.as_ref().map(|h| json!({"sha256": h})),
-            ),
+            } => {
+                let mut named: serde_json::Map<String, Value> = args
+                    .iter()
+                    .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+                    .collect();
+                if let Some(h) = hash {
+                    named.insert("sha256".into(), Value::String(h.clone()));
+                }
+                (
+                    action.clone(),
+                    target.clone(),
+                    (!named.is_empty()).then_some(Value::Object(named)),
+                )
+            }
         })
     }
 }
@@ -600,6 +614,16 @@ fn is_sha256_hex(h: &str) -> bool {
 }
 
 fn apply(conn: &mut Connection, actor: &Actor, cmd: &WriteCommand) -> Result<(), StoreError> {
+    // A `config.*` entry comes only with a config intent (its History
+    // entry and the notes it carried, in one transaction): a free audit
+    // entry cannot write one, so none can pass for an owner's confirmation.
+    if let WriteCommand::Audit { action, .. } = cmd
+        && action.starts_with("config.")
+    {
+        return Err(StoreError::Invalid(format!(
+            "refused audit entry: a `{action}` entry is written only with a config intent"
+        )));
+    }
     if let WriteCommand::Audit { hash: Some(h), .. } = cmd
         && !is_sha256_hex(h)
     {
@@ -1287,6 +1311,7 @@ mod tests {
                     target: "y".into(),
                     outcome: "ok".into(),
                     hash: None,
+                    args: Default::default(),
                 },
             )
             .unwrap();

@@ -4,7 +4,9 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use am_domain::{BodyChunks, EgressClient, EgressError, HttpMethod, HttpRequest, HttpResponse};
+use am_domain::{
+    BodyChunks, Caller, EgressClient, EgressError, HttpMethod, HttpRequest, HttpResponse,
+};
 use bytes::Bytes;
 use futures_util::StreamExt;
 use futures_util::stream::BoxStream;
@@ -30,14 +32,23 @@ type HttpErr = StreamableHttpError<EgressHttpError>;
 #[derive(Clone)]
 pub struct EgressHttpClient {
     egress: Arc<dyn EgressClient>,
+    /// The MCP server every request is for (AD-12): the egress client holds
+    /// it to that server's approved URL.
+    server: String,
 }
 
 impl EgressHttpClient {
-    pub fn new(egress: Arc<dyn EgressClient>) -> Self {
-        EgressHttpClient { egress }
+    pub fn new(egress: Arc<dyn EgressClient>, server: impl Into<String>) -> Self {
+        EgressHttpClient {
+            egress,
+            server: server.into(),
+        }
     }
 
-    async fn send(&self, req: HttpRequest) -> Result<HttpResponse, HttpErr> {
+    async fn send(&self, mut req: HttpRequest) -> Result<HttpResponse, HttpErr> {
+        req.caller = Some(Caller::McpServer {
+            server: self.server.clone(),
+        });
         self.egress
             .send(req)
             .await
@@ -74,7 +85,8 @@ fn base_request(
         headers,
         body: Vec::new(),
         auth: None,
-        caller: Default::default(),
+        // Named by `EgressHttpClient::send`, the one place requests leave.
+        caller: None,
     })
 }
 

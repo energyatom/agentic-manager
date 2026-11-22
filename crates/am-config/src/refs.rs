@@ -7,7 +7,8 @@ use am_domain::capability::AccountKind;
 
 use crate::finding::Report;
 
-pub(crate) const RESERVED_ACCOUNTS: &[&str] = &["local-lmstudio", "local-ollama"];
+/// The reserved local Accounts: am-domain's one definition (AD-31).
+pub(crate) const RESERVED_ACCOUNTS: &[&str] = &am_domain::net::RESERVED_LOCAL_ACCOUNTS;
 
 #[derive(Debug, Clone)]
 pub(crate) enum RefKind {

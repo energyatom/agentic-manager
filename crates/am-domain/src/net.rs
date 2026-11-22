@@ -26,11 +26,22 @@ pub struct AuthRef {
     pub account_id: String,
 }
 
-/// Who is asking (AD-12): every request carries its seat and Account.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Caller {
-    pub seat: Option<String>,
-    pub account: Option<String>,
+/// Who a request is for (AD-12, AD-48): exactly one kind. The request
+/// carries ids only; the egress client asks one [`EgressDirectory`] what
+/// that caller may reach, so no caller can hand the client its own
+/// allow-list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Caller {
+    /// A tool, reader or fetch by a seat: only the seat's `allowed_hosts`.
+    Seat { seat: String },
+    /// A call to an Account's endpoint, with the seat it serves when there
+    /// is one (for the audit).
+    Account {
+        account: String,
+        seat: Option<String>,
+    },
+    /// A call to an MCP server's approved URL.
+    McpServer { server: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,7 +51,8 @@ pub struct HttpRequest {
     pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
     pub auth: Option<AuthRef>,
-    pub caller: Caller,
+    /// Who the request is for. A request with none is refused.
+    pub caller: Option<Caller>,
 }
 
 impl HttpRequest {
@@ -51,7 +63,7 @@ impl HttpRequest {
             headers: vec![("content-type".into(), "application/json".into())],
             body,
             auth: None,
-            caller: Caller::default(),
+            caller: None,
         }
     }
     pub fn get(url: impl Into<String>) -> Self {
@@ -61,8 +73,70 @@ impl HttpRequest {
             headers: Vec::new(),
             body: Vec::new(),
             auth: None,
-            caller: Caller::default(),
+            caller: None,
         }
+    }
+}
+
+/// Where an Account's or an MCP server's calls go: a scheme, a host and a
+/// port, compared exactly (AD-12, AD-48). The host is lowercase: a DNS name
+/// or, for an endpoint on this Mac, `127.0.0.1`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Endpoint {
+    pub scheme: String,
+    pub host: String,
+    pub port: u16,
+}
+
+impl std::fmt::Display for Endpoint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}://{}:{}", self.scheme, self.host, self.port)
+    }
+}
+
+/// The reserved local Accounts (AD-31) and where they are: LM Studio and
+/// Ollama on this Mac. Defined here once.
+pub const LOCAL_LMSTUDIO: &str = "local-lmstudio";
+pub const LOCAL_OLLAMA: &str = "local-ollama";
+/// Both reserved local Account ids.
+pub const RESERVED_LOCAL_ACCOUNTS: [&str; 2] = [LOCAL_LMSTUDIO, LOCAL_OLLAMA];
+const LOCAL_LMSTUDIO_PORT: u16 = 1234;
+const LOCAL_OLLAMA_PORT: u16 = 11434;
+
+/// The endpoint of a reserved local Account, `None` for any other id.
+pub fn reserved_local_account(account: &str) -> Option<Endpoint> {
+    let port = match account {
+        LOCAL_LMSTUDIO => LOCAL_LMSTUDIO_PORT,
+        LOCAL_OLLAMA => LOCAL_OLLAMA_PORT,
+        _ => return None,
+    };
+    Some(Endpoint {
+        scheme: "http".into(),
+        host: "127.0.0.1".into(),
+        port,
+    })
+}
+
+/// The one place the egress client learns what a caller may reach (AD-12,
+/// AD-48), answered from the pinned config snapshot. `None` means the id is
+/// unknown (or, for an Account, not confirmed), and the request is refused.
+pub trait EgressDirectory: Send + Sync {
+    /// The host patterns a seat may reach (empty: nothing).
+    fn seat_hosts(&self, seat: &str) -> Option<Vec<crate::HostPattern>>;
+    /// An Account's pinned endpoint.
+    fn account_endpoint(&self, account: &str) -> Option<Endpoint>;
+    /// An MCP server's approved URL, as its endpoint.
+    fn mcp_endpoint(&self, server: &str) -> Option<Endpoint>;
+    /// Why an Account the directory does not answer for is refused, in
+    /// words, when it knows (for example: not confirmed). Never a secret.
+    fn account_refusal(&self, _account: &str) -> Option<String> {
+        None
+    }
+    /// The ports the app's own servers are listening on (every running
+    /// `agentic serve` records its port): refused to every Account and MCP
+    /// server (AD-12).
+    fn own_ports(&self) -> Vec<u16> {
+        Vec::new()
     }
 }
 

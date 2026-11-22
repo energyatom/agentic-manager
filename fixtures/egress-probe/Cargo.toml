@@ -1,0 +1,23 @@
+# Story 2.2 clippy probe (AD-12): a crate that builds a reqwest client
+# outside am-net. `xtask/tests/egress_clippy.rs` copies it to a temp folder
+# with the repo's clippy.toml, Cargo.lock and rust-toolchain.toml, puts one
+# file of `cases/` in as src/lib.rs, and runs clippy offline: each case that
+# constructs a client must fail on the repo's `disallowed-methods` rule.
+# Its own workspace; never built in the repo workspace.
+[package]
+name = "egress-probe"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[dependencies]
+# The workspace's exact pin and features (root Cargo.toml).
+reqwest = { version = "=0.13.5", default-features = false, features = ["rustls", "stream"] }
+
+# The workspace's lint levels for the rule (root Cargo.toml).
+[lints.clippy]
+disallowed_methods = "deny"
+disallowed_types = "deny"
+
+[workspace]

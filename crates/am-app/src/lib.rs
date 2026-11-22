@@ -7,7 +7,10 @@
 //! adds `agentic accounts add|list|test|remove` ([`accounts`]), AD-15's
 //! interim CLI Account edit, and the owner's real terminal ([`terminal`]).
 //! Epic 3 story 1 adds `agentic run <workflow>` and `agentic status`
-//! ([`run`]): a configured workflow's run on am-engine's driver.
+//! ([`run`]): a configured workflow's run on am-engine's driver. Story 2.2
+//! wires the egress client ([`egress`]): the project's egress directory and
+//! the store-backed audit sink; the spike's `c1` and `c4` commands left the
+//! binary (owner decision 9, 2026-11-22).
 #![forbid(unsafe_code)]
 
 // The composition root depends on every adapter (Design Paradigm table); the
@@ -21,6 +24,7 @@ use am_services as _;
 
 pub mod accounts;
 pub mod cli;
+pub mod egress;
 pub mod identity;
 pub mod run;
 pub mod runtime;
@@ -29,24 +33,10 @@ pub mod terminal;
 
 use std::sync::Arc;
 
-use am_domain::{EgressClient, SecretStore};
-use am_net::{EgressPolicy, NetEgress};
+use am_domain::SecretStore;
 
-/// The Account id the spike reads the Anthropic key from (service `agentic-manager`).
-pub const SPIKE_ANTHROPIC_ACCOUNT: &str = "spike-anthropic";
-
-/// The Anthropic model the spike and `agentic accounts test` call when none
-/// is named.
+/// The Anthropic model `agentic accounts test` calls when none is named.
 pub const DEFAULT_ANTHROPIC_MODEL: &str = "claude-opus-5-5";
-
-/// The production egress client: Anthropic's host plus the local Account ports.
-pub fn default_egress(secrets: Arc<dyn SecretStore>) -> Arc<dyn EgressClient> {
-    let policy = EgressPolicy {
-        allowed_hosts: vec![am_providers::anthropic::ANTHROPIC_HOST.to_string()],
-        ..EgressPolicy::default()
-    };
-    Arc::new(NetEgress::new(policy, secrets, None))
-}
 
 /// The OS keychain store.
 pub fn keychain() -> Arc<dyn SecretStore> {

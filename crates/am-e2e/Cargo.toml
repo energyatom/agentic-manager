@@ -44,6 +44,28 @@ path = "tests/trust_targets.rs"
 name = "rule_16_audit_log"
 path = "tests/trust/rule_16_audit_log.rs"
 
+# Story 2.2: RULE-9, the egress client blocks everything unlisted. The
+# shared fakes live in tests/trust/support/ (a folder, so not a target).
+[[test]]
+name = "rule_09_callers"
+path = "tests/trust/rule_09_callers.rs"
+
+[[test]]
+name = "rule_09_addresses"
+path = "tests/trust/rule_09_addresses.rs"
+
+[[test]]
+name = "rule_09_redirects"
+path = "tests/trust/rule_09_redirects.rs"
+
+[[test]]
+name = "rule_09_requests"
+path = "tests/trust/rule_09_requests.rs"
+
+[[test]]
+name = "rule_09_audit_store"
+path = "tests/trust/rule_09_audit_store.rs"
+
 [dev-dependencies]
 am-app.workspace = true
 am-config = { workspace = true, features = ["test-support"] }

@@ -362,7 +362,7 @@ async fn live_files_to_models_on_owner_folder() {
             kind: ModelKind::Frontier,
             provider: Arc::new(AnthropicProvider::new(
                 egress.clone(),
-                am_app::SPIKE_ANTHROPIC_ACCOUNT,
+                live::SPIKE_ANTHROPIC_ACCOUNT,
             )),
             price: Some(anthropic_price(&m)),
             model: m,

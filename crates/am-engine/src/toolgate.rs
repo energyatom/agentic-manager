@@ -127,6 +127,7 @@ impl ToolGate {
             target: format!("tool:{tool}{step}"),
             outcome: reason.clone(),
             hash: None,
+            args: Default::default(),
         });
         GateDecision::Refuse(reason)
     }

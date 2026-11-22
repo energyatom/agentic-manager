@@ -29,12 +29,13 @@ use std::time::Duration;
 
 use am_app::cli::{AccountsContext, accounts};
 use am_app::runtime::{OpenRequest, Places, Prompt, open_project};
+use am_domain::net::{Caller, EgressDirectory, Endpoint, reserved_local_account};
 use am_domain::runtime::{legacy_dir, open_marker};
 use am_domain::{
     Actor, AuthRef, AuthScheme, ConfigHistory, EgressClient, HistoryEntry, HistoryKind,
     RuntimeLayout, SecretStore,
 };
-use am_net::{EgressPolicy, check_url};
+use am_domain::{AuditEvent, AuditSink, BoxFuture, EgressError, HttpRequest, HttpResponse};
 use am_store::{SCHEMA_VERSION, StoreConfigHistory};
 use am_testkit::{FakeEgress, FakeProjectIdentity, FakeSecretStore, FakeTerminal};
 
@@ -217,13 +218,23 @@ impl Ran {
     }
 }
 
+/// What `AccountsContext::egress` is (story 2.2): a client built over the
+/// project's egress directory, reporting blocks to the command's sink.
+type EgressFactory = Arc<
+    dyn Fn(Arc<dyn EgressDirectory>, Arc<dyn AuditSink>) -> Arc<dyn EgressClient> + Send + Sync,
+>;
+
 /// The fakes one command runs with.
 struct Kit {
     term: FakeTerminal,
     secrets: Arc<FakeSecretStore>,
     egress: Arc<FakeEgress>,
-    /// Every policy the command asked the egress factory for.
-    policies: Arc<Mutex<Vec<EgressPolicy>>>,
+    /// Every egress directory the command built a client for (story 2.2:
+    /// the client decides from the directory alone).
+    directories: Arc<Mutex<Vec<Arc<dyn EgressDirectory>>>>,
+    /// When set, the client the factory builds refuses every request,
+    /// reporting the block to the audit sink the command handed it.
+    blocking: bool,
 }
 
 impl Kit {
@@ -232,7 +243,8 @@ impl Kit {
             term,
             secrets: FakeSecretStore::new(),
             egress: FakeEgress::new(),
-            policies: Arc::new(Mutex::new(Vec::new())),
+            directories: Arc::new(Mutex::new(Vec::new())),
+            blocking: false,
         }
     }
 
@@ -248,8 +260,15 @@ impl Kit {
             .map(|s| s.expose().to_string())
     }
 
-    fn policies(&self) -> Vec<EgressPolicy> {
-        self.policies.lock().unwrap().clone()
+    fn directories(&self) -> Vec<Arc<dyn EgressDirectory>> {
+        self.directories.lock().unwrap().clone()
+    }
+
+    /// The client refuses every request (and audits it) instead of
+    /// answering.
+    fn blocking(mut self) -> Kit {
+        self.blocking = true;
+        self
     }
 
     /// Runs `agentic accounts <args> --project <root>`.
@@ -265,13 +284,19 @@ impl Kit {
         args: &[&str],
         secrets: Arc<dyn SecretStore>,
     ) -> Ran {
-        let policies = self.policies.clone();
+        let directories = self.directories.clone();
         let egress = self.egress.clone();
-        let factory: Arc<dyn Fn(EgressPolicy) -> Arc<dyn EgressClient> + Send + Sync> =
-            Arc::new(move |policy: EgressPolicy| {
-                policies.lock().unwrap().push(policy);
-                egress.clone() as Arc<dyn EgressClient>
-            });
+        let blocking = self.blocking;
+        let factory: EgressFactory = Arc::new(
+            move |directory: Arc<dyn EgressDirectory>, audit: Arc<dyn AuditSink>| {
+                directories.lock().unwrap().push(directory);
+                if blocking {
+                    Arc::new(BlockingEgress { audit }) as Arc<dyn EgressClient>
+                } else {
+                    egress.clone() as Arc<dyn EgressClient>
+                }
+            },
+        );
         let ctx = AccountsContext {
             places: env.places.clone(),
             identity: Arc::new(FakeProjectIdentity::new("Test Mac")),
@@ -290,6 +315,80 @@ impl Kit {
             err: String::from_utf8(err).unwrap(),
             shown: self.term.shown(),
         }
+    }
+}
+
+fn endpoint(scheme: &str, host: &str, port: u16) -> Endpoint {
+    Endpoint {
+        scheme: scheme.into(),
+        host: host.into(),
+        port,
+    }
+}
+
+/// The project's directory knows no id the project does not configure,
+/// and answers the reserved local Accounts from am-domain's one
+/// definition (story 2.2).
+fn assert_directory_refuses_unknown_ids(directory: &dyn EgressDirectory) {
+    assert_eq!(directory.account_endpoint("no-such-account"), None);
+    assert_eq!(directory.seat_hosts("no-such-seat"), None);
+    assert_eq!(directory.mcp_endpoint("no-such-server"), None);
+    for reserved in ["local-lmstudio", "local-ollama"] {
+        assert_eq!(
+            directory.account_endpoint(reserved),
+            reserved_local_account(reserved),
+            "{reserved}"
+        );
+    }
+}
+
+/// An egress client that refuses every request as the real one refuses an
+/// unlisted destination: it reports an `egress.blocked` entry to the sink
+/// the command handed its factory, and returns `Blocked`.
+struct BlockingEgress {
+    audit: Arc<dyn AuditSink>,
+}
+
+impl EgressClient for BlockingEgress {
+    fn send(&self, request: HttpRequest) -> BoxFuture<Result<HttpResponse, EgressError>> {
+        let host = request
+            .url
+            .split("://")
+            .nth(1)
+            .and_then(|rest| rest.split(['/', ':']).next())
+            .unwrap_or("")
+            .to_string();
+        let account = match &request.caller {
+            Some(Caller::Account { account, .. }) => account.clone(),
+            _ => String::new(),
+        };
+        self.audit.record(AuditEvent {
+            actor: Actor::System {
+                component: "am-net".into(),
+            },
+            action: "egress.blocked".into(),
+            target: format!("https://{host}:443"),
+            outcome: "blocked".into(),
+            hash: None,
+            args: [
+                ("scheme", "https".to_string()),
+                ("host", host.clone()),
+                ("port", "443".to_string()),
+                (
+                    "reason",
+                    "the destination is not the Account's endpoint".to_string(),
+                ),
+                ("account", account),
+            ]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect(),
+        });
+        Box::pin(async move {
+            Err(EgressError::Blocked(format!(
+                "{host} is not this Account's endpoint"
+            )))
+        })
     }
 }
 
@@ -765,8 +864,8 @@ async fn list_masks_keys_and_names_missing_ones() {
 
 /// Test: one short reply streamed through an egress client whose policy
 /// admits only the Account's host (no loopback port); the request names the
-/// Account in its `AuthRef`; a host outside the pin is refused by
-/// `check_url`; any stdin; no edit. (Rewritten in story 2.3's review: the
+/// Account in its `AuthRef`; the client's directory pins the Account to
+/// its endpoint (story 2.2); any stdin; no edit. (Rewritten in story 2.3's review: the
 /// Account is added through the command first, because `test` calls only an
 /// Account that `agentic accounts add` confirmed on this Mac.)
 #[tokio::test]
@@ -802,28 +901,59 @@ async fn test_streams_a_reply_through_the_accounts_pinned_host() {
     );
     assert!(!String::from_utf8_lossy(&requests[0].body).contains(CANARY));
 
-    let policies = kit.policies();
-    assert_eq!(policies.len(), 1, "{policies:?}");
-    let pinned = &policies[0];
-    assert_eq!(pinned.allowed_hosts, vec!["api.anthropic.com".to_string()]);
-    assert!(pinned.loopback_ports.is_empty(), "no loopback port");
-    assert!(check_url(pinned, "https://api.anthropic.com/v1/messages").is_ok());
-    for outside in [
-        "https://example.org/v1/messages",
-        "https://api.anthropic.com.example.org/",
-        "http://127.0.0.1:1234/v1/chat/completions",
-        "http://127.0.0.1:11434/v1/chat/completions",
-        "http://api.anthropic.com/v1/messages",
-    ] {
-        assert!(
-            check_url(pinned, outside).is_err(),
-            "{outside} is outside the pin"
-        );
-    }
+    // Story 2.2: the client is built over the project's egress directory,
+    // which pins the Account to its endpoint (scheme, host and port; the
+    // client compares them exactly, rule_09_callers), knows no other id
+    // than the project's, and the request names the Account as its caller.
+    let directories = kit.directories();
+    assert_eq!(directories.len(), 1, "one egress client is built");
+    let directory = directories[0].as_ref();
+    assert_eq!(
+        directory.account_endpoint("cloud"),
+        Some(endpoint("https", "api.anthropic.com", 443))
+    );
+    assert_directory_refuses_unknown_ids(directory);
+    assert_eq!(
+        requests[0].caller,
+        Some(Caller::Account {
+            account: "cloud".into(),
+            seat: None
+        })
+    );
 
     assert_eq!(read(&root, ACCOUNTS_FILE), before);
     assert_eq!(env.history(&root).len(), recorded, "no edit");
     assert!(!ran.all().contains(CANARY));
+}
+
+/// Story 2.2, decision 3 (owner, 2026-11-22): `agentic accounts test`
+/// opens no store, so a block the egress client reports cannot reach the
+/// audit log. The command prints the block (its host and reason) and says
+/// it is not in the audit log; it fails, and the key is never printed.
+#[tokio::test]
+async fn test_prints_a_block_and_says_it_is_not_in_the_audit_log() {
+    let env = env();
+    let root = plain(&env);
+    add_account(&env, &root, "cloud3", "anthropic", None, CANARY).await;
+    let kit = Kit::new(FakeTerminal::piped())
+        .with_key("cloud3", CANARY)
+        .blocking();
+
+    let ran = kit.run(&env, &root, &["test", "cloud3"]).await;
+
+    assert_ne!(ran.code, 0, "{}", ran.all());
+    assert_eq!(kit.directories().len(), 1, "one egress client was built");
+    let said = ran.all();
+    assert!(said.contains("api.anthropic.com"), "names the host: {said}");
+    assert!(
+        said.contains("the destination is not the Account's endpoint"),
+        "prints the block's reason: {said}"
+    );
+    assert!(
+        said.to_ascii_lowercase().contains("not in the audit log"),
+        "says the block is not in the audit log: {said}"
+    );
+    assert!(!said.contains(CANARY), "{said}");
 }
 
 /// Test of an Account with no key, or of an unknown id: refused in words,
@@ -1726,9 +1856,8 @@ async fn refused_test(env: &Env, root: &Path, id: &str) -> Ran {
         ran.all()
     );
     assert!(
-        kit.policies().is_empty(),
-        "{id}: no egress client is built: {:?}",
-        kit.policies()
+        kit.directories().is_empty(),
+        "{id}: no egress client is built"
     );
     assert!(!ran.all().contains(ROUTER_CANARY), "{id}: {}", ran.all());
     ran
@@ -2367,26 +2496,25 @@ async fn test_of_an_openai_account_streams_through_its_pinned_host() {
         "the model asked for: {body}"
     );
 
-    let policies = kit.policies();
-    assert_eq!(policies.len(), 1, "{policies:?}");
-    let pinned = &policies[0];
-    assert_eq!(pinned.allowed_hosts, vec!["api.openai.com".to_string()]);
-    assert!(pinned.loopback_ports.is_empty(), "no loopback port");
-    assert!(check_url(pinned, &requests[0].url).is_ok());
-    for outside in [
-        "https://api.anthropic.com/v1/messages",
-        "https://openrouter.example/api/v1/chat/completions",
-        "https://api.openai.com.example.org/v1/chat/completions",
-        "http://127.0.0.1:1234/v1/chat/completions",
-        "http://127.0.0.1:11434/v1/chat/completions",
-        "http://127.0.0.1:8080/v1/chat/completions",
-        "http://api.openai.com/v1/chat/completions",
-    ] {
-        assert!(
-            check_url(pinned, outside).is_err(),
-            "{outside} is outside the pin"
-        );
-    }
+    // Story 2.2: the client is built over the project's egress directory,
+    // which pins the Account to its endpoint (scheme, host and port; the
+    // client compares them exactly, rule_09_callers), knows no other id
+    // than the project's, and the request names the Account as its caller.
+    let directories = kit.directories();
+    assert_eq!(directories.len(), 1, "one egress client is built");
+    let directory = directories[0].as_ref();
+    assert_eq!(
+        directory.account_endpoint("oa"),
+        Some(endpoint("https", "api.openai.com", 443))
+    );
+    assert_directory_refuses_unknown_ids(directory);
+    assert_eq!(
+        requests[0].caller,
+        Some(Caller::Account {
+            account: "oa".into(),
+            seat: None
+        })
+    );
 
     assert_eq!(read(&root, ACCOUNTS_FILE), before);
     assert_eq!(env.history(&root).len(), recorded, "no edit");
@@ -2447,8 +2575,8 @@ async fn test_of_an_openai_or_compatible_account_needs_a_model() {
 /// `{base_url}/chat/completions` with a `Bearer` reference naming the
 /// Account, and only the content is printed (a reasoning model's thinking is
 /// not). The remote policy admits only that host; the loopback policy admits
-/// only that port and no host, and `check_url` refuses any other host or
-/// port.
+/// only that port and no host (story 2.2: the directory pins each to its
+/// endpoint and the client compares scheme, host and port exactly).
 #[tokio::test]
 async fn test_of_a_compatible_account_calls_only_its_base_url() {
     let env = env();
@@ -2478,25 +2606,25 @@ async fn test_of_a_compatible_account_calls_only_its_base_url() {
         })
     );
     assert!(!String::from_utf8_lossy(&requests[0].body).contains(ROUTER_CANARY));
-    let policies = kit.policies();
-    assert_eq!(policies.len(), 1, "{policies:?}");
-    let pinned = &policies[0];
-    assert_eq!(pinned.allowed_hosts, vec!["openrouter.example".to_string()]);
-    assert!(pinned.loopback_ports.is_empty(), "no loopback port");
-    assert!(check_url(pinned, &requests[0].url).is_ok());
-    for outside in [
-        "https://api.openai.com/v1/chat/completions",
-        "https://example.org/api/v1/chat/completions",
-        "https://openrouter.example.example.org/api/v1/chat/completions",
-        "http://127.0.0.1:1234/v1/chat/completions",
-        "http://127.0.0.1:8080/v1/chat/completions",
-        "http://openrouter.example/api/v1/chat/completions",
-    ] {
-        assert!(
-            check_url(pinned, outside).is_err(),
-            "{outside} is outside the pin"
-        );
-    }
+    // Story 2.2: the client is built over the project's egress directory,
+    // which pins the Account to its endpoint (scheme, host and port; the
+    // client compares them exactly, rule_09_callers), knows no other id
+    // than the project's, and the request names the Account as its caller.
+    let directories = kit.directories();
+    assert_eq!(directories.len(), 1, "one egress client is built");
+    let directory = directories[0].as_ref();
+    assert_eq!(
+        directory.account_endpoint("router"),
+        Some(endpoint("https", "openrouter.example", 443))
+    );
+    assert_directory_refuses_unknown_ids(directory);
+    assert_eq!(
+        requests[0].caller,
+        Some(Caller::Account {
+            account: "router".into(),
+            seat: None
+        })
+    );
     assert!(!ran.all().contains(ROUTER_CANARY));
 
     // On this Mac.
@@ -2520,30 +2648,25 @@ async fn test_of_a_compatible_account_calls_only_its_base_url() {
         })
     );
     assert!(!String::from_utf8_lossy(&requests[0].body).contains(LLAMA_CANARY));
-    let policies = kit.policies();
-    assert_eq!(policies.len(), 1, "{policies:?}");
-    let pinned = &policies[0];
-    assert!(
-        pinned.allowed_hosts.is_empty(),
-        "no host: {:?}",
-        pinned.allowed_hosts
+    // Story 2.2: the client is built over the project's egress directory,
+    // which pins the Account to its endpoint (scheme, host and port; the
+    // client compares them exactly, rule_09_callers), knows no other id
+    // than the project's, and the request names the Account as its caller.
+    let directories = kit.directories();
+    assert_eq!(directories.len(), 1, "one egress client is built");
+    let directory = directories[0].as_ref();
+    assert_eq!(
+        directory.account_endpoint("llama"),
+        Some(endpoint("http", "127.0.0.1", 8080))
     );
-    assert_eq!(pinned.loopback_ports, vec![8080], "only that port");
-    assert!(check_url(pinned, &requests[0].url).is_ok());
-    for outside in [
-        "http://127.0.0.1:1234/v1/chat/completions",
-        "http://127.0.0.1:11434/v1/chat/completions",
-        "http://127.0.0.1:8081/v1/chat/completions",
-        "http://127.0.0.1/v1/chat/completions",
-        "https://api.openai.com/v1/chat/completions",
-        "https://openrouter.example/api/v1/chat/completions",
-        "https://example.org/v1/chat/completions",
-    ] {
-        assert!(
-            check_url(pinned, outside).is_err(),
-            "{outside} is outside the pin"
-        );
-    }
+    assert_directory_refuses_unknown_ids(directory);
+    assert_eq!(
+        requests[0].caller,
+        Some(Caller::Account {
+            account: "llama".into(),
+            seat: None
+        })
+    );
     assert!(!ran.all().contains(LLAMA_CANARY));
 
     assert_eq!(read(&root, ACCOUNTS_FILE), before);
@@ -3078,4 +3201,377 @@ async fn test_answers_while_another_process_holds_the_store() {
     );
     assert_eq!(read(&root, ACCOUNTS_FILE), before);
     drop(held);
+}
+
+// ------------------------------------------- story 2.2: the project directory
+
+// Decision 8 (owner, 2026-11-22): AD-15's Key use check moves out of
+// `accounts test` into the egress directory, so every path that sends a
+// key gets it. `am_app::egress::ProjectDirectory::open(root, places)` reads
+// the project's config and its store read-only (no lock, no edit) and
+// answers for an Account only while it is confirmed: `models/accounts.yaml`
+// holds exactly the bytes of its latest History entry, and the latest
+// `account_added` note names the same provider, scheme, host and port. The
+// reserved local Accounts skip the check (AD-31). Written first.
+
+/// The project's egress directory, opened read-only now.
+fn project_directory(env: &Env, root: &Path) -> am_app::egress::ProjectDirectory {
+    am_app::egress::ProjectDirectory::open(root, &env.places)
+        .unwrap_or_else(|e| panic!("the directory opens: {e}"))
+}
+
+/// What a directory answers for every Account of the four-kinds project.
+fn every_account_refused(directory: &dyn EgressDirectory, why: &str) {
+    for id in ["cloud", "oa", "router", "llama"] {
+        assert_eq!(directory.account_endpoint(id), None, "{why}: {id} refused");
+    }
+    for reserved in ["local-lmstudio", "local-ollama"] {
+        assert_eq!(
+            directory.account_endpoint(reserved),
+            reserved_local_account(reserved),
+            "{why}: the reserved {reserved} skips the check"
+        );
+    }
+}
+
+/// Added through `agentic accounts add` (the interactive fake): the
+/// directory answers each Account's endpoint, and nothing for an id or a
+/// seat the project does not configure. Opening it writes nothing.
+#[tokio::test]
+async fn the_project_directory_answers_an_account_added_through_the_command() {
+    let env = env();
+    let root = four_kinds_added(&env).await;
+    let before = read(&root, ACCOUNTS_FILE);
+    let recorded = env.history(&root).len();
+
+    let directory = project_directory(&env, &root);
+    for (id, at) in [
+        ("cloud", endpoint("https", "api.anthropic.com", 443)),
+        ("oa", endpoint("https", "api.openai.com", 443)),
+        ("router", endpoint("https", "openrouter.example", 443)),
+        ("llama", endpoint("http", "127.0.0.1", 8080)),
+    ] {
+        assert_eq!(directory.account_endpoint(id), Some(at), "{id}");
+    }
+    assert_directory_refuses_unknown_ids(&directory);
+    assert_eq!(
+        directory.seat_hosts("alpha"),
+        Some(Vec::new()),
+        "a configured seat with no allowed_hosts reaches nothing"
+    );
+
+    assert_eq!(read(&root, ACCOUNTS_FILE), before, "no edit");
+    assert_eq!(env.history(&root).len(), recorded, "nothing recorded");
+}
+
+/// A hand edit of `models/accounts.yaml` after the adds (a `base_url`, or a
+/// provider): the file no longer holds what the app wrote, so the directory
+/// refuses that Account and every other Account in the file. Put back byte
+/// for byte, the file is confirmed again.
+#[tokio::test]
+async fn the_project_directory_refuses_every_account_of_a_hand_edited_file() {
+    let env = env();
+    let root = four_kinds_added(&env).await;
+    let written = read(&root, ACCOUNTS_FILE).unwrap();
+
+    for (what, from, to) in [
+        ("base_url host", "openrouter.example", "elsewhere.example"),
+        ("base_url port", "127.0.0.1:8080", "127.0.0.1:9090"),
+        ("provider", "provider: anthropic", "provider: openai"),
+    ] {
+        let edited = written.replacen(from, to, 1);
+        assert_ne!(edited, written, "{what}: the edit changes the file");
+        std::fs::write(root.join(ACCOUNTS_FILE), &edited).unwrap();
+        let directory = project_directory(&env, &root);
+        every_account_refused(&directory, what);
+    }
+
+    std::fs::write(root.join(ACCOUNTS_FILE), &written).unwrap();
+    let directory = project_directory(&env, &root);
+    assert_eq!(
+        directory.account_endpoint("router"),
+        Some(endpoint("https", "openrouter.example", 443)),
+        "the file is as the app wrote it"
+    );
+}
+
+/// An Account written into the file by hand and never added: refused.
+#[tokio::test]
+async fn the_project_directory_refuses_an_account_never_added() {
+    let env = env();
+    let root = env.usual(&[(ACCOUNTS_FILE, four_kinds())]);
+    let directory = project_directory(&env, &root);
+    every_account_refused(&directory, "never added");
+}
+
+/// An Account added, removed, then put back into the file by hand (the
+/// very bytes the add wrote): the app's last write was the removal, so the
+/// directory refuses it and every other Account of the file.
+#[tokio::test]
+async fn the_project_directory_refuses_an_account_removed_and_put_back_by_hand() {
+    let env = env();
+    let root = four_kinds_added(&env).await;
+    let with_router = read(&root, ACCOUNTS_FILE).unwrap();
+    remove_account(&env, &root, "router").await;
+    std::fs::write(root.join(ACCOUNTS_FILE), &with_router).unwrap();
+    let directory = project_directory(&env, &root);
+    every_account_refused(&directory, "removed and put back");
+}
+
+/// End to end through the real egress client over that directory: the
+/// unconfirmed Account's request is refused before any Keychain read (the
+/// counting store sees zero) and before any lookup or connection, and the
+/// refusal is audited naming the Account.
+#[tokio::test]
+async fn an_unconfirmed_accounts_request_reads_no_key_and_is_audited() {
+    let env = env();
+    let root = four_kinds_added(&env).await;
+    let written = read(&root, ACCOUNTS_FILE).unwrap();
+    std::fs::write(
+        root.join(ACCOUNTS_FILE),
+        written.replacen("openrouter.example", "elsewhere.example", 1),
+    )
+    .unwrap();
+
+    let counting = Arc::new(CountingStore {
+        inner: FakeSecretStore::with("router", ROUTER_CANARY),
+        gets: AtomicUsize::new(0),
+    });
+    let audit = am_testkit::CollectAudit::new();
+    let egress = am_net::NetEgress::new(
+        Arc::new(project_directory(&env, &root)),
+        counting.clone(),
+        audit.clone(),
+    );
+    for (id, scheme, url) in [
+        (
+            "router",
+            AuthScheme::Bearer,
+            "https://elsewhere.example/api/v1/chat/completions",
+        ),
+        (
+            "router",
+            AuthScheme::Bearer,
+            "https://openrouter.example/api/v1/chat/completions",
+        ),
+        (
+            "cloud",
+            AuthScheme::XApiKey,
+            "https://api.anthropic.com/v1/messages",
+        ),
+    ] {
+        let request = HttpRequest {
+            caller: Some(Caller::Account {
+                account: id.into(),
+                seat: None,
+            }),
+            auth: Some(AuthRef {
+                scheme,
+                account_id: id.into(),
+            }),
+            ..HttpRequest::post_json(url, b"{}".to_vec())
+        };
+        match egress.send(request).await {
+            Err(EgressError::Blocked(_)) => {}
+            Err(other) => panic!("{id} {url}: expected Blocked, got {other:?}"),
+            Ok(resp) => panic!("{id} {url}: expected Blocked, got HTTP {}", resp.status),
+        }
+        let last = audit
+            .events()
+            .into_iter()
+            .rfind(|e| e.action == "egress.blocked")
+            .unwrap_or_else(|| panic!("{id} {url}: the refusal is audited"));
+        assert_eq!(
+            last.args.get("account").map(String::as_str),
+            Some(id),
+            "{last:?}"
+        );
+        assert!(
+            !format!("{last:?}").contains(ROUTER_CANARY),
+            "no key in the entry"
+        );
+    }
+    assert_eq!(
+        counting.gets.load(Ordering::SeqCst),
+        0,
+        "no Keychain read for an unconfirmed Account"
+    );
+}
+
+/// Story 2.2 review (medium): `agentic serve` records its bound port in
+/// the project's runtime folder, and every client am-app builds for the
+/// project reads it through the project's egress directory. With the port
+/// file naming 8080, `accounts test` of the confirmed compatible Account at
+/// `http://127.0.0.1:8080` is refused before any Keychain read, and no
+/// egress client is built; the directory answers no Account there and says
+/// why.
+#[tokio::test]
+async fn test_of_an_account_on_the_apps_own_port_is_refused_with_no_key_read() {
+    let env = env();
+    let root = four_kinds_added(&env).await;
+    let layout = am_app::runtime::find_runtime(&env.places, &root).unwrap();
+    std::fs::write(layout.serve_port(), "8080\n").unwrap();
+
+    let directory = project_directory(&env, &root);
+    assert_eq!(directory.own_ports(), vec![8080]);
+    assert_eq!(directory.account_endpoint("llama"), None);
+    let why = directory.account_refusal("llama").expect("a reason");
+    assert!(
+        why.contains("the app's own server is listening on port 8080"),
+        "{why}"
+    );
+    assert!(!why.contains("this project"), "{why}");
+    assert_eq!(
+        directory.account_endpoint("router"),
+        Some(endpoint("https", "openrouter.example", 443)),
+        "an Account elsewhere is still answered"
+    );
+
+    let counting = Arc::new(CountingStore {
+        inner: FakeSecretStore::with("llama", LLAMA_CANARY),
+        gets: AtomicUsize::new(0),
+    });
+    let kit = Kit::new(FakeTerminal::piped());
+    let ran = kit
+        .run_with(
+            &env,
+            &root,
+            &["test", "llama", "--model", "m"],
+            counting.clone(),
+        )
+        .await;
+    assert_ne!(ran.code, 0, "{}", ran.all());
+    assert!(
+        ran.all()
+            .contains("the app's own server is listening on port 8080"),
+        "{}",
+        ran.all()
+    );
+    assert_eq!(counting.gets.load(Ordering::SeqCst), 0, "no Keychain read");
+    assert!(kit.directories().is_empty(), "no egress client is built");
+    assert!(kit.egress.requests().is_empty(), "nothing sent");
+}
+
+/// Story 2.2 review (2): an `account_added` note confirms an Account only
+/// when the owner confirmed it (`Actor::Human`) on an intent of
+/// `models/accounts.yaml`. The same note written by a System actor, or
+/// carried by another file's History entry (`company.yaml`), does not; the
+/// control, the owner on the Accounts file's own intent, does.
+#[tokio::test]
+async fn a_note_by_a_system_actor_or_with_another_files_entry_does_not_confirm() {
+    use am_domain::{AuditNote, NewIntent};
+    use sha2::Digest;
+    let system = || Actor::System {
+        component: "engine".into(),
+    };
+    let sha = |b: &[u8]| hex::encode(sha2::Sha256::digest(b));
+    let note = AuditNote {
+        action: "config.widened".into(),
+        target: "router".into(),
+        args: [
+            ("kind", "account_added"),
+            ("file", ACCOUNTS_FILE),
+            ("account", "router"),
+            ("provider", "openai-compatible"),
+            ("scheme", "https"),
+            ("host", "openrouter.example"),
+            ("port", "443"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect(),
+    };
+    let created = |file: &str, after: &[u8], audit: Vec<AuditNote>| NewIntent {
+        file: file.into(),
+        kind: HistoryKind::Create,
+        ref_entry: None,
+        before_sha256: sha(b""),
+        after_sha256: sha(after),
+        before: Vec::new(),
+        after: after.to_vec(),
+        diff: String::new(),
+        audit,
+    };
+    for (case, confirms) in [
+        ("the owner, on the Accounts file's intent", true),
+        ("a System actor, on the Accounts file's intent", false),
+        ("the owner, on company.yaml's intent", false),
+    ] {
+        let env = env();
+        let root = env.usual(&[(ACCOUNTS_FILE, four_kinds())]);
+        let bytes = std::fs::read(root.join(ACCOUNTS_FILE)).unwrap();
+        {
+            let (store, _) = am_store::open_runtime(&env.layout(&root), "Test Mac".into()).unwrap();
+            let history = StoreConfigHistory::new(&store).unwrap();
+            let write = |actor: Actor, intent: NewIntent| {
+                let id = history.begin_intent(actor.clone(), intent).unwrap();
+                history.commit_entry(actor, id).unwrap();
+            };
+            match case {
+                c if c.starts_with("the owner, on the Accounts") => {
+                    write(owner(), created(ACCOUNTS_FILE, &bytes, vec![note.clone()]))
+                }
+                c if c.starts_with("a System actor") => {
+                    write(system(), created(ACCOUNTS_FILE, &bytes, vec![note.clone()]))
+                }
+                _ => {
+                    write(owner(), created(ACCOUNTS_FILE, &bytes, Vec::new()));
+                    write(
+                        owner(),
+                        created("company.yaml", b"x: 1\n", vec![note.clone()]),
+                    );
+                }
+            }
+        }
+        let directory = project_directory(&env, &root);
+        let answered = directory.account_endpoint("router");
+        if confirms {
+            assert_eq!(
+                answered,
+                Some(endpoint("https", "openrouter.example", 443)),
+                "{case}: {:?}",
+                directory.account_refusal("router")
+            );
+        } else {
+            assert_eq!(answered, None, "{case}");
+        }
+    }
+}
+
+/// Story 2.2 review (3): every running `agentic serve` records its port in
+/// one user-level folder under the app data dir (one owner-only file per
+/// process, named by its id), with or without a project, so a server for
+/// another project, or for none, protects this project's Accounts too. The
+/// directory refuses every recorded port to Accounts; a file whose process
+/// is not running is ignored and removed.
+#[tokio::test]
+async fn every_running_servers_port_is_refused_and_a_stale_record_removed() {
+    let env = env();
+    let root = four_kinds_added(&env).await;
+    let running = am_domain::runtime::serving_dir(&env.places.app_data);
+    std::fs::create_dir_all(&running).unwrap();
+    std::fs::write(running.join(std::process::id().to_string()), "8080\n").unwrap();
+    std::fs::write(
+        running.join(std::os::unix::process::parent_id().to_string()),
+        "3001\n",
+    )
+    .unwrap();
+    let stale = running.join("99999999");
+    std::fs::write(&stale, "9090\n").unwrap();
+
+    let directory = project_directory(&env, &root);
+    let mut ports = directory.own_ports();
+    ports.sort_unstable();
+    assert_eq!(ports, vec![3001, 8080], "the stale record is ignored");
+    assert!(!stale.exists(), "and removed");
+    assert_eq!(directory.account_endpoint("llama"), None);
+    let why = directory.account_refusal("llama").expect("a reason");
+    assert!(
+        why.contains("the app's own server is listening on port 8080"),
+        "{why}"
+    );
+    assert_eq!(
+        directory.account_endpoint("router"),
+        Some(endpoint("https", "openrouter.example", 443))
+    );
 }

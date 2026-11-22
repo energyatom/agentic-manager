@@ -12,10 +12,11 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use am_domain::{McpClient, UntrustedContent};
+use am_domain::net::{Caller, EgressDirectory, Endpoint};
+use am_domain::{EgressClient, HostPattern, McpClient, UntrustedContent};
 use am_mcp::{RmcpClient, StdioSpec};
-use am_net::{EgressPolicy, NetEgress};
-use am_testkit::FakeSecretStore;
+use am_net::NetEgress;
+use am_testkit::{CollectAudit, FakeEgress, FakeSecretStore};
 
 use super::live;
 
@@ -23,35 +24,105 @@ const FS_SERVER: &str = "@modelcontextprotocol/server-filesystem@2.4.0";
 const EVERYTHING_SERVER: &str = "@modelcontextprotocol/server-everything@2.3.1";
 const FIXTURE_TEXT: &str = "MCP fixture: the code word is HERON.\n";
 
-fn egress_with_port(port: u16) -> Arc<NetEgress> {
+/// The egress directory of the spike's MCP runs (story 2.2): one MCP server
+/// approved at `http://127.0.0.1:<port>/mcp`, or none; no seat, no Account.
+struct McpDirectory {
+    approved: Option<(String, u16)>,
+}
+
+impl EgressDirectory for McpDirectory {
+    fn seat_hosts(&self, _seat: &str) -> Option<Vec<HostPattern>> {
+        None
+    }
+    fn account_endpoint(&self, _account: &str) -> Option<Endpoint> {
+        None
+    }
+    fn mcp_endpoint(&self, server: &str) -> Option<Endpoint> {
+        let (id, port) = self.approved.as_ref()?;
+        (id == server).then(|| Endpoint {
+            scheme: "http".into(),
+            host: "127.0.0.1".into(),
+            port: *port,
+        })
+    }
+}
+
+/// The real egress client with `server` approved on `port`.
+fn egress_with_port(server: &str, port: u16) -> Arc<NetEgress> {
     Arc::new(NetEgress::new(
-        EgressPolicy {
-            loopback_ports: vec![port],
-            ..EgressPolicy::default()
-        },
+        Arc::new(McpDirectory {
+            approved: Some((server.into(), port)),
+        }),
         FakeSecretStore::new(),
-        None,
+        CollectAudit::new(),
     ))
 }
 
-/// MCP over HTTP goes through the egress client: a server on a loopback port
-/// that no Account allows is refused before any connection.
+/// MCP over HTTP goes through the egress client: a server the directory
+/// does not approve is refused before any connection, and the refusal is
+/// audited naming the server (story 2.2: no loopback port is open to any
+/// caller).
 #[tokio::test]
 async fn http_mcp_is_refused_by_egress_policy_off_the_allow_list() {
+    let audit = CollectAudit::new();
     let egress = Arc::new(NetEgress::new(
-        EgressPolicy::default(),
+        Arc::new(McpDirectory { approved: None }),
         FakeSecretStore::new(),
-        None,
+        audit.clone(),
     ));
     let err = RmcpClient::connect_http("everything", "http://127.0.0.1:3001/mcp", egress)
         .await
         .err()
         .expect("refused");
+    assert!(err.to_string().contains("request blocked"), "{err}");
+    let blocks: Vec<_> = audit
+        .events()
+        .into_iter()
+        .filter(|e| e.action == "egress.blocked")
+        .collect();
+    assert!(!blocks.is_empty(), "the refusal is audited");
     assert!(
-        err.to_string()
-            .contains("not an allowed local Account port"),
-        "{err}"
+        blocks
+            .iter()
+            .all(|e| e.args.get("server").map(String::as_str) == Some("everything")),
+        "{blocks:?}"
     );
+}
+
+/// Approved for another port: the server's own endpoint only.
+#[tokio::test]
+async fn http_mcp_is_refused_off_its_approved_port() {
+    let egress = egress_with_port("everything", 3002);
+    let err = RmcpClient::connect_http("everything", "http://127.0.0.1:3001/mcp", egress)
+        .await
+        .err()
+        .expect("refused");
+    assert!(err.to_string().contains("request blocked"), "{err}");
+}
+
+/// Every request of the MCP client over HTTP names its caller: the MCP
+/// server by its id (story 2.2, AD-12).
+#[tokio::test]
+async fn http_mcp_requests_name_the_server_as_their_caller() {
+    let egress = FakeEgress::new();
+    let _ = RmcpClient::connect_http(
+        "everything",
+        "http://127.0.0.1:3001/mcp",
+        egress.clone() as Arc<dyn EgressClient>,
+    )
+    .await;
+    let requests = egress.requests();
+    assert!(!requests.is_empty(), "the client tried to connect");
+    for req in &requests {
+        assert_eq!(
+            req.caller,
+            Some(Caller::McpServer {
+                server: "everything".into()
+            }),
+            "{}",
+            req.url
+        );
+    }
 }
 
 fn npx() -> Option<PathBuf> {
@@ -166,7 +237,7 @@ async fn live_streamable_http_everything_server() {
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
     let url = format!("http://127.0.0.1:{port}/mcp");
-    let client = RmcpClient::connect_http("everything", &url, egress_with_port(port))
+    let client = RmcpClient::connect_http("everything", &url, egress_with_port("everything", port))
         .await
         .unwrap();
     let tools = client.list_tools().await.unwrap();

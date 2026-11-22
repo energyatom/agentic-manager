@@ -295,6 +295,74 @@ impl Reader {
         Ok(found)
     }
 
+    /// Every entry of `action` on `target` that a committed config intent
+    /// wrote as one of its notes, oldest first: written right after that
+    /// intent's History entry (`config.edited`, `config.created`, …), in the
+    /// same transaction (the same `at`). Each comes with its actor (the
+    /// intent's) and the file of its History entry, so a caller can accept
+    /// only the owner's note on the right file. An entry put into the log
+    /// any other way is left out (story 2.2: the Account confirmation of
+    /// AD-15's Key use).
+    pub fn config_note_args(
+        &self,
+        action: &str,
+        target: &str,
+    ) -> Result<Vec<ConfigNote>, StoreError> {
+        migrations::refuse_newer(migrations::user_version(&self.conn)?)?;
+        const ENTRIES: [&str; 7] = [
+            "config.edited",
+            "config.undone",
+            "config.restored",
+            "config.outside_edit",
+            "config.migrated",
+            "config.created",
+            "config.reconciled",
+        ];
+        let text_args = |row: &Row| -> Result<BTreeMap<String, String>, StoreError> {
+            let mut args = BTreeMap::new();
+            if let Some(text) = &row.args
+                && let Value::Object(map) = stored_json("args", row.seq, text)?
+            {
+                for (key, value) in map {
+                    if let Value::String(value) = value {
+                        args.insert(key, value);
+                    }
+                }
+            }
+            Ok(args)
+        };
+        let mut found = Vec::new();
+        // The `at` and file of the History entry whose notes may follow.
+        let mut open: Option<(String, String)> = None;
+        each_row(&self.conn, |row| {
+            if ENTRIES.contains(&row.action.as_str()) {
+                let file = text_args(&row)?.remove("file").unwrap_or_default();
+                open = Some((row.at.clone(), file));
+                return Ok(());
+            }
+            let Some((_, file)) = open.clone().filter(|(at, _)| *at == row.at) else {
+                open = None;
+                return Ok(());
+            };
+            if row.action != action || row.target != target {
+                return Ok(());
+            }
+            let actor: Actor = serde_json::from_str(&row.actor).map_err(|e| {
+                StoreError::Invalid(format!(
+                    "audit entry {}: its actor cannot be read: {e}",
+                    row.seq
+                ))
+            })?;
+            found.push(ConfigNote {
+                actor,
+                file,
+                args: text_args(&row)?,
+            });
+            Ok(())
+        })?;
+        Ok(found)
+    }
+
     /// Recompute the stored chain; returns the first broken sequence number.
     pub fn verify_audit_chain(&self) -> Result<Option<i64>, StoreError> {
         let mut prev = GENESIS.to_string();
@@ -507,4 +575,15 @@ mod tests {
         };
         assert_eq!(b.to_string(), "line 2: is not JSON");
     }
+}
+
+/// A note a committed config intent wrote ([`Reader::config_note_args`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigNote {
+    /// Who confirmed the change: the intent's Actor.
+    pub actor: Actor,
+    /// The file of the History entry the note was written with.
+    pub file: String,
+    /// The note's text arguments by key.
+    pub args: BTreeMap<String, String>,
 }

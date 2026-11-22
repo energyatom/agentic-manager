@@ -63,12 +63,21 @@ impl OpenAiCompatProvider {
 
     /// LM Studio's reserved local Account.
     pub fn lm_studio(egress: Arc<dyn EgressClient>) -> Self {
-        Self::new(egress, "local-lmstudio", "http://127.0.0.1:1234/v1")
+        Self::reserved(egress, am_domain::net::LOCAL_LMSTUDIO)
     }
 
     /// Ollama's reserved local Account.
     pub fn ollama(egress: Arc<dyn EgressClient>) -> Self {
-        Self::new(egress, "local-ollama", "http://127.0.0.1:11434/v1")
+        Self::reserved(egress, am_domain::net::LOCAL_OLLAMA)
+    }
+
+    /// A reserved local Account at the endpoint am-domain defines for it,
+    /// under its OpenAI-compatible `/v1` path.
+    fn reserved(egress: Arc<dyn EgressClient>, id: &str) -> Self {
+        let base = am_domain::net::reserved_local_account(id)
+            .map(|e| format!("{e}/v1"))
+            .unwrap_or_default();
+        Self::new(egress, id, base)
     }
 
     pub fn with_auth(mut self, auth: AuthRef) -> Self {
@@ -373,10 +382,10 @@ impl LlmProvider for OpenAiCompatProvider {
                     ("accept".into(), "text/event-stream".into()),
                 ],
                 auth,
-                caller: Caller {
+                caller: Some(Caller::Account {
+                    account: account_id,
                     seat: None,
-                    account: Some(account_id),
-                },
+                }),
                 ..HttpRequest::post_json(url, body.to_string().into_bytes())
             };
             let Some(resp) = send_cancellable(&egress, req, &cancel).await? else {

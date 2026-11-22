@@ -36,6 +36,13 @@ pub const APP_DATA_NAME: &str = "agentic-manager";
 /// This Mac's random id, in the app data dir.
 pub const MAC_ID_FILE: &str = "mac-id";
 
+/// The folder, in the app data dir, where every running `agentic serve`
+/// records the port it listens on: one owner-only file per process, named
+/// by its process id (story 2.2, AD-12).
+pub fn serving_dir(app_data: &Path) -> PathBuf {
+    app_data.join("serving")
+}
+
 /// A project's id (UUIDv7), kept as `project_id` in `company.yaml`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ProjectId(Uuid);
@@ -173,6 +180,13 @@ impl RuntimeLayout {
 
     pub fn state_db(&self) -> PathBuf {
         self.dir.join("state.db")
+    }
+
+    /// The port `agentic serve` bound (owner-only, removed at exit): every
+    /// egress client of the project refuses it to Accounts and MCP servers
+    /// (AD-12, story 2.2).
+    pub fn serve_port(&self) -> PathBuf {
+        self.dir.join("serve.port")
     }
 
     /// `VACUUM INTO` copies taken before a migration; the three newest kept.

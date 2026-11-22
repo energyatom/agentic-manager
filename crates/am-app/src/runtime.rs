@@ -205,6 +205,71 @@ fn replace_file(path: &Path, bytes: &[u8]) -> Result<(), Refusal> {
     })
 }
 
+/// Records the port `agentic serve` bound in the runtime folder,
+/// owner-only (story 2.2, AD-12): every egress client built for the
+/// project reads it and refuses it to Accounts and MCP servers.
+pub fn record_serve_port(layout: &RuntimeLayout, port: u16) -> Result<(), Refusal> {
+    replace_file(&layout.serve_port(), format!("{port}\n").as_bytes())
+}
+
+/// Removes the recorded serving port (at `serve`'s exit).
+pub fn clear_serve_port(layout: &RuntimeLayout) {
+    let _ = std::fs::remove_file(layout.serve_port());
+}
+
+/// Records, owner-only, the port this `agentic serve` process listens on in
+/// the user-level folder of running servers
+/// ([`am_domain::runtime::serving_dir`]), named by its process id, with or
+/// without a project: every egress directory refuses every recorded port
+/// to Accounts and MCP servers (story 2.2, AD-12).
+pub fn record_serving(app_data: &Path, port: u16) -> Result<(), Refusal> {
+    let dir = am_domain::runtime::serving_dir(app_data);
+    ensure_private_dir(&dir)?;
+    replace_file(
+        &dir.join(std::process::id().to_string()),
+        format!("{port}\n").as_bytes(),
+    )
+}
+
+/// Removes this process's record of its port (at `serve`'s exit).
+pub fn clear_serving(app_data: &Path) {
+    let _ = std::fs::remove_file(
+        am_domain::runtime::serving_dir(app_data).join(std::process::id().to_string()),
+    );
+}
+
+/// The ports the running `agentic serve` processes recorded. A record whose
+/// process is not running is ignored and removed; anything that is not a
+/// process id holding a port is ignored.
+pub fn serving_ports(app_data: &Path) -> Vec<u16> {
+    let Ok(entries) = std::fs::read_dir(am_domain::runtime::serving_dir(app_data)) else {
+        return Vec::new();
+    };
+    let mut ports = Vec::new();
+    for entry in entries.flatten() {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|n| n.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        if !pid_alive(pid) {
+            let _ = std::fs::remove_file(entry.path());
+            continue;
+        }
+        if let Some(port) = std::fs::read_to_string(entry.path())
+            .ok()
+            .and_then(|t| t.trim().parse::<u16>().ok())
+        {
+            ports.push(port);
+        }
+    }
+    ports.sort_unstable();
+    ports.dedup();
+    ports
+}
+
 // ---------------------------------------------------------------- mac id
 
 /// This Mac's id from `<app data>/mac-id`: `None` when it was never minted.
@@ -926,6 +991,7 @@ pub fn open_project(
                     target: id.to_string(),
                     outcome,
                     hash: None,
+                    args: Default::default(),
                 },
             )
             .map_err(store_words)
