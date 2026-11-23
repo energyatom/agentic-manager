@@ -87,6 +87,13 @@ impl AppDataLayout {
         self.dir.join("serving")
     }
 
+    /// The per-launch CLI token of the `agentic serve` process `pid` (story
+    /// 3.2, AD-13): `serving/<pid>.token`, owner-only, beside its port
+    /// record, removed at a clean exit.
+    pub fn cli_token(&self, pid: u32) -> PathBuf {
+        self.serving_dir().join(format!("{pid}.token"))
+    }
+
     /// One project's `agentic accounts migrate` backups (story 2.13, AD-15
     /// *Migrate*): `backups/accounts-migrate/<project-id>/`, one copy of the
     /// old `models/accounts.yaml` and its manifest per run, never pruned.

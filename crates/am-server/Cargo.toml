@@ -1,6 +1,6 @@
 [package]
 name = "am-server"
-description = "Loopback HTTP/WebSocket server: Host, Origin, launch code, cookie and CSRF checks (AD-13, AD-14)."
+description = "Loopback HTTP/WebSocket server: Host, Origin, launch and pairing codes, cookie, CSRF and CLI token checks, run status and events (AD-13, AD-14, AD-15)."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -11,10 +11,14 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+am-domain.workspace = true
+am-api.workspace = true
+am-store.workspace = true
 axum.workspace = true
 tokio.workspace = true
 getrandom.workspace = true
 hex.workspace = true
+jiff.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true

@@ -186,7 +186,7 @@ pub(crate) fn private_options() -> std::fs::OpenOptions {
 }
 
 /// Writes `bytes` to `path` by an owner-only temp file and a rename.
-fn replace_file(path: &Path, bytes: &[u8]) -> Result<(), Refusal> {
+pub(crate) fn replace_file(path: &Path, bytes: &[u8]) -> Result<(), Refusal> {
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -250,8 +250,10 @@ pub fn clear_serving(app_data: &Path) {
 }
 
 /// The ports the running `agentic serve` processes recorded. A record whose
-/// process is not running is ignored and removed; anything that is not a
-/// process id holding a port is ignored.
+/// process is not running is ignored and removed, and so is a CLI token
+/// file (`<pid>.token`, story 3.2) whose process is not running; anything
+/// that is not a process id holding a port is ignored. `agentic serve`
+/// calls it at start to prune what a crashed server left.
 pub fn serving_ports(app_data: &Path) -> Vec<u16> {
     let Ok(entries) = std::fs::read_dir(AppDataLayout::new(app_data.to_path_buf()).serving_dir())
     else {
@@ -259,11 +261,20 @@ pub fn serving_ports(app_data: &Path) -> Vec<u16> {
     };
     let mut ports = Vec::new();
     for entry in entries.flatten() {
-        let Some(pid) = entry
-            .file_name()
-            .to_str()
-            .and_then(|n| n.parse::<u32>().ok())
-        else {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if let Some(pid) = name
+            .strip_suffix(".token")
+            .and_then(|p| p.parse::<u32>().ok())
+        {
+            if !pid_alive(pid) {
+                let _ = std::fs::remove_file(entry.path());
+            }
+            continue;
+        }
+        let Ok(pid) = name.parse::<u32>() else {
             continue;
         };
         if !pid_alive(pid) {

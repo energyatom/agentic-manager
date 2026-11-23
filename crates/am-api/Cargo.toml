@@ -1,6 +1,6 @@
 [package]
 name = "am-api"
-description = "API DTOs and events (AD-14). Empty in the spike."
+description = "API DTOs, events and the one error envelope (AD-14)."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -11,3 +11,5 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+serde.workspace = true
+serde_json.workspace = true

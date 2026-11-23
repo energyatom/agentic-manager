@@ -794,3 +794,172 @@ fn serve_reconciles_interrupted_config_writes_at_start() {
     assert!(entries.iter().any(|en| en.id == done), "{entries:?}");
     assert_eq!(std::fs::read(root.join("company.yaml")).unwrap(), new);
 }
+
+// ------------------------------------------------------------ 3.2
+
+/// The 8-character RFC 4648 base32 words of `text` (pairing codes).
+fn base32_words(text: &str) -> Vec<String> {
+    text.split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|w| {
+            w.len() == 8
+                && w.chars()
+                    .all(|c| c.is_ascii_uppercase() || ('2'..='7').contains(&c))
+        })
+        .map(str::to_string)
+        .collect()
+}
+
+impl Serve {
+    /// Waits (bounded) until a line matching `pred` has been seen.
+    fn wait_line(&mut self, what: &str, pred: impl Fn(&str) -> bool) -> String {
+        if let Some(l) = self.seen.iter().find(|l| pred(l)) {
+            return l.clone();
+        }
+        let deadline = Instant::now() + WAIT;
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match self.lines.recv_timeout(left) {
+                Ok(line) => {
+                    self.seen.push(line.clone());
+                    if pred(&line) {
+                        return line;
+                    }
+                }
+                Err(_) => panic!("no {what} line; output so far: {:?}", self.seen),
+            }
+        }
+    }
+
+    /// Waits (bounded) for the process to exit; its status.
+    fn wait_exit(&mut self) -> ExitStatus {
+        let deadline = Instant::now() + WAIT;
+        loop {
+            if let Some(s) = self.child.try_wait().unwrap() {
+                return s;
+            }
+            assert!(Instant::now() < deadline, "serve did not exit");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+}
+
+/// Story 3.2 review P2 (a): the real `agentic serve --no-browser` writes
+/// `serving/<pid>.token` (0600, 64 hex digits) and prints a pairing code
+/// and the token file's path, never the token's value.
+#[test]
+fn serve_writes_the_cli_token_owner_only_and_prints_a_pairing_code_and_its_path() {
+    let e = Env::new();
+    let root = e.valid("p");
+    let mut serve = e.serve(&root, &[]);
+    serve.wait_serving();
+    let token_file = am_domain::runtime::AppDataLayout::new(e.app_data()).cli_token(serve.pid());
+    let shown = token_file.display().to_string();
+    serve.wait_line("token path", |l| l.contains(&shown));
+    let code_line = serve.wait_line("pairing code", |l| {
+        l.contains("pairing code") && !base32_words(l).is_empty()
+    });
+    assert_eq!(base32_words(&code_line).len(), 1, "{code_line}");
+
+    assert_eq!(mode(&token_file), 0o600);
+    assert_eq!(mode(token_file.parent().unwrap()), 0o700);
+    let value = std::fs::read_to_string(&token_file)
+        .unwrap()
+        .trim()
+        .to_string();
+    assert_eq!(value.len(), 64);
+    assert!(value.chars().all(|c| c.is_ascii_hexdigit()));
+    // Give any late output a moment, then check none holds the value.
+    std::thread::sleep(Duration::from_millis(200));
+    while let Ok(l) = serve.lines.try_recv() {
+        serve.seen.push(l);
+    }
+    for l in &serve.seen {
+        assert!(!l.contains(&value), "the token value was printed: {l}");
+    }
+    serve.stop(&root);
+}
+
+/// Story 3.2 review P2 (b): SIGINT ends serve cleanly; the token file and
+/// both port records (the user-level one and the project's) are gone.
+#[test]
+fn sigint_stops_serve_and_removes_the_token_and_the_port_records() {
+    let e = Env::new();
+    let root = e.valid("p");
+    let mut serve = e.serve(&root, &[]);
+    serve.wait_serving();
+    let pid = serve.pid();
+    let app = am_domain::runtime::AppDataLayout::new(e.app_data());
+    let token_file = app.cli_token(pid);
+    let record = app.serving_dir().join(pid.to_string());
+    let layout = e.layout(&root);
+    serve.wait_line("pairing code", |l| {
+        l.contains("pairing code") && !base32_words(l).is_empty()
+    });
+    assert!(token_file.exists() && record.exists() && layout.serve_port().exists());
+
+    kill(pid, "-INT");
+    let status = serve.wait_exit();
+    assert!(status.success(), "{status:?} {:?}", serve.seen);
+    assert!(!token_file.exists(), "the token file is removed at exit");
+    assert!(!record.exists(), "the user-level port record is removed");
+    assert!(
+        !layout.serve_port().exists(),
+        "the project's port record is removed"
+    );
+}
+
+/// Story 3.2 review P2 (c): with the app data dir at 0755, serve exits
+/// non-zero naming the `chmod`, and nothing is created in `serving/`.
+#[test]
+fn a_loose_app_data_dir_stops_serve_before_anything_is_written() {
+    let e = Env::new();
+    let root = e.valid("p");
+    let app_data = e.app_data();
+    std::fs::create_dir_all(&app_data).unwrap();
+    std::fs::set_permissions(&app_data, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let (status, out, err) = e.serve_to_exit(&root, &[]);
+    assert!(!status.success(), "{out}{err}");
+    assert!(
+        err.contains(&format!("chmod 700 {}", app_data.display())),
+        "{err}"
+    );
+    assert!(!out.contains("serving on"), "{out}");
+    let serving = am_domain::runtime::AppDataLayout::new(app_data).serving_dir();
+    let created: Vec<String> = if serving.exists() {
+        names(&serving)
+    } else {
+        Vec::new()
+    };
+    assert!(created.is_empty(), "written to serving/: {created:?}");
+}
+
+/// Story 3.2 review P3: a token file left by a crashed serve
+/// (`serving/<dead pid>.token`) is gone after a serve start; a live
+/// process's token is kept.
+#[test]
+fn a_serve_start_prunes_a_dead_process_token_file() {
+    let e = Env::new();
+    let root = e.valid("p");
+    let serving = am_domain::runtime::AppDataLayout::new(e.app_data()).serving_dir();
+    std::fs::create_dir_all(&serving).unwrap();
+    for p in [e.app_data(), serving.clone()] {
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let write = |name: String| {
+        let p = serving.join(name);
+        std::fs::write(&p, format!("{}\n", "0".repeat(64))).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600)).unwrap();
+        p
+    };
+    let dead = write("99999999.token".to_string());
+    let live = write(format!("{}.token", std::process::id()));
+
+    let mut serve = e.serve(&root, &[]);
+    serve.wait_serving();
+    serve.wait_line("pairing code", |l| {
+        l.contains("pairing code") && !base32_words(l).is_empty()
+    });
+    assert!(!dead.exists(), "the dead process's token file is pruned");
+    assert!(live.exists(), "a live process's token file is kept");
+    serve.stop(&root);
+}
