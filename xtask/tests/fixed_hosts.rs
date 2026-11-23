@@ -200,3 +200,118 @@ fn a_placeholder_scheme_still_names_the_host() {
         assert!(err.contains("telemetry.example.com"), "{err}");
     }
 }
+
+/// Story 3.3 review patch round 1 (P4): a C-string literal never hides a
+/// host. A host after a raw C string that ends in a backslash, a host
+/// inside a raw C string that holds quotes, and a host in a C string are
+/// all found; a literal that never ends fails the scan closed.
+#[test]
+fn a_host_after_or_inside_a_c_string_is_found() {
+    for (what, source) in [
+        (
+            "after a raw C string ending in a backslash",
+            format!(
+                "{}\npub const SINK: &str = \"https://telemetry.example.com/v1\";\n",
+                r##"pub const S: &core::ffi::CStr = cr#"\"#;"##
+            ),
+        ),
+        (
+            "inside a raw C string holding quotes",
+            format!(
+                "{}\n",
+                r##"pub const S: &core::ffi::CStr = cr#"see "https://telemetry.example.com" now"#;"##
+            ),
+        ),
+        (
+            "in a C string",
+            "pub const S: &core::ffi::CStr = c\"https://telemetry.example.com\";\n".to_string(),
+        ),
+    ] {
+        let tmp = tempfile::tempdir().unwrap();
+        write(tmp.path(), "crates/x/src/report.rs", &source);
+        let out = scan(tmp.path());
+        let err = stderr(&out);
+        assert!(!out.status.success(), "{what}: must fail: {err}");
+        assert!(
+            err.contains("telemetry.example.com"),
+            "{what}: names the host: {err}"
+        );
+    }
+
+    // Literals that never end: each runs to the end of the file (a raw C
+    // string with no closing `"#`, a C string with no closing quote).
+    for (what, source) in [
+        (
+            "an unterminated raw C string",
+            format!(
+                "{}\npub const T: &str = \"https://telemetry.example.com\";\n",
+                r##"pub const S: &core::ffi::CStr = cr#"never closed;"##
+            ),
+        ),
+        (
+            "an unterminated C string",
+            "pub const S: &core::ffi::CStr = c\"never closed; see https://telemetry.example.com/v1\npub fn f() {}\n"
+                .to_string(),
+        ),
+    ] {
+        let tmp = tempfile::tempdir().unwrap();
+        write(tmp.path(), "crates/x/src/report.rs", &source);
+        let out = scan(tmp.path());
+        let err = stderr(&out);
+        assert!(!out.status.success(), "{what}: must fail: {err}");
+        assert!(err.contains("crates/x/src/report.rs"), "{what}: {err}");
+    }
+}
+
+/// Story 3.3 review patch round 2 (R1): a shebang first line hides no
+/// host after it; a host after an inner attribute on line 1 is still found.
+#[test]
+fn a_shebang_hides_no_host() {
+    let tmp = tempfile::tempdir().unwrap();
+    write(
+        tmp.path(),
+        "crates/am-app/src/hide.rs",
+        "#!/x \"\npub const H: &str = \"evil.example.com\"; // \"\npub fn u() {} // \"\n",
+    );
+    let out = scan(tmp.path());
+    let err = stderr(&out);
+    assert!(!out.status.success(), "after a shebang: must fail: {err}");
+    assert!(err.contains("evil.example.com"), "names the host: {err}");
+
+    let tmp = tempfile::tempdir().unwrap();
+    write(
+        tmp.path(),
+        "crates/am-app/src/attr.rs",
+        "#! [forbid(unsafe_code)]\npub const H: &str = \"https://telemetry.example.com\";\n",
+    );
+    let out = scan(tmp.path());
+    let err = stderr(&out);
+    assert!(!out.status.success(), "after an inner attribute: {err}");
+    assert!(err.contains("telemetry.example.com"), "{err}");
+}
+
+/// Story 3.3 review patch round 2 (R8): valid code where a field or a
+/// binding named `https` or `http` is followed by a `//` comment
+/// (`Bar { https:// note⏎ 443 }`) is not a finding; the scan fails closed
+/// only on a literal that really never ends.
+#[test]
+fn a_scheme_like_field_before_a_comment_is_no_finding() {
+    let tmp = tempfile::tempdir().unwrap();
+    write(
+        tmp.path(),
+        "crates/am-app/src/nospace.rs",
+        "struct Bar { https: u16 }\nfn b() -> Bar { Bar { https:// note\n 443 } }\nfn c() { let http:// typed\n u8 = 0; let _ = http; }\n",
+    );
+    write(
+        tmp.path(),
+        "crates/am-app/src/space.rs",
+        "struct Foo { https: u16 }\nfn a() -> Foo { Foo { https: // note\n 443 } }\n",
+    );
+    let out = scan(tmp.path());
+    assert!(
+        out.status.success(),
+        "valid code is not a finding: {}{}",
+        stdout(&out),
+        stderr(&out)
+    );
+}

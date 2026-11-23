@@ -1,7 +1,9 @@
-//! The release gate runs every file in `tests/trust/` (AD-33). Cargo does
-//! not discover files in a subfolder of `tests/`, so each one needs its own
-//! `[[test]]` target in am-e2e's Cargo.toml, named after the file. This test
-//! fails when a trust file has no such target, so none is silently skipped.
+//! The release gate runs every file in `tests/trust/` (AD-33) and, from
+//! story 3.3, in `tests/engine/` (AGENTS.md: the engine tests of the
+//! cross-department primitives). Cargo does not discover files in a
+//! subfolder of `tests/`, so each one needs its own `[[test]]` target in
+//! am-e2e's Cargo.toml, named after the file. These tests fail when a trust
+//! or engine file has no such target, so none is silently skipped.
 #![forbid(unsafe_code)]
 
 use std::collections::BTreeSet;
@@ -23,29 +25,49 @@ fn targets(manifest: &str) -> BTreeSet<(String, String)> {
         .collect()
 }
 
-#[test]
-fn trust_targets_listed() {
+/// The `.rs` files directly in `tests/<folder>/` that have no `[[test]]`
+/// target named after them with that path (subfolders, such as a shared
+/// `support/`, are not targets).
+fn missing_targets(folder: &str) -> Vec<String> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let manifest = std::fs::read_to_string(root.join("Cargo.toml")).unwrap();
     let listed = targets(&manifest);
-    let mut files: Vec<String> = std::fs::read_dir(root.join("tests/trust"))
+    let mut files: Vec<String> = std::fs::read_dir(root.join("tests").join(folder))
         .unwrap()
-        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .map(|e| e.unwrap())
+        .filter(|e| e.file_type().unwrap().is_file())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
         .filter(|n| n.ends_with(".rs"))
         .collect();
     files.sort();
-    assert!(!files.is_empty(), "tests/trust/ has no test files");
-    let missing: Vec<String> = files
+    assert!(!files.is_empty(), "tests/{folder}/ has no test files");
+    files
         .iter()
         .filter(|f| {
             let name = f.trim_end_matches(".rs").to_string();
-            !listed.contains(&(name, format!("tests/trust/{f}")))
+            !listed.contains(&(name, format!("tests/{folder}/{f}")))
         })
         .cloned()
-        .collect();
+        .collect()
+}
+
+#[test]
+fn trust_targets_listed() {
+    let missing = missing_targets("trust");
     assert!(
         missing.is_empty(),
         "add a [[test]] target (name = the file stem, path = \"tests/trust/<file>\") to crates/am-e2e/Cargo.toml for: {missing:?}"
+    );
+}
+
+/// Story 3.3: every file in `tests/engine/` has its target, as the trust
+/// files do.
+#[test]
+fn engine_targets_listed() {
+    let missing = missing_targets("engine");
+    assert!(
+        missing.is_empty(),
+        "add a [[test]] target (name = the file stem, path = \"tests/engine/<file>\") to crates/am-e2e/Cargo.toml for: {missing:?}"
     );
 }
 

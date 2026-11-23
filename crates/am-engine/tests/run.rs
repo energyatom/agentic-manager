@@ -12,6 +12,8 @@
 //! am_engine::run::StepPlan { key: String, system: Vec<Instruction>, instruction: Instruction,
 //!                            model: String, max_output_tokens: u32,
 //!                            provider: Arc<dyn LlmProvider> }
+//!     (story 3.3 adds seat: String, inputs: Vec<UntrustedData>,
+//!      hand_off: HandOff, limits: Limits; see tests/loop_caps.rs)
 //! am_engine::run::run_plan(store: &Store, started_by: Actor, origin: &str, plan: &RunPlan,
 //!                          cancel: CancellationToken) -> Result<outcome, error>
 //!     outcome { run_id: String, status: String, reason: Option<String> }
@@ -37,9 +39,9 @@ use std::sync::{Arc, Mutex};
 
 use am_domain::{
     Actor, BoxFuture, CancelSignal, ChatOutcome, ChatRequest, EventSink, Instruction, LlmProvider,
-    Message, ModelCapabilities, Part, ProviderError, Role, StopReason, Usage,
+    Message, ModelCapabilities, Part, ProviderError, Role, StopReason, Taint, TrustedInput, Usage,
 };
-use am_engine::run::{RunError, RunPlan, StepPlan, run_plan};
+use am_engine::run::{HandOff, Limits, RunError, RunPlan, StepPlan, run_plan};
 use am_store::{CallRow, LedgerRow, Reader, RunRow, StepRow, Store, WriteCommand, Writer};
 use am_testkit::{FakeLlm, ScriptedTurn};
 use tokio_util::sync::CancellationToken;
@@ -80,10 +82,16 @@ fn step(
 ) -> StepPlan {
     StepPlan {
         key: key.into(),
+        // Story 3.3: the step's seat (a tool call's `Actor::Seat`), its
+        // plan inputs, its hand-off and its loop caps; here the defaults.
+        seat: format!("seat-{key}"),
         system: vec![Instruction::authored(format!(
             "You are the seat of step {key}."
         ))],
         instruction: Instruction::authored(format!("Do the work of step {key}.")),
+        inputs: vec![],
+        hand_off: HandOff::Next,
+        limits: Limits::default(),
         model: model.into(),
         max_output_tokens,
         provider,
@@ -401,10 +409,12 @@ async fn every_transition_is_committed_before_the_provider_is_called() {
 }
 
 /// Two steps: each runs in order with its own provider, system
-/// instructions, instruction, model and output limit; the second step's
-/// request holds nothing of the first step's output (no prompt assembly
-/// here); when the second provider is called the first step has finished
-/// and its call is settled.
+/// instructions, instruction, model and output limit; when the second
+/// provider is called the first step has finished and its call is settled.
+/// Story 3.3 (matrix row 2, Question 4 (a)) supersedes 3.1's "holds nothing
+/// of the first step's output": by `next`, the second request holds the
+/// first step's output as one trusted input labelled `step:gather@1`,
+/// after its instruction (the first step is untainted).
 #[tokio::test]
 async fn two_steps_run_in_order_each_with_its_own_request() {
     let p = project();
@@ -423,7 +433,15 @@ async fn two_steps_run_in_order_each_with_its_own_request() {
 
     assert_eq!(outcome.status, "succeeded");
     assert_eq!(first.requests(), vec![request_of(&plan.steps[0])]);
-    assert_eq!(second.requests(), vec![request_of(&plan.steps[1])]);
+    let mut after_first = request_of(&plan.steps[1]);
+    after_first.messages[0]
+        .parts
+        .push(TrustedInput::from_step_output(
+            "step:gather@1",
+            "first out",
+            Taint::Clean,
+        ));
+    assert_eq!(second.requests(), vec![after_first]);
 
     let seen = second.seen();
     assert_eq!(seen.len(), 1);

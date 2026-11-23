@@ -11,7 +11,7 @@
 
 use std::path::{Path, PathBuf};
 
-use am_domain::{Actor, SecretStore, Usage};
+use am_domain::{Actor, SecretStore, Taint, Usage};
 use am_store::{OpenReport, Store, StoreError, TriggerRow, WriteCommand, verify_jsonl};
 use am_testkit::FakeSecretStore;
 use rusqlite::Connection;
@@ -81,6 +81,9 @@ fn populated(root: &Path) -> Store {
             call_seq: 1,
             reserved_micro_usd: 5000,
             rate_snapshot: "rates-1".into(),
+            // Story 3.3: the attempt's taint, raised (never lowered) with
+            // the reservation (AD-10).
+            taint: Taint::Clean,
         },
     )
     .unwrap();

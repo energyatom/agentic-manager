@@ -56,7 +56,8 @@ use am_config::ModelRef;
 use am_domain::runtime::open_marker;
 use am_domain::{
     BoxFuture, CancelSignal, ChatOutcome, ChatRequest, EventSink, LlmProvider, MacId, Message,
-    ModelCapabilities, Part, ProviderError, Role, RuntimeLayout, StopReason, Usage,
+    ModelCapabilities, Part, ProviderError, Role, RuntimeLayout, StopReason, Taint, TrustedInput,
+    Usage,
 };
 use am_store::{CallRow, Reader, RunRow, StepRow};
 use am_testkit::{FakeLlm, FakeProjectIdentity, FakeTerminal, ScriptedTurn};
@@ -816,8 +817,23 @@ async fn two_steps_run_in_order_each_with_its_own_seat_and_model() {
         "List the items added since the last run.",
         4096,
     );
+    // Story 3.3 (matrix row 2, Question 4 (a)): by `next`, the second step
+    // also receives the first step's output, as one trusted input after its
+    // instruction (3.1 sent the instruction alone).
+    let mut second_request = second.requests()[0].clone();
+    let input = second_request.messages[0].parts.pop();
+    assert_eq!(
+        input,
+        Some(TrustedInput::from_step_output(
+            "step:gather@1",
+            "the new items",
+            Taint::Clean
+        )),
+        "{:?}",
+        second.requests()[0]
+    );
     assert_request(
-        &second.requests()[0],
+        &second_request,
         "example-small",
         &seat_instructions(&root, "beta"),
         "Write the summary.",
@@ -1809,4 +1825,181 @@ fn the_binary_refuses_run_with_piped_stdin_and_status_needs_no_terminal() {
     let ran = agentic(&["status"], "");
     assert_eq!(ran.code, 0, "{}", ran.all());
     assert!(ran.out.to_lowercase().contains("no runs"), "{}", ran.all());
+}
+
+// ------------------------------------------------------------------ story 3.3
+//
+// Epic 3 story 3: `agentic status` lists every step attempt and a waiting
+// step (matrix rows 8 and 27), and the run-graph keys stay refused by
+// `agentic run` (row 30), on stream copies of `fixtures/projects/hand-offs`
+// (all its model seats on `local-lmstudio`; the `owner` seat has no model).
+
+/// Every line under a run's status block that names step `key` as a word.
+fn step_lines<'a>(block: &'a [String], key: &str) -> Vec<&'a str> {
+    block[1..]
+        .iter()
+        .filter(|l| l.split_whitespace().any(|w| w.trim_matches(':') == key))
+        .map(String::as_str)
+        .collect()
+}
+
+/// Rows 8 and 27: after a loop-back run of `relay` and a run of `gated`
+/// that waits at its gate, `agentic status` lists, under the first run,
+/// every attempt of each step (`attempt 1`, `attempt 2`), the producing
+/// step's first attempt `looped_back`; and under the second, the run
+/// `running`, the gate step `waiting_human` and the step after it `queued`.
+/// `agentic run gated` said `waiting_human` and exited 0; status reads
+/// without the lock.
+#[tokio::test]
+async fn status_lists_attempts_and_a_waiting_step() {
+    let env = env();
+    let root = env.copy_of("hand-offs");
+    let relay = Kit::local(Arc::new(FakeLlm::new(vec![
+        ScriptedTurn::text("version one"),
+        ScriptedTurn::text("edited one"),
+        ScriptedTurn::text(r#"{"reasons":["tighten the opening"]}"#),
+        ScriptedTurn::text("version two"),
+        ScriptedTurn::text("edited two"),
+        ScriptedTurn::text(r#"{"reasons":[]}"#),
+    ])))
+    .run(&env, &root, &["relay"])
+    .await;
+    assert_eq!(relay.code, 0, "{}", relay.all());
+    let (relay_id, status) = relay.run_line();
+    assert_eq!(status, "succeeded");
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    let gated = Kit::local(fake(ScriptedTurn::text("the version to approve")))
+        .run(&env, &root, &["gated"])
+        .await;
+    assert_eq!(gated.code, 0, "waiting is not failing: {}", gated.all());
+    let (gated_id, status) = gated.run_line();
+    assert_eq!(status, "waiting_human");
+
+    let ran = status_of(&env.places, &root);
+
+    assert_eq!(ran.code, 0, "{}", ran.all());
+    let ids = [relay_id.clone(), gated_id.clone()];
+    let block = status_block(&ran.out, &relay_id, &ids);
+    assert!(block[0].contains("succeeded"), "{block:#?}");
+    for key in ["draft", "edit", "check"] {
+        let lines = step_lines(&block, key);
+        assert_eq!(lines.len(), 2, "{key}: two attempts: {block:#?}");
+        assert!(lines[0].contains("attempt 1"), "{key}: {block:#?}");
+        assert!(lines[1].contains("attempt 2"), "{key}: {block:#?}");
+    }
+    assert!(
+        step_lines(&block, "check")[0].contains("looped_back"),
+        "{block:#?}"
+    );
+    assert!(
+        step_lines(&block, "check")[1].contains("succeeded"),
+        "{block:#?}"
+    );
+
+    let block = status_block(&ran.out, &gated_id, &ids);
+    assert!(block[0].contains("gated"), "{block:#?}");
+    assert!(block[0].contains("running"), "{block:#?}");
+    assert!(
+        step_line(&block, "draft").contains("succeeded"),
+        "{block:#?}"
+    );
+    assert!(
+        step_line(&block, "approve").contains("waiting_human"),
+        "{block:#?}"
+    );
+    assert!(
+        step_line(&block, "publish").contains("queued"),
+        "{block:#?}"
+    );
+    env.assert_closed(&root);
+}
+
+/// Row 30: a step that declares a run-graph key (`handoff`, `review`,
+/// `seats` or `join`; AD-40..AD-42) is still refused by `agentic run` as in
+/// 3.1, before any run row and before any provider is asked for. Green on
+/// arrival (a regression guard).
+#[tokio::test]
+async fn run_graph_keys_are_still_refused() {
+    for (key, lines) in [
+        (
+            "handoff",
+            "    seat: alpha\n    handoff:\n      to: core/hello/check\n      payload: document:note\n",
+        ),
+        (
+            "review",
+            "    seat: alpha\n    review:\n      seat: alpha\n      max_returns: 2\n",
+        ),
+        ("seats", "    seats:\n      - alpha\n"),
+        ("join", "    seat: alpha\n    join: all\n"),
+    ] {
+        let env = env();
+        let root = env.copy_of("one-step");
+        write(
+            &root,
+            "workflows/hello.yaml",
+            &format!(
+                "schema_version: 2\nname: Hello\nteam: core\nsteps:\n  - id: check\n    instruction: Say hello in one line.\n{lines}"
+            ),
+        );
+        let llm = fake(ScriptedTurn::text("never"));
+        let kit = Kit::local(llm.clone());
+
+        let ran = kit.run(&env, &root, &["hello"]).await;
+
+        assert_eq!(ran.code, 1, "{key}: {}", ran.all());
+        assert!(
+            ran.err.contains(&format!("`{key}`")),
+            "{key}: names the key: {}",
+            ran.all()
+        );
+        assert!(env.runs(&root).is_empty(), "{key}: no run row");
+        assert!(kit.asked().is_empty() && llm.calls() == 0, "{key}");
+    }
+}
+
+// ------------------------------------------------------- review round 1
+//
+// Story 3.3 review patch round 1 (coordinator's triage, 2026-11-23): P15.
+
+/// P15: a tool name is the model's choice, so `agentic run` never prints
+/// it raw: with control characters (an escape sequence, a bell, a
+/// newline), 10 KB long, or a plain unknown name, the run fails in words
+/// that hold no control character (beyond the line ends), no part of the
+/// raw name and nothing near its length.
+#[tokio::test]
+async fn a_tool_name_is_never_printed_raw() {
+    let long = "x".repeat(10 * 1024);
+    let cases: [(&str, String, String); 3] = [
+        (
+            "control characters",
+            "zq9\u{1b}[2J\u{7}wipe\nname".to_string(),
+            "zq9".to_string(),
+        ),
+        ("10 KB", long.clone(), "x".repeat(64)),
+        (
+            "unknown",
+            "exfiltrate_every_key".to_string(),
+            "exfiltrate_every_key".to_string(),
+        ),
+    ];
+    for (what, name, marker) in cases {
+        let env = env();
+        let root = env.copy_of("one-step");
+        let llm = fake(ScriptedTurn::text("").tool_call(&name, "{}"));
+
+        let ran = Kit::local(llm.clone()).run(&env, &root, &["hello"]).await;
+
+        assert_eq!(ran.code, 1, "{what}");
+        let said = ran.all();
+        assert!(!said.contains(&marker), "{what}: the raw name is printed");
+        assert!(
+            !said.chars().any(|c| c.is_control() && c != '\n'),
+            "{what}: a control character is printed"
+        );
+        assert!(said.len() < 4096, "{what}: {} bytes printed", said.len());
+        assert!(
+            said.to_lowercase().contains("tool"),
+            "{what}: still says why: {said:.300}"
+        );
+    }
 }

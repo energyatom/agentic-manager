@@ -110,6 +110,41 @@ path = "tests/trust/rule_15_permissions.rs"
 name = "rule_15_secrets"
 path = "tests/trust/rule_15_secrets.rs"
 
+# Story 3.3: taint through hand-offs, taint at rest and the two sources of
+# a TrustedInput (AD-10, amended 2026-11-23). Each file in tests/trust/ has
+# its target (`trust_targets_listed`).
+[[test]]
+name = "taint_handoff_chain"
+path = "tests/trust/taint_handoff_chain.rs"
+
+[[test]]
+name = "taint_at_rest"
+path = "tests/trust/taint_at_rest.rs"
+
+[[test]]
+name = "taint_trusted_input_sources"
+path = "tests/trust/taint_trusted_input_sources.rs"
+
+[[test]]
+name = "taint_trusted_input_refusals"
+path = "tests/trust/taint_trusted_input_refusals.rs"
+
+# Story 3.3: the engine's cross-step primitives (AD-36, AD-40..AD-44). The
+# release gate runs every file in tests/engine/ by directory, so each has a
+# target named after it (`engine_targets_listed`); the shared rig lives in
+# tests/engine/support/ (a folder, so not a target).
+[[test]]
+name = "handoff_next"
+path = "tests/engine/handoff_next.rs"
+
+[[test]]
+name = "handoff_loop_back"
+path = "tests/engine/handoff_loop_back.rs"
+
+[[test]]
+name = "handoff_gate"
+path = "tests/engine/handoff_gate.rs"
+
 [dev-dependencies]
 am-app.workspace = true
 # Story 3.2: the error envelope and the run and event DTOs (AD-14).
@@ -137,3 +172,7 @@ sha2.workspace = true
 hex.workspace = true
 # Story 3.2: a subscriber that captures log lines (rule_15_secrets).
 tracing.workspace = true
+# Story 3.3: the trait probes of taint_trusted_input_refusals (no
+# Deserialize) and the seat and proposal ids of an Actor.
+serde.workspace = true
+uuid.workspace = true

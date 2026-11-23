@@ -7,6 +7,8 @@
 //! - [`FakeEgress`]: an `EgressClient` that serves scripted ([`FakeResponse`]) or
 //!   recorded ([`FakeEgress::replay`], `fixtures/http/`) responses, records every
 //!   request it was asked to send and refuses an unrouted URL by name.
+//! - [`FixtureTool`]: the one `ToolRunner` (story 3.3), a read-class tool
+//!   with a fixed `UntrustedData` result, for the engine's loop tests.
 //! - [`FakeClock`]: a `Clock` that moves only when told (`set`, `advance`).
 //! - [`FakeSecretStore`]: an in-memory `SecretStore` for canary values.
 //! - [`CollectEvents`] (an `EventSink`) and [`CollectAudit`] (an `AuditSink`).
@@ -530,6 +532,65 @@ impl EventSink for CollectEvents {
 impl CollectEvents {
     pub fn events(&self) -> Vec<StreamEvent> {
         self.0.lock().unwrap().clone()
+    }
+}
+
+// ---------------------------------------------------------------- tools
+
+/// The one tool runner there is (story 3.3, owner condition 2): a
+/// read-class tool that returns a fixed text as `UntrustedData`, as every
+/// tool result is (AD-10). It lives here, in a dev-dependency, so the
+/// `agentic` binary never has a tool; the engine takes it only through
+/// `am_engine::run::run_plan_with_tools`, which shipped code never names
+/// (`cargo xtask seam-guard`). Its per-step limit is high (100), so only the
+/// story's caps refuse it.
+pub struct FixtureTool {
+    runs: AtomicUsize,
+}
+
+impl FixtureTool {
+    /// The tool's id, as a model asks for it.
+    pub const NAME: &str = "fixture_read";
+    /// The fixed text of every result.
+    pub const RESULT: &str = "The fixture tool read this fixed text.";
+
+    pub fn new() -> Arc<FixtureTool> {
+        Arc::new(FixtureTool {
+            runs: AtomicUsize::new(0),
+        })
+    }
+
+    /// How many calls ran.
+    pub fn calls(&self) -> usize {
+        self.runs.load(Ordering::SeqCst)
+    }
+}
+
+impl am_domain::ToolRunner for FixtureTool {
+    fn manifests(&self) -> Vec<am_domain::tool_manifest::ToolManifest> {
+        vec![am_domain::tool_manifest::ToolManifest {
+            id: FixtureTool::NAME.to_string(),
+            class: am_domain::tool_manifest::ActionClass::Read,
+            network: am_domain::tool_manifest::NetworkNeed::None,
+            max_uses_per_step: 100,
+        }]
+    }
+
+    fn run(
+        &self,
+        call: ToolCall,
+        _cancel: Arc<dyn CancelSignal>,
+    ) -> BoxFuture<Result<am_domain::UntrustedData, String>> {
+        self.runs.fetch_add(1, Ordering::SeqCst);
+        let result = if call.name == FixtureTool::NAME {
+            Ok(am_domain::UntrustedData::text(
+                format!("tool:{}", FixtureTool::NAME),
+                FixtureTool::RESULT,
+            ))
+        } else {
+            Err(format!("the fixture tool does not run `{}`", call.name))
+        };
+        Box::pin(async move { result })
     }
 }
 

@@ -20,8 +20,20 @@ jiff.workspace = true
 jiff-croner.workspace = true
 tracing.workspace = true
 thiserror.workspace = true
+# Story 3.3: a loop-back reads the producing step's final message as a JSON
+# object (AD-36), and a tool call's `Actor::Seat` names the run by its UUID
+# (AD-24). Both are workspace-pinned crates already in the graph.
+serde_json.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 am-testkit.workspace = true
 tempfile.workspace = true
-uuid.workspace = true
+# Story 3.3: the wall-clock cap runs on paused time (tests/loop_caps.rs;
+# xtask/tests/paused_time.rs needs it named here).
+tokio = { workspace = true, features = ["test-util"] }
+# Story 3.3 review round 1: the sha256 an unknown tool name is kept as (P15),
+# and a raw `started_at` moved back in a test of the wall-clock cap (P1).
+sha2.workspace = true
+hex.workspace = true
+rusqlite.workspace = true

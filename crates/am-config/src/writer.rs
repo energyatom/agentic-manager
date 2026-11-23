@@ -149,6 +149,13 @@ pub enum FailPoint {
 pub enum WriteError {
     #[error("refused: {file}: {reason}")]
     BadPath { file: String, reason: String },
+    /// Story 3.3, owner condition 3 (AD-15): an agent (a seat inside a
+    /// step, or the Assistant) has no config path; only the owner's own
+    /// commands write config, so a cap can never be raised by an agent.
+    #[error(
+        "refused: {actor} cannot change the project's config: only your own commands write config files (AD-15), and nothing was written"
+    )]
+    AgentWrite { actor: String },
     #[error("refused: {file} cannot be edited because {reason}; fix the file first")]
     NotEditable { file: String, reason: String },
     #[error("refused: {0}")]
@@ -446,6 +453,17 @@ impl ConfigWriter {
         }
     }
 
+    /// Story 3.3, owner condition 3 (AD-15): a write whose actor is a seat
+    /// or the Assistant is refused first, before any read, intent or write.
+    fn refuse_agent(actor: &Actor) -> Result<(), WriteError> {
+        match actor {
+            Actor::Seat { .. } | Actor::Assistant { .. } => Err(WriteError::AgentWrite {
+                actor: actor.describe(),
+            }),
+            Actor::Human { .. } | Actor::Import { .. } | Actor::System { .. } => Ok(()),
+        }
+    }
+
     fn serial(&self) -> Result<std::sync::MutexGuard<'_, ()>, WriteError> {
         self.serial
             .lock()
@@ -497,6 +515,7 @@ impl ConfigWriter {
         before_sha256: Option<&str>,
         audit: Vec<AuditNote>,
     ) -> Result<HistoryEntry, WriteError> {
+        Self::refuse_agent(&actor)?;
         let _one = self.serial()?;
         let (file, before, after) = self.edited(edit, before_sha256)?;
         self.step(
@@ -568,6 +587,7 @@ impl ConfigWriter {
     /// new file has an error it does not have now, and when the volume
     /// refuses hard links. Missing parent folders are created.
     pub fn create(&self, actor: Actor, create: ConfigCreate) -> Result<HistoryEntry, WriteError> {
+        Self::refuse_agent(&actor)?;
         let _one = self.serial()?;
         let file = create.file;
         let kind = self.plain_config_path(&file)?;
@@ -662,6 +682,7 @@ impl ConfigWriter {
         actor: Actor,
         assign: ConfigIdentityAssign,
     ) -> Result<HistoryEntry, WriteError> {
+        Self::refuse_agent(&actor)?;
         let _one = self.serial()?;
         let id = assign.project_id;
         if am_domain::ProjectId::parse(&id).is_none() {
@@ -809,6 +830,7 @@ impl ConfigWriter {
         before_sha256: &str,
         audit: Vec<AuditNote>,
     ) -> Result<HistoryEntry, WriteError> {
+        Self::refuse_agent(&actor)?;
         if !self.user {
             return Err(WriteError::BadEdit(
                 "only the writer of this Mac's Accounts file records a confirmation of an unchanged file".into(),
@@ -842,6 +864,7 @@ impl ConfigWriter {
     /// Writes entry `id`'s before-bytes back, as a new `undo` entry. Refused
     /// when the file no longer holds that entry's after-bytes.
     pub fn undo(&self, actor: Actor, id: &str) -> Result<HistoryEntry, WriteError> {
+        Self::refuse_agent(&actor)?;
         let _one = self.serial()?;
         let entry = self.entry(id)?;
         refuse_removal(&entry, "undo")?;
@@ -876,6 +899,7 @@ impl ConfigWriter {
 
     /// Writes entry `id`'s after-bytes back, as a new `restore` entry.
     pub fn restore(&self, actor: Actor, id: &str) -> Result<HistoryEntry, WriteError> {
+        Self::refuse_agent(&actor)?;
         let _one = self.serial()?;
         let entry = self.entry(id)?;
         refuse_removal(&entry, "restore")?;
@@ -1638,6 +1662,7 @@ impl ConfigWriter {
     /// Checks the project with `after` in place of `file`, then runs the
     /// intent, write and commit sequence.
     fn step(&self, actor: Actor, file: &str, change: Change) -> Result<HistoryEntry, WriteError> {
+        Self::refuse_agent(&actor)?;
         self.step_checks(file, &change.before, &change.after)?;
         self.write_step(actor, file, change)
     }
@@ -1680,6 +1705,7 @@ impl ConfigWriter {
         file: &str,
         change: Change,
     ) -> Result<HistoryEntry, WriteError> {
+        Self::refuse_agent(&actor)?;
         let Change {
             kind,
             ref_entry,

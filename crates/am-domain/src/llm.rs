@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use crate::content::{FileKind, Instruction, UntrustedContent, UntrustedData};
+use crate::content::{FileKind, Instruction, TrustedInput, UntrustedContent, UntrustedData};
 use crate::{BoxFuture, CancelSignal};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -34,6 +34,10 @@ pub struct ToolCall {
 pub enum Part {
     /// Trusted text (user role only).
     Instruction(Instruction),
+    /// A trusted input (AD-10, AD-27): a clean step's output or an owner's
+    /// note, with its label (user role only), after the step instruction and
+    /// outside the untrusted fence; never in the system position.
+    Trusted(TrustedInput),
     /// Fenced untrusted text or a native file part (user role only).
     Untrusted(UntrustedData),
     /// Text the model wrote earlier (assistant role only).

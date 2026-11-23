@@ -2,7 +2,9 @@
 //! (AD-20), the journaled run executor with resume (AD-8, AD-9), the
 //! scheduler loop (AD-18) and ToolGate's per-step tool limits (AD-11).
 //! Epic 3 story 1 adds [`run`]: the driver of a configured workflow's run,
-//! one model turn per step, on a plan of plain types.
+//! on a plan of plain types; story 3 makes each step attempt a bounded loop
+//! of model turns with its caps, and adds the `next`, `loop_back` and gate
+//! hand-offs, Inbox items and taint carrying (AD-10, AD-11, AD-28, AD-36).
 #![forbid(unsafe_code)]
 
 pub mod cancel;

@@ -1,13 +1,29 @@
 //! Content parts (AD-5, AD-10, AD-27).
 //!
-//! Prompt content is either an [`Instruction`] (config- or owner-authored) or
-//! [`UntrustedData`] (files, MCP results, web pages, ...). There is no conversion
-//! from `UntrustedData` to `Instruction`, and none may be added.
+//! Prompt content is one of three types (AD-10, amended 2026-11-23):
+//!
+//! - an [`Instruction`]: config- or owner-authored text (a seat's goal,
+//!   backstory and skills, a step's instruction);
+//! - a [`TrustedInput`]: text that is trusted although it is not config,
+//!   built only by am-engine through its two named constructors, from the
+//!   journaled output of a step run that was untainted when it wrote it, or
+//!   from an owner's note written under `Actor::Human`;
+//! - [`UntrustedData`]: files, MCP results, web pages, tool results, and
+//!   everything a tainted step wrote.
+//!
+//! There is no conversion from `UntrustedData` to `Instruction` or to
+//! `TrustedInput`, none from `TrustedInput` to `Instruction` or back, and
+//! none may be added. A step run is [`Taint::Tainted`] once any
+//! `UntrustedData` enters its request; its taint only ever rises.
 
 use serde::{Deserialize, Serialize};
 
+use crate::Actor;
+use crate::llm::Part;
+
 /// Trusted, config- or owner-authored text. Build it only from config files or
-/// the owner's own words, never from anything a tool, file or model returned.
+/// the owner's own words, never from anything a tool, file or model returned
+/// (a clean step's output is a [`TrustedInput`], never an `Instruction`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Instruction(String);
 
@@ -118,5 +134,137 @@ impl UntrustedData {
     }
     pub fn into_content(self) -> UntrustedContent {
         self.content
+    }
+}
+
+/// Whether a step run read untrusted content (AD-10). A step run is
+/// `Tainted` once any `UntrustedData` enters its request; the journal only
+/// ever raises it (`Clean < Tainted`), and anything a tainted step run
+/// writes is `UntrustedData` wherever it lands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Taint {
+    Clean,
+    Tainted,
+}
+
+impl Taint {
+    /// `Tainted` when `flag` is set (a journal column's 0 or 1).
+    pub fn of_flag(flag: bool) -> Taint {
+        if flag { Taint::Tainted } else { Taint::Clean }
+    }
+
+    pub fn is_tainted(self) -> bool {
+        self == Taint::Tainted
+    }
+
+    /// The higher of the two: taint only ever rises, so a clean value never
+    /// lowers a tainted one.
+    pub fn raise(self, other: Taint) -> Taint {
+        self.max(other)
+    }
+}
+
+/// Text that is trusted although it is not config (AD-10, amended
+/// 2026-11-23; AD-27, AD-36): a clean step run's journaled output (a `next`
+/// input, loop-back reasons) or an owner's note for one run's work. It is
+/// its own [`Part`] (`Part::Trusted`), rendered with its label in the user
+/// role, after the step instruction and outside the untrusted fence.
+///
+/// Its fields are private, it has no `Default` and no `Deserialize`, and no
+/// `From` or `TryFrom` joins it to [`Instruction`], [`UntrustedData`] or
+/// plain text, either way. Its only constructors are the two named ones,
+/// and only am-engine calls them (`cargo xtask check-deps`). A tainted
+/// producer's output never becomes one: the step-output constructor gives
+/// `UntrustedData` with the same label instead.
+///
+/// The allowed build:
+///
+/// ```
+/// use am_domain::{Part, Taint, TrustedInput};
+/// let p = TrustedInput::from_step_output("step:a@1", "text", Taint::Clean);
+/// assert!(matches!(p, Part::Trusted(_)));
+/// let q = TrustedInput::from_step_output("step:a@1", "text", Taint::Tainted);
+/// assert!(matches!(q, Part::Untrusted(_)));
+/// ```
+///
+/// No conversion from untrusted data:
+///
+/// ```compile_fail
+/// use am_domain::{TrustedInput, UntrustedData};
+/// let _t = TrustedInput::from(UntrustedData::text("x", "y"));
+/// ```
+///
+/// No conversion into an instruction:
+///
+/// ```compile_fail
+/// use am_domain::{Instruction, Part, Taint, TrustedInput};
+/// let Part::Trusted(t) = TrustedInput::from_step_output("step:a@1", "t", Taint::Clean) else { panic!() };
+/// let _i = Instruction::from(t);
+/// ```
+///
+/// No `Deserialize` (bounded on serde's trait; am-domain has no
+/// serde_json):
+///
+/// ```compile_fail
+/// fn deserializable<T: serde::de::DeserializeOwned>() {}
+/// deserializable::<am_domain::TrustedInput>();
+/// ```
+///
+/// while the same bound holds for an `Instruction`, so the refusal above
+/// is the missing impl, not the probe:
+///
+/// ```
+/// fn deserializable<T: serde::de::DeserializeOwned>() {}
+/// deserializable::<am_domain::Instruction>();
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrustedInput {
+    label: String,
+    text: String,
+}
+
+impl TrustedInput {
+    /// A step run's journaled output (or what the engine reads from it, such
+    /// as loop-back reasons) as an input to a later step, with `producer`
+    /// the producing step run's taint as committed in the journal: a
+    /// `Part::Trusted` when it is clean, `Part::Untrusted` with the same
+    /// label when it is tainted (AD-10 (a)). Only am-engine calls it.
+    pub fn from_step_output(
+        label: impl Into<String>,
+        text: impl Into<String>,
+        producer: Taint,
+    ) -> Part {
+        let (label, text) = (label.into(), text.into());
+        match producer {
+            Taint::Clean => Part::Trusted(TrustedInput { label, text }),
+            Taint::Tainted => Part::Untrusted(UntrustedData::text(label, text)),
+        }
+    }
+
+    /// An owner-authored note for one run's work (a Human return note at a
+    /// gate, story 3.4): `Some` only when `author` is `Actor::Human`. Owner
+    /// text that is config stays an [`Instruction`]. Only am-engine calls it.
+    pub fn from_owner_note(
+        label: impl Into<String>,
+        text: impl Into<String>,
+        author: &Actor,
+    ) -> Option<TrustedInput> {
+        match author {
+            Actor::Human { .. } => Some(TrustedInput {
+                label: label.into(),
+                text: text.into(),
+            }),
+            _ => None,
+        }
+    }
+
+    /// Where it came from, e.g. `step:<key>@<attempt>` or
+    /// `loop-back:<key>@<attempt>`.
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+
+    pub fn text(&self) -> &str {
+        &self.text
     }
 }

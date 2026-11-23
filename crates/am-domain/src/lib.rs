@@ -14,6 +14,7 @@ pub mod config_history;
 pub mod config_names;
 pub mod content;
 pub mod host;
+pub mod inbox;
 pub mod llm;
 pub mod mcp;
 pub mod net;
@@ -45,8 +46,11 @@ pub use config_history::{
     AuditNote, ConfigHistory, HistoryEntry, HistoryError, HistoryKind, NewIntent, PendingIntent,
 };
 pub use config_names::{CONFIG_NAMES, config_name_in, config_name_of, is_config_bearing};
-pub use content::{FileKind, FilePart, Instruction, UntrustedContent, UntrustedData};
+pub use content::{
+    FileKind, FilePart, Instruction, Taint, TrustedInput, UntrustedContent, UntrustedData,
+};
 pub use host::{HostPattern, HostPatternError};
+pub use inbox::{InboxKind, StepStatus};
 pub use llm::{
     ChatOutcome, ChatRequest, EventSink, LlmProvider, Message, ModelCapabilities, Part,
     ProviderError, Role, StopReason, StreamEvent, ToolCall, ToolSpec, Usage,
@@ -62,4 +66,5 @@ pub use runtime::{
 };
 pub use secrets::{SecretError, SecretStore, SecretString};
 pub use terminal::{Terminal, TerminalError};
+pub use tool_manifest::ToolRunner;
 pub use workspace::{Access, GrantRoot, PathError, WorkspacePath};

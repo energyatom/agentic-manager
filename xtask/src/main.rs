@@ -4,7 +4,9 @@
 //! `am_domain::RuntimeLayout`); story 2.2 adds `fixed-hosts` (AD-12: every
 //! fixed host of the shipped source is on one named list) and `seam-guard`
 //! (shipped code never names am-net's test-only constructor; story 3.2 adds
-//! am-server's test-only fixture route, `router_with_fixture`).
+//! am-server's test-only fixture route, `router_with_fixture`; story 3.3
+//! adds am-engine's tool seam, `run_plan_with_tools`, and `check-deps`'s
+//! call-site rule: only am-engine calls `TrustedInput`'s constructors).
 //! Later stories add `gen-types` and `bundle-services`. All three checks are
 //! offline; `just check` runs them.
 #![forbid(unsafe_code)]
@@ -22,7 +24,8 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 const USAGE: &str = "usage: cargo xtask <task> [options]
-  check-deps   [--metadata <cargo-metadata.json>]   AD-4 dependency matrix
+  check-deps   [--metadata <cargo-metadata.json>] [--root <dir>]
+                                                    AD-4 dependency matrix; AD-10 TrustedInput built only in am-engine
   denylist     [--root <dir>] [--list <file>]       AD-23 vocabulary scan
   check-forbid [--root <dir>]                       every crate forbids unsafe
   runtime-paths [--root <dir>]                      AD-32 runtime paths only in RuntimeLayout
@@ -43,7 +46,10 @@ fn main() -> ExitCode {
         }
     };
     let result = match task.as_str() {
-        "check-deps" => deps::run(opts.metadata.as_deref(), &repo_root()),
+        "check-deps" => deps::run(
+            opts.metadata.as_deref(),
+            &opts.root.clone().unwrap_or_else(repo_root),
+        ),
         "denylist" => {
             let root = opts.root.clone().unwrap_or_else(repo_root);
             let list = opts

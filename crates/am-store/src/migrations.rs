@@ -17,6 +17,13 @@
 //!   (`store.migrated`, `args` NULL) once `audit_log` exists, so a new
 //!   database's first step is audited too; both in the step's own
 //!   transaction. A failed step's error names the backup.
+//! - Story 3.3: a step may rebuild a table (SQLite's own procedure: create
+//!   the new table, copy, drop, rename), which foreign key enforcement
+//!   would refuse half-way. So the steps run with `foreign_keys` off and
+//!   each counts the broken references (`PRAGMA foreign_key_check`) before
+//!   and after its SQL, inside its transaction: a step that breaks one
+//!   fails and rolls back (one an older bug left broken does not count).
+//!   Enforcement is switched back on afterwards, also on error.
 
 use std::path::{Path, PathBuf};
 
@@ -32,6 +39,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0004_config_history.sql"),
     include_str!("../migrations/0005_config_intent_audit.sql"),
     include_str!("../migrations/0006_run_pin_and_times.sql"),
+    include_str!("../migrations/0007_steps_inputs_inbox.sql"),
 ];
 
 /// The schema version this binary knows.
@@ -172,7 +180,15 @@ fn step_in(
     stamp: Option<i32>,
 ) -> Result<(), StoreError> {
     let to = from + 1;
+    let broken_before = broken_references(tx)?;
     tx.execute_batch(sql)?;
+    let broken_after = broken_references(tx)?;
+    if broken_after > broken_before {
+        return Err(StoreError::Invalid(format!(
+            "the migration would leave {} more broken reference(s) between rows",
+            broken_after - broken_before
+        )));
+    }
     tx.pragma_update(None, "user_version", to)?;
     if let Some(id) = stamp {
         tx.pragma_update(None, "application_id", id)?;
@@ -206,6 +222,36 @@ fn step_in(
         }
     }
     Ok(())
+}
+
+/// How many foreign key references are broken (`PRAGMA
+/// foreign_key_check`). A step is checked against the count before it: it
+/// fails only on a reference it broke, so a row an older bug left broken
+/// never stops a migration (story 3.3, review P10).
+fn broken_references(conn: &Connection) -> Result<i64, StoreError> {
+    Ok(
+        conn.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| {
+            r.get(0)
+        })?,
+    )
+}
+
+/// Runs `f` with foreign key enforcement off (it cannot change inside a
+/// transaction, and a table rebuild needs it off), then puts it back as it
+/// was, whatever `f` returned.
+fn with_foreign_keys_off<T>(
+    conn: &mut Connection,
+    f: impl FnOnce(&mut Connection) -> Result<T, StoreError>,
+) -> Result<T, StoreError> {
+    let was_on = conn.pragma_query_value(None, "foreign_keys", |r| r.get::<_, i64>(0))? != 0;
+    if was_on {
+        conn.pragma_update(None, "foreign_keys", "OFF")?;
+    }
+    let out = f(conn);
+    if was_on {
+        conn.pragma_update(None, "foreign_keys", "ON")?;
+    }
+    out
 }
 
 /// What a new database's last creating step also commits (story 2.13: the
@@ -260,6 +306,20 @@ pub(crate) fn migrate_set(
 }
 
 fn migrate_with(
+    conn: &mut Connection,
+    backups: &Path,
+    migrations: &[&str],
+    prefix: &str,
+    stamp: Option<i32>,
+    on_create: Option<OnCreate<'_>>,
+) -> Result<OpenReport, StoreError> {
+    with_foreign_keys_off(conn, |conn| {
+        migrate_steps(conn, backups, migrations, prefix, stamp, on_create)
+    })
+}
+
+/// [`migrate_with`]'s steps, run with foreign keys off.
+fn migrate_steps(
     conn: &mut Connection,
     backups: &Path,
     migrations: &[&str],
@@ -423,14 +483,17 @@ pub(crate) fn database_at_version(path: &Path, version: i64) -> Result<(), Store
     crate::configure(&conn)?;
     let have = user_version(&conn)?;
     let upto = version.clamp(0, SCHEMA_VERSION);
-    for (index, sql) in MIGRATIONS
-        .iter()
-        .enumerate()
-        .take(upto as usize)
-        .skip(have.max(0) as usize)
-    {
-        apply_step(&mut conn, sql, index as i64, None, false, None, None)?;
-    }
+    with_foreign_keys_off(&mut conn, |conn| {
+        for (index, sql) in MIGRATIONS
+            .iter()
+            .enumerate()
+            .take(upto as usize)
+            .skip(have.max(0) as usize)
+        {
+            apply_step(conn, sql, index as i64, None, false, None, None)?;
+        }
+        Ok(())
+    })?;
     if version > SCHEMA_VERSION {
         conn.pragma_update(None, "user_version", version)?;
     }

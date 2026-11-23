@@ -1,0 +1,15 @@
+schema_version: 2
+name: Gated
+team: core
+description: A step, then a human gate, then a step that runs only after the gate is resolved.
+steps:
+  - id: draft
+    seat: first
+    instruction: Write the first version.
+  - id: approve
+    seat: owner
+    instruction: Approve or return the version.
+    gate: review
+  - id: publish
+    seat: second
+    instruction: Prepare the approved version.

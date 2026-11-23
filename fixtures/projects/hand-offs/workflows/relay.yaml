@@ -1,0 +1,15 @@
+schema_version: 2
+name: Relay
+team: core
+description: Three steps by next; the third loops back to the first with its reasons.
+steps:
+  - id: draft
+    seat: first
+    instruction: Write the first version.
+  - id: edit
+    seat: second
+    instruction: Edit the version you receive.
+  - id: check
+    seat: third
+    instruction: Check the edited version and list what to fix.
+    loop_back: { to: draft, reasons: reasons, max: 2 }

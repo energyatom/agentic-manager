@@ -27,6 +27,9 @@ pub fn run(root: &Path) -> Result<String, Failure> {
             let Ok(src) = std::fs::read_to_string(&path) else {
                 continue;
             };
+            if let Some(finding) = unterminated_finding(&rel(root, &path), &src) {
+                findings.push(finding);
+            }
             let code = strip_comments_and_strings(&src);
             if is_crate_root(dir, &path) && !forbids_unsafe(&code) {
                 findings.push(format!(
@@ -124,21 +127,58 @@ fn unsafe_lines(code: &str) -> Vec<usize> {
 }
 
 /// Blanks comments, string literals and char literals (keeping newlines), so
-/// only code remains for the keyword and attribute checks.
+/// only code remains for the keyword and attribute checks. Every Rust 2024
+/// literal prefix is read as a literal (`b"…"`, `c"…"`, `r#"…"#`,
+/// `br"…"`, `cr#"…"#`), so none hides the code after it (story 3.3, review
+/// P4).
 pub fn strip_comments_and_strings(src: &str) -> String {
     scan(src).0
 }
 
-/// Every string literal in `src` (normal, byte and raw), as (1-based line
-/// of its opening quote, its text between the quotes, escapes as written).
-/// Literals in comments are not code and are skipped.
+/// Every string literal in `src` (normal, byte, C and raw), as (1-based
+/// line of its opening quote, its text between the quotes, escapes as
+/// written). Literals in comments are not code and are skipped.
 pub fn string_literals(src: &str) -> Vec<(usize, String)> {
     scan(src).1
 }
 
-/// One pass over `src`: the code with comments and literals blanked, and
-/// the string literals found.
-fn scan(src: &str) -> (String, Vec<(usize, String)>) {
+/// The 1-based line where a string literal or a block comment opens that
+/// never ends, if one does. A scan that meets one fails closed: it cannot
+/// read the code after it (story 3.3, review P4).
+pub fn unterminated(src: &str) -> Option<usize> {
+    scan(src).2
+}
+
+/// The finding of a file whose literal or comment never ends, if it has
+/// one: every scan reports it instead of reading past it.
+pub fn unterminated_finding(name: &str, src: &str) -> Option<String> {
+    unterminated(src).map(|line| {
+        format!(
+            "{name}:{line}: a string literal or block comment opens here and never ends, so the scan cannot read the code after it (it fails closed); close it"
+        )
+    })
+}
+
+/// The length in chars of a shebang first line, as rustc reads it: a file
+/// that starts with `#!` not followed (after whitespace) by `[` begins with
+/// a line rustc discards; an inner attribute (`#![…]`, `#! […]`) is code
+/// (story 3.3, review R1).
+fn shebang_len(c: &[char]) -> usize {
+    if c.first() != Some(&'#') || c.get(1) != Some(&'!') {
+        return 0;
+    }
+    let next = c[2..].iter().find(|ch| !ch.is_whitespace());
+    if next == Some(&'[') {
+        return 0;
+    }
+    c.iter().position(|ch| *ch == '\n').unwrap_or(c.len())
+}
+
+/// One pass over `src`: the code with comments and literals blanked, the
+/// string literals found, and the line of a literal or comment that never
+/// ends. A shebang first line is blanked, as rustc discards it.
+fn scan(src: &str) -> (String, Vec<(usize, String)>, Option<usize>) {
+    let mut open: Option<usize> = None;
     let mut literals = Vec::new();
     let line_at = |out: &str| out.matches('\n').count() + 1;
     let c: Vec<char> = src.chars().collect();
@@ -147,7 +187,8 @@ fn scan(src: &str) -> (String, Vec<(usize, String)>) {
     let blank = |ch: char| if ch == '\n' { '\n' } else { ' ' };
     let ident_before = |i: usize| i > 0 && is_word(c[i - 1]);
     let mut out = String::with_capacity(src.len());
-    let mut i = 0;
+    let mut i = shebang_len(&c);
+    out.extend(std::iter::repeat_n(' ', i));
     while i < n {
         let ch = c[i];
         // Line comment.
@@ -160,6 +201,7 @@ fn scan(src: &str) -> (String, Vec<(usize, String)>) {
         }
         // Block comment (nested).
         if ch == '/' && at(i + 1) == '*' {
+            let line = line_at(&out);
             let mut depth = 0usize;
             while i < n {
                 if c[i] == '/' && at(i + 1) == '*' {
@@ -178,11 +220,14 @@ fn scan(src: &str) -> (String, Vec<(usize, String)>) {
                     i += 1;
                 }
             }
+            if depth > 0 {
+                open.get_or_insert(line);
+            }
             continue;
         }
-        // Raw (byte) string: r"..", r#".."#, br"..".
-        if (ch == 'r' || (ch == 'b' && at(i + 1) == 'r')) && !ident_before(i) {
-            let mut j = i + if ch == 'b' { 2 } else { 1 };
+        // Raw (byte, C) string: r"..", r#".."#, br"..", cr#".."#.
+        if (ch == 'r' || (matches!(ch, 'b' | 'c') && at(i + 1) == 'r')) && !ident_before(i) {
+            let mut j = i + if ch == 'r' { 1 } else { 2 };
             let mut hashes = 0;
             while at(j) == '#' {
                 hashes += 1;
@@ -200,6 +245,9 @@ fn scan(src: &str) -> (String, Vec<(usize, String)>) {
                     k += 1;
                 }
                 let k = k.min(n);
+                if end == n {
+                    open.get_or_insert(line_at(&out));
+                }
                 literals.push((line_at(&out), c[j + 1..end.min(n)].iter().collect()));
                 for &x in &c[i..k] {
                     out.push(blank(x));
@@ -208,10 +256,11 @@ fn scan(src: &str) -> (String, Vec<(usize, String)>) {
                 continue;
             }
         }
-        // Normal (byte) string.
+        // Normal (byte, C) string: the prefix is code, the quote opens it.
         if ch == '"' {
             let line = line_at(&out);
             let mut text = String::new();
+            let mut closed = false;
             out.push(' ');
             i += 1;
             while i < n {
@@ -229,9 +278,13 @@ fn scan(src: &str) -> (String, Vec<(usize, String)>) {
                 out.push(blank(c[i]));
                 i += 1;
                 if end {
+                    closed = true;
                     break;
                 }
                 text.push(c[i - 1]);
+            }
+            if !closed {
+                open.get_or_insert(line);
             }
             literals.push((line, text));
             continue;
@@ -259,7 +312,7 @@ fn scan(src: &str) -> (String, Vec<(usize, String)>) {
         out.push(ch);
         i += 1;
     }
-    (out, literals)
+    (out, literals, open)
 }
 
 #[cfg(test)]
@@ -285,6 +338,33 @@ mod tests {
                 (4, "three\\\"x".to_string())
             ]
         );
+    }
+
+    #[test]
+    fn c_and_raw_c_strings_are_literals_and_an_open_one_is_found() {
+        let src = "let a = cr#\"\\\"#; unsafe_after_a();\nlet b = cr\"\\\"; let c = c\"a\\\"b\";\nunsafe { x }\n";
+        let code = strip_comments_and_strings(src);
+        assert_eq!(unsafe_lines(&code), vec![3], "{code}");
+        assert_eq!(unterminated(src), None);
+        assert_eq!(
+            unterminated("let a = 1;\nlet s = \"never closed;\n"),
+            Some(2)
+        );
+        assert_eq!(unterminated("let s = cr#\"open\n"), Some(1));
+        assert_eq!(unterminated("/* open\n"), Some(1));
+        // A field named like a scheme before a comment is valid code.
+        assert_eq!(unterminated("let b = Bar { https:// note\n 443 };\n"), None);
+    }
+
+    #[test]
+    fn a_shebang_line_is_dropped_and_an_inner_attribute_is_code() {
+        let src = "#!/x \"\nunsafe { x } // \"\n";
+        let code = strip_comments_and_strings(src);
+        assert_eq!(unsafe_lines(&code), vec![2], "{code:?}");
+        assert_eq!(unterminated(src), None);
+        for attr in ["#![forbid(unsafe_code)]\n", "#! [forbid(unsafe_code)]\n"] {
+            assert!(forbids_unsafe(&strip_comments_and_strings(attr)), "{attr}");
+        }
     }
 
     #[test]

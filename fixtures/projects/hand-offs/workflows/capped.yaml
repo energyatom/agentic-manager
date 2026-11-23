@@ -1,0 +1,9 @@
+schema_version: 2
+name: Capped
+team: core
+description: One step with its loop caps set.
+steps:
+  - id: work
+    seat: first
+    instruction: Do the work.
+    limits: { iterations: 3, tool_calls: 2, wall_clock: 30s }
