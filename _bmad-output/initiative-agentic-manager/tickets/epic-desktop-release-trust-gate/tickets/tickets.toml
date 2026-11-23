@@ -6,6 +6,7 @@
 # Every trust-gate.md rule maps to a story: signing (3), updates and key rotation (2), supply chain and CI (5), SBOM, provenance, Scorecard (6),
 # parser fuzzing (7), security suites as gates (8), SECURITY.md, threat model, protections page (9), docs (10, 11), review window (13), v1.0 gate (15).
 # 2026-11-19 owner folder-access direction: 16 bundles Local search only (OCR retired); 6, 7, 8 and 9 drop Tesseract, Leptonica, pdfium, docx and pptx and add the folder suites.
+# 2026-11-23 owner decision: 17 (owner-only start check covers macOS ACLs and the folder owner) is the pre-release hardening item from 3.2's review; it builds between 7 and 8 after 1 (shared am-app server start), and 8 and the sweep (13) wait on it.
 
 [[entry]]
 id = 1
@@ -97,13 +98,24 @@ hitl = false
 risk = "medium"
 
 [[entry]]
+id = 17
+type = "story"
+title = "Owner-only start check covers macOS ACLs and the folder owner"
+description = "Pre-release hardening (owner, 2026-11-23; epic 3 story 2's review finding A3, accepted there as a residual): the owner-only start check built in 3.2 (arch AD-13: the app data dir and the open project's runtime folder 0700 with 0600 files, walked recursively, a symbolic link refused) looks only at mode bits. It also refuses the start, in words naming the path and the fix, when any folder or file in either tree carries a macOS ACL entry that grants access to anyone but the owner, or is not owned by the user running `agentic`, on every start path that runs 3.2's check, story 1's in-process desktop start included. The refusal is a RULE-15 trust case, so story 8's release gate runs it. How ACLs and the owner are read is settled in the plan; this entry changes no AD and adds nothing to the Stack: if the check needs an AD-13 restatement, a new crate or a nix feature beyond `term`, the plan stops for a Sofia REPLAN with the architect before any code."
+verify = "Written first, failing, in `crates/am-e2e/tests/trust/rule_15_*.rs` (macOS; on Linux a compiling branch, AD-47): with every mode already correct, an ACL entry granting another user or group read access on the app data dir, on a folder inside it, on a file inside it and on the project's runtime folder each refuses `agentic serve` in words naming the path and the fix, and removing the entry lets it start; an entry that only denies (as `group:everyone deny delete`, which macOS puts on home folders) or names only the owner still starts; a folder or file whose owner is not the expected user refuses the same way (tested through the check's library entry point with a different expected owner, since a test cannot chown without root; no test hook reaches the `agentic` binary); a tree with no ACL entries and owned by the user starts as in 3.2; story 3.2's owner-only cases stay green; `just check` is green."
+covers = ["R8"]
+after = [1]
+hitl = false
+risk = "medium"
+
+[[entry]]
 id = 8
 type = "story"
 title = "Security suites gate every release"
 description = "The release workflow publishes nothing unless, on the signed macOS Apple Silicon build, every suite under crates/am-e2e/tests/trust/ and crates/am-e2e/tests/engine/ passes, selected by directory and never by a hand-kept list (final review 2 security M5, 2026-11-19): rule_08 to rule_19 (including rebinding, CSRF and WebSocket, path traversal and symlink escape, budget and kill-switch, secret-leak scan), connectors_*, local_search_*, capabilities_*, folder_access_*, taint_*, widening_*, sandbox_* and the cross-department engine suites, together with the golden run and injection pack on FakeLlm; the owner's real-local-model golden run and injection pack record for the same commit is required before a tag. The gate also checks entitlements per binary: the main app carries no com.apple.security.cs.disable-library-validation, allow-unsigned-executable-memory or allow-dyld-environment-variables entitlement, and each helper (agentic-extract, the Python executable) carries exactly its AD-13 App Sandbox set."
 verify = "A release run lists every trust suite as passed on the signed macOS build; a seeded failing trust test stops publishing; tagging without the owner's real-model record for that commit is refused by the gate. A test file added to tests/trust/ without being listed anywhere runs in the gate; a seeded disable-library-validation entitlement on the main app stops publishing."
 covers = ["R8"]
-after = [7]
+after = [7, 17]
 hitl = false
 risk = "high"
 
@@ -159,7 +171,7 @@ title = "Refactor sweep"
 description = "Cleanup only, scoped at its start from the plans and review findings this epic deferred: no new behaviour; scope pushed out of another story becomes a new story."
 verify = "`just check`, CI and the release workflow on main are green, and every deferred finding from this epic is closed or named in a new story."
 covers = []
-after = [1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 16]
+after = [1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 16, 17]
 hitl = false
 risk = "low"
 
