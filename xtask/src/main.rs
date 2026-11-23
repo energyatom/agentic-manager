@@ -3,7 +3,8 @@
 //! story 1.13 adds `runtime-paths` (AD-32: runtime paths named only by
 //! `am_domain::RuntimeLayout`); story 2.2 adds `fixed-hosts` (AD-12: every
 //! fixed host of the shipped source is on one named list) and `seam-guard`
-//! (shipped code never names am-net's test-only constructor).
+//! (shipped code never names am-net's test-only constructor; story 3.2 adds
+//! am-server's test-only fixture route, `router_with_fixture`).
 //! Later stories add `gen-types` and `bundle-services`. All three checks are
 //! offline; `just check` runs them.
 #![forbid(unsafe_code)]
@@ -26,7 +27,7 @@ const USAGE: &str = "usage: cargo xtask <task> [options]
   check-forbid [--root <dir>]                       every crate forbids unsafe
   runtime-paths [--root <dir>]                      AD-32 runtime paths only in RuntimeLayout
   fixed-hosts  [--root <dir>]                       AD-12 fixed hosts only from the named list
-  seam-guard   [--root <dir>]                       NetEgress::with_seams only in tests";
+  seam-guard   [--root <dir>]                       test-only seams (NetEgress::with_seams, router_with_fixture) only in tests";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();

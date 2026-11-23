@@ -56,7 +56,8 @@ fixed-hosts:
     cargo xtask fixed-hosts
 
 # Story 2.2, decision 7: shipped code never names am-net's test-only
-# constructor NetEgress::with_seams.
+# constructor NetEgress::with_seams; story 3.2: nor am-server's test-only
+# fixture route (router_with_fixture, FixtureRoute).
 seam-guard:
     cargo xtask seam-guard
 

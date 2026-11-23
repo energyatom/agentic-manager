@@ -1,6 +1,9 @@
 //! The `agentic` binary. Commands:
 //!
 //! - `agentic serve [--project <path> [--confirm-move] [--take-over]] [--port N] [--no-browser]`
+//!   (story 3.2: prints the address without any code, where this launch's
+//!   CLI token file is, and a terminal pairing code; while serve runs in the
+//!   foreground of a terminal, pressing Enter prints a new pairing code)
 //! - `agentic validate [--template] [<folder>]` (exit 0 no errors, 1 errors, 2 usage or no folder)
 //! - `agentic audit export <project> [--out <file>]`, `agentic audit verify <file>`
 //!   (exit 0 OK, 1 failure or a broken chain, 2 usage)
@@ -235,6 +238,26 @@ async fn serve(args: &Args) -> i32 {
             println!("agentic: project {p}: {line}");
         }
     }
+    // Owner-only at start (story 3.2, AD-13): the app data dir, its
+    // `serving` folder and the open project's runtime folder are 0700 and
+    // every file in them 0600, or the server does not start.
+    let places = match am_app::runtime::Places::from_env() {
+        Ok(places) => places,
+        Err(e) => {
+            eprintln!("agentic: {e}");
+            return 1;
+        }
+    };
+    if let Err(e) =
+        am_app::serving::owner_only_at_start(&places, opened.as_ref().map(|o| &o.layout))
+    {
+        eprintln!("agentic: {e}");
+        return 1;
+    }
+    let app_data = places.app_data.clone();
+    // What a crashed server left (dead pids' port records and CLI token
+    // files) is pruned before this one records its own (review P3).
+    let _ = am_app::runtime::serving_ports(&app_data);
     let port: u16 = args
         .value("--port")
         .and_then(|p| p.parse().ok())
@@ -251,13 +274,6 @@ async fn serve(args: &Args) -> i32 {
     // project, and in the project's runtime folder. Every egress directory,
     // `agentic accounts test`'s included, refuses every recorded port to
     // Accounts and MCP servers (AD-12).
-    let app_data = match am_app::runtime::Places::from_env() {
-        Ok(places) => places.app_data,
-        Err(e) => {
-            eprintln!("agentic: {e}");
-            return 1;
-        }
-    };
     if let Err(e) = am_app::runtime::record_serving(&app_data, port) {
         eprintln!("agentic: {e}");
         return 1;
@@ -286,10 +302,44 @@ async fn serve(args: &Args) -> i32 {
         },
         _ => None,
     };
-    let state = am_server::AppState::new(port);
+    let mut builder = am_server::AppState::builder(port);
+    if let Some(o) = &opened {
+        builder = builder.project_db(o.layout.state_db());
+    }
+    let state = builder.build();
+    // The per-launch CLI token (AD-13, AD-15): owner-only, beside the port
+    // record, removed at exit. Its value is never printed, only its place.
+    let pid = std::process::id();
+    let token_file = match am_app::serving::write_cli_token(&places, pid, &state.cli_token()) {
+        Ok(path) => path,
+        Err(e) => {
+            eprintln!("agentic: {e}");
+            if let Some(o) = &opened {
+                am_app::runtime::clear_serve_port(&o.layout);
+            }
+            am_app::runtime::clear_serving(&app_data);
+            return 1;
+        }
+    };
+    // The URL without any code: the launch code goes only to the browser,
+    // in the fragment, never to stdout (AD-13).
     println!("agentic: serving on http://127.0.0.1:{port}");
+    println!(
+        "agentic: the CLI token for this launch is in {} (owner-only; removed at exit)",
+        token_file.display()
+    );
+    // The pairing code, on this terminal only.
+    let _ = am_server::print_pairing_code(&state, &mut std::io::stdout());
+    // Enter prints a new one, read only when stdin is a terminal (review
+    // P9): with stdin redirected (a service, `< /dev/null`, a test) nothing
+    // reads it. The Enter key works with serve in the foreground.
+    let enter_for_codes = am_app::serving::stdin_reads_the_owner();
+    if enter_for_codes {
+        println!(
+            "agentic: press Enter here for a new pairing code (with agentic serve in the foreground)"
+        );
+    }
     if !args.flag("--no-browser") {
-        // The launch code goes only to the browser, never to stdout (AD-13).
         let url = state.launch_url();
         #[cfg(target_os = "macos")]
         let _ = std::process::Command::new("open").arg(&url).status();
@@ -299,6 +349,19 @@ async fn serve(args: &Args) -> i32 {
             eprintln!("agentic: opening a browser is not supported on this platform yet");
         }
     }
+    if enter_for_codes {
+        // Enter in this terminal prints a fresh pairing code (and
+        // invalidates the unused one). The thread ends with stdin.
+        let state = state.clone();
+        std::thread::spawn(move || {
+            let stdin = std::io::stdin();
+            let mut input = stdin.lock();
+            let _ = am_server::pairing_terminal(&state, &mut input, &mut std::io::stdout());
+        });
+    }
+    // Run status changes (also from `agentic run` in another process)
+    // become events, once a second.
+    let watcher = am_server::watch_runs(&state, Duration::from_secs(1));
     let code = match am_server::serve(listener, state, stop).await {
         Ok(()) => 0,
         Err(e) => {
@@ -306,8 +369,10 @@ async fn serve(args: &Args) -> i32 {
             1
         }
     };
+    watcher.abort();
     // The client holds a handle on the store's writer: dropped first.
     drop(egress);
+    am_app::serving::clear_cli_token(&places, pid);
     if let Some(o) = &opened {
         am_app::runtime::clear_serve_port(&o.layout);
     }

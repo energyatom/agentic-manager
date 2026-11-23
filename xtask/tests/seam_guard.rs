@@ -96,3 +96,88 @@ fn shipped_am_net_code_calling_the_test_constructor_fails() {
     assert!(!out.status.success(), "a call beside the definition: {err}");
     assert!(err.contains("crates/am-net/src/lib.rs"), "{err}");
 }
+
+/// Story 3.2 (AD-15): am-server's test-only fixture route. Its definition
+/// file, `crates/am-server/src/fixture.rs`.
+const FIXTURE_HOME: &str = "crates/am-server/src/fixture.rs";
+const FIXTURE_DEFINITION: &str = "pub struct FixtureRoute;\nimpl FixtureRoute {\n    pub fn new() -> FixtureRoute {\n        FixtureRoute\n    }\n}\npub fn router_with_fixture(state: AppState, fixture: FixtureRoute) -> Router {\n    build(state, fixture)\n}\n";
+
+/// Shipped code naming `router_with_fixture` or `FixtureRoute` outside
+/// its definition file fails, naming the file and the name: am-app's
+/// `agentic serve`, am-server's own router, and a `cfg(test)` module.
+#[test]
+fn shipped_code_naming_the_fixture_route_fails() {
+    for (what, file, source, name) in [
+        (
+            "agentic serve",
+            "crates/am-app/src/main.rs",
+            "async fn serve() {\n    let r = am_server::router_with_fixture(state, am_server::FixtureRoute::new());\n}\n",
+            "router_with_fixture",
+        ),
+        (
+            "the shipped router",
+            "crates/am-server/src/routes.rs",
+            "pub fn router(state: AppState) -> Router {\n    crate::router_with_fixture(state, Default::default())\n}\n",
+            "router_with_fixture",
+        ),
+        (
+            "the fixture type alone",
+            "crates/am-app/src/serving.rs",
+            "fn extra() -> am_server::FixtureRoute {\n    Default::default()\n}\n",
+            "FixtureRoute",
+        ),
+        (
+            "a cfg(test) module",
+            "crates/am-server/src/lib.rs",
+            "#[cfg(test)]\nmod tests {\n    fn rig() {\n        let _ = super::FixtureRoute::new();\n    }\n}\n",
+            "FixtureRoute",
+        ),
+    ] {
+        let tmp = tempfile::tempdir().unwrap();
+        write(tmp.path(), FIXTURE_HOME, FIXTURE_DEFINITION);
+        write(tmp.path(), file, source);
+        let out = guard(tmp.path());
+        let err = stderr(&out);
+        assert!(!out.status.success(), "{what}: must fail: {err}");
+        assert!(err.contains(file), "{what}: names the file: {err}");
+        assert!(err.contains(name), "{what}: names {name}: {err}");
+    }
+}
+
+/// The definition file, a glob re-export and the tests folders pass; a
+/// call of `router_with_fixture` beside its definition fails.
+#[test]
+fn the_fixture_definition_and_tests_pass_and_a_call_beside_it_fails() {
+    let tmp = tempfile::tempdir().unwrap();
+    write(tmp.path(), FIXTURE_HOME, FIXTURE_DEFINITION);
+    write(
+        tmp.path(),
+        "crates/am-server/src/lib.rs",
+        "mod fixture;\npub use fixture::*;\npub fn router(state: AppState) -> Router {\n    build(state)\n}\n",
+    );
+    write(
+        tmp.path(),
+        "crates/am-e2e/tests/trust/support/server.rs",
+        "fn rig() {\n    let _ = am_server::router_with_fixture(s, am_server::FixtureRoute::new());\n}\n",
+    );
+    write(
+        tmp.path(),
+        "crates/am-server/tests/route_table.rs",
+        "fn rig() {\n    let _ = am_server::router_with_fixture(s, am_server::FixtureRoute::new());\n}\n",
+    );
+    let out = guard(tmp.path());
+    assert!(out.status.success(), "{}{}", stdout(&out), stderr(&out));
+
+    let tmp = tempfile::tempdir().unwrap();
+    write(
+        tmp.path(),
+        FIXTURE_HOME,
+        &format!(
+            "{FIXTURE_DEFINITION}pub fn shipped(s: AppState) -> Router {{\n    router_with_fixture(s, FixtureRoute::new())\n}}\n"
+        ),
+    );
+    let out = guard(tmp.path());
+    let err = stderr(&out);
+    assert!(!out.status.success(), "a call beside the definition: {err}");
+    assert!(err.contains(FIXTURE_HOME), "{err}");
+}

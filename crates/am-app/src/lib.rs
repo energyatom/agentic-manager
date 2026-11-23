@@ -12,6 +12,8 @@
 //! the store-backed audit sink; the spike's `c1` and `c4` commands left the
 //! binary (owner decision 9, 2026-11-22). Story 2.12 moves Accounts to this
 //! Mac ([`user`]) and makes [`key_use`] the one check before any key read.
+//! Story 3.2 adds [`serving`]: `agentic serve`'s owner-only check at start
+//! and its per-launch CLI token file.
 #![forbid(unsafe_code)]
 
 // The composition root depends on every adapter (Design Paradigm table); the
@@ -30,6 +32,7 @@ pub mod identity;
 pub mod key_use;
 pub mod run;
 pub mod runtime;
+pub mod serving;
 pub mod spike;
 pub mod terminal;
 pub mod user;

@@ -66,8 +66,54 @@ path = "tests/trust/rule_09_requests.rs"
 name = "rule_09_audit_store"
 path = "tests/trust/rule_09_audit_store.rs"
 
+# Story 3.2: RULE-15, the loopback server's Host, Origin, launch code,
+# pairing code, CSRF, CLI token, route classes, envelope, run status and
+# event stream (AD-13, AD-14, AD-15). The shared rig lives in
+# tests/trust/support/server.rs (a folder, so not a target).
+[[test]]
+name = "rule_15_signin"
+path = "tests/trust/rule_15_signin.rs"
+
+[[test]]
+name = "rule_15_host"
+path = "tests/trust/rule_15_host.rs"
+
+[[test]]
+name = "rule_15_csrf"
+path = "tests/trust/rule_15_csrf.rs"
+
+[[test]]
+name = "rule_15_state_changes"
+path = "tests/trust/rule_15_state_changes.rs"
+
+[[test]]
+name = "rule_15_pairing"
+path = "tests/trust/rule_15_pairing.rs"
+
+[[test]]
+name = "rule_15_cli_token"
+path = "tests/trust/rule_15_cli_token.rs"
+
+[[test]]
+name = "rule_15_events"
+path = "tests/trust/rule_15_events.rs"
+
+[[test]]
+name = "rule_15_runs"
+path = "tests/trust/rule_15_runs.rs"
+
+[[test]]
+name = "rule_15_permissions"
+path = "tests/trust/rule_15_permissions.rs"
+
+[[test]]
+name = "rule_15_secrets"
+path = "tests/trust/rule_15_secrets.rs"
+
 [dev-dependencies]
 am-app.workspace = true
+# Story 3.2: the error envelope and the run and event DTOs (AD-14).
+am-api.workspace = true
 am-config = { workspace = true, features = ["test-support"] }
 am-domain.workspace = true
 am-engine.workspace = true
@@ -89,3 +135,5 @@ rusqlite.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 hex.workspace = true
+# Story 3.2: a subscriber that captures log lines (rule_15_secrets).
+tracing.workspace = true

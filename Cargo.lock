@@ -35,6 +35,10 @@ dependencies = [
 [[package]]
 name = "am-api"
 version = "0.0.1"
+dependencies = [
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "am-app"
@@ -115,6 +119,7 @@ dependencies = [
 name = "am-e2e"
 version = "0.0.1"
 dependencies = [
+ "am-api",
  "am-app",
  "am-config",
  "am-domain",
@@ -135,6 +140,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-util",
+ "tracing",
 ]
 
 [[package]]
@@ -225,9 +231,13 @@ dependencies = [
 name = "am-server"
 version = "0.0.1"
 dependencies = [
+ "am-api",
+ "am-domain",
+ "am-store",
  "axum",
  "getrandom 0.4.3",
  "hex",
+ "jiff 1.0.0",
  "serde",
  "serde_json",
  "tokio",
