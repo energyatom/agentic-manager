@@ -333,6 +333,60 @@ pub struct Step {
     /// epic 3 on; a runner that cannot honour one refuses the step by this
     /// list instead of running it as a plain turn.
     pub run_graph: Vec<String>,
+    /// Story 3.3 (AD-36): `loop_back: { to, reasons, max }`, a hand-off back
+    /// to an earlier step when the step's output lists reasons.
+    pub loop_back: Option<LoopBack>,
+    /// Story 3.3 (AD-36): `gate: review`, a human gate that makes no model
+    /// call. Removing it, or moving its step to a seat with a model, is
+    /// privilege-widening (AD-15, AD-42; classified by epic 4 story 17).
+    pub gate: Option<Gate>,
+    /// Story 3.3 (AD-11, RULE-11): the step attempt's caps under `limits:`,
+    /// with the defaults where a key is absent. Raising one is
+    /// privilege-widening (epic 4 story 17).
+    pub limits: StepLimits,
+}
+
+/// A step's loop-back (AD-36): when its output's `reasons` field lists
+/// reasons, the run goes back to the earlier step `to`, at most `max`
+/// times.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoopBack {
+    /// An earlier step of the same workflow.
+    pub to: String,
+    /// The field of the step's JSON output that holds the reasons
+    /// (default `reasons`).
+    pub reasons: String,
+    /// How many loop-backs this hand-off allows, 0 to 5 (default 2).
+    pub max: u32,
+}
+
+/// A human gate's kind (AD-36): `review`, the one kind in this version.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Gate {
+    Review,
+}
+
+/// A step attempt's caps (AD-11, RULE-11). The defaults (8 model turns,
+/// 20 tool calls, 10 minutes) are the owner's placeholders (story 3.3,
+/// Question 7); a step sets its own under `limits:`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StepLimits {
+    /// Model turns per attempt, 1 to 50.
+    pub iterations: u32,
+    /// Tool calls per attempt, 0 to 200.
+    pub tool_calls: u32,
+    /// Wall-clock time per attempt, 10 s to 2 h.
+    pub wall_clock: std::time::Duration,
+}
+
+impl Default for StepLimits {
+    fn default() -> Self {
+        StepLimits {
+            iterations: 8,
+            tool_calls: 20,
+            wall_clock: std::time::Duration::from_secs(600),
+        }
+    }
 }
 
 /// `tables/<id>.yaml` (AD-21, AD-22).

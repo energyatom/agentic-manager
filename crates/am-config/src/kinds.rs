@@ -2110,6 +2110,169 @@ const RUN_GRAPH_KEYS: &[&str] = &[
     "max_parallel",
 ];
 
+/// A step's hand-off and loop keys (story 3.3, AD-36, AD-11): `loop_back`,
+/// `gate` and `limits`. They are not run-graph keys: `agentic run`
+/// honours them.
+const STEP_LOOP_KEYS: &[&str] = &["loop_back", "gate", "limits"];
+
+/// What the checks across a workflow's steps need of one step (story 3.3).
+struct StepHandOff {
+    id: Option<String>,
+    /// `loop_back.to`, with its line.
+    loop_back_to: Option<Text>,
+    /// The line of `gate:`, when the step is a gate.
+    gate_line: Option<u32>,
+}
+
+/// The line of `key` in the mapping `f`, if it is there.
+fn line_of_key(f: &Fields, key: &str) -> Option<u32> {
+    f.entries
+        .iter()
+        .find(|(k, _)| k.name == key)
+        .map(|(k, _)| k.line)
+}
+
+/// `loop_back: { to, reasons, max }` (AD-36): `to` is required, `reasons`
+/// defaults to `reasons`, `max` is 0 to 5 (default 2). The parsed hand-off
+/// and its target with its line.
+fn step_loop_back(rep: &mut Report, s: &Fields) -> (Option<LoopBack>, Option<Text>) {
+    let Some(node) = s.get("loop_back").filter(|n| n.kind != Kind::Null) else {
+        return (None, None);
+    };
+    let Some(l) = fields(rep, node, "loop_back") else {
+        return (None, None);
+    };
+    l.allow(rep, &["to", "reasons", "max"]);
+    let to = l.req_id(rep, "to");
+    let reasons = match l.text(rep, "reasons") {
+        Some(t) if t.value.trim().is_empty() => {
+            rep.error(
+                t.line,
+                "'reasons' in loop_back is empty",
+                "set `reasons:` to the field of the step's JSON output that lists the reasons, such as `reasons`",
+            );
+            None
+        }
+        Some(t) => Some(t.value),
+        None => Some("reasons".to_string()),
+    };
+    let max = if l.get("max").is_some_and(|n| n.kind != Kind::Null) {
+        l.int(rep, "max", 0, 5).map(|v| v as u32)
+    } else {
+        Some(2)
+    };
+    let parsed = match (&to, reasons, max) {
+        (Some(to), Some(reasons), Some(max)) => Some(LoopBack {
+            to: to.value.clone(),
+            reasons,
+            max,
+        }),
+        _ => None,
+    };
+    (parsed, to)
+}
+
+/// `gate: review` (AD-36): `review` is the one kind.
+fn step_gate(rep: &mut Report, s: &Fields) -> Option<Gate> {
+    let t = s.text(rep, "gate")?;
+    if t.value == "review" {
+        return Some(Gate::Review);
+    }
+    rep.error(
+        t.line,
+        format!(
+            "'{}' is not a kind of gate; the one kind of gate is 'review'",
+            t.value
+        ),
+        "write `gate: review` for a step a person reviews in the Inbox, or remove `gate:`",
+    );
+    None
+}
+
+/// `limits: { iterations, tool_calls, wall_clock }` (AD-11, RULE-11), each
+/// in its range, the defaults where a key is absent.
+fn step_limits(rep: &mut Report, s: &Fields) -> StepLimits {
+    let defaults = StepLimits::default();
+    let Some(node) = s.get("limits").filter(|n| n.kind != Kind::Null) else {
+        return defaults;
+    };
+    let Some(l) = fields(rep, node, "limits") else {
+        return defaults;
+    };
+    l.allow(rep, &["iterations", "tool_calls", "wall_clock"]);
+    StepLimits {
+        iterations: l
+            .int(rep, "iterations", 1, 50)
+            .map_or(defaults.iterations, |v| v as u32),
+        tool_calls: l
+            .int(rep, "tool_calls", 0, 200)
+            .map_or(defaults.tool_calls, |v| v as u32),
+        wall_clock: l
+            .duration(
+                rep,
+                "wall_clock",
+                std::time::Duration::from_secs(10),
+                std::time::Duration::from_secs(2 * 3600),
+            )
+            .unwrap_or(defaults.wall_clock),
+    }
+}
+
+/// The checks across steps (story 3.3): a loop-back goes to an earlier
+/// step of the same workflow, and a gate is not the first step.
+fn hand_off_checks(rep: &mut Report, steps: &[StepHandOff]) {
+    for (i, step) in steps.iter().enumerate() {
+        let name = step.id.as_deref().unwrap_or("?");
+        if let (0, Some(line)) = (i, step.gate_line) {
+            rep.error(
+                line,
+                format!(
+                    "step '{name}' is a gate and the first step of the workflow; a gate reviews the output of the step before it, so it cannot come first"
+                ),
+                "move the gate after the step whose output it reviews, or remove `gate:`",
+            );
+        }
+        let Some(to) = &step.loop_back_to else {
+            continue;
+        };
+        match steps.iter().position(|s| s.id.as_deref() == Some(to.value.as_str())) {
+            None => rep.error(
+                to.line,
+                format!(
+                    "the loop_back of step '{name}' goes to '{}', which is not a step of this workflow",
+                    to.value
+                ),
+                format!(
+                    "set `to:` to the id of an earlier step of this workflow: {}",
+                    earlier_ids(steps, i)
+                ),
+            ),
+            Some(target) if target >= i => rep.error(
+                to.line,
+                format!(
+                    "the loop_back of step '{name}' goes to '{}', which is not an earlier step; a loop-back returns to an earlier step of the same workflow",
+                    to.value
+                ),
+                format!(
+                    "set `to:` to the id of an earlier step: {}",
+                    earlier_ids(steps, i)
+                ),
+            ),
+            Some(_) => {}
+        }
+    }
+}
+
+/// The ids of the steps before step `i`, for a fix.
+fn earlier_ids(steps: &[StepHandOff], i: usize) -> String {
+    let ids: Vec<&str> = steps[..i].iter().filter_map(|s| s.id.as_deref()).collect();
+    if ids.is_empty() {
+        "this step has none, so it cannot loop back; remove `loop_back:`".into()
+    } else {
+        ids.join(", ")
+    }
+}
+
 /// `workflows/<id>.yaml`.
 pub(crate) fn workflow(
     rep: &mut Report,
@@ -2156,6 +2319,9 @@ pub(crate) fn workflow(
     }
     let mut steps = Vec::new();
     let mut step_ids = Vec::new();
+    // Story 3.3: each step's place, its loop-back target and its gate, for
+    // the checks across steps below.
+    let mut hand_offs: Vec<StepHandOff> = Vec::new();
     for item in items {
         let Some(s) = fields(rep, item, "step") else {
             continue;
@@ -2168,6 +2334,7 @@ pub(crate) fn workflow(
             "output_schema",
             "max_tokens",
         ];
+        allowed.extend_from_slice(STEP_LOOP_KEYS);
         allowed.extend_from_slice(RUN_GRAPH_KEYS);
         s.allow(rep, &allowed);
         // The run-graph keys the step declares (a key with no value counts:
@@ -2195,6 +2362,31 @@ pub(crate) fn workflow(
             refs.push(rep, o.line, RefKind::Schema, &o.value);
         }
         let max_tokens = s.int(rep, "max_tokens", 1, 10_000_000).map(|v| v as u32);
+        let (loop_back, to) = step_loop_back(rep, &s);
+        let gate = step_gate(rep, &s);
+        let limits = step_limits(rep, &s);
+        if gate.is_some() {
+            // A gate makes no model call (AD-36): it neither loops back nor
+            // has caps.
+            for key in ["loop_back", "limits"] {
+                if let Some(line) = line_of_key(&s, key) {
+                    rep.error(
+                        line,
+                        format!(
+                            "a step with `gate: review` declares `{key}`; a gate makes no model call, so it neither loops back nor has limits"
+                        ),
+                        format!(
+                            "remove `{key}:` from the gate step, or remove `gate:` to make it a step a seat's model runs"
+                        ),
+                    );
+                }
+            }
+        }
+        hand_offs.push(StepHandOff {
+            id: id.as_ref().map(|t| t.value.clone()),
+            loop_back_to: to,
+            gate_line: gate.and_then(|_| line_of_key(&s, "gate")),
+        });
         if let Some(id) = &id {
             step_ids.push(id.clone());
         }
@@ -2207,10 +2399,14 @@ pub(crate) fn workflow(
                 output_schema: value(output_schema),
                 max_tokens,
                 run_graph,
+                loop_back,
+                gate,
+                limits,
             });
         }
     }
     unique(rep, "step", &step_ids);
+    hand_off_checks(rep, &hand_offs);
     Some(Workflow {
         id: stem.to_string(),
         name: name?.value,

@@ -15,7 +15,7 @@
 use std::path::Path;
 
 use crate::Failure;
-use crate::forbid::string_literals;
+use crate::forbid::{string_literals, unterminated_finding};
 use crate::walk::{files, rel};
 
 /// The one file allowed to spell a runtime path.
@@ -39,6 +39,11 @@ pub fn run(root: &Path) -> Result<String, Failure> {
             continue;
         };
         scanned += 1;
+        // A literal that never ends hides the rest: fail closed (story 3.3).
+        if let Some(finding) = unterminated_finding(&name, &src) {
+            findings.push(finding);
+            continue;
+        }
         let source = name.split('/').any(|c| c == "src");
         for (line, text) in string_literals(&src) {
             if spells_runtime_path(&text) {

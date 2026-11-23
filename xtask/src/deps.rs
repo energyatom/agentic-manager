@@ -2,12 +2,97 @@
 //! table) checked against `cargo metadata`. Only normal and build edges count;
 //! dev-dependencies are test scaffolding. Every workspace crate must be
 //! classified here, so a new crate cannot slip past the matrix.
+//!
+//! Story 3.3 (AD-10, amended 2026-11-23): call-site rules beside the
+//! matrix, over the shipped source under `--root` (every `.rs` of a crate
+//! but its `tests/`, `benches/` and `examples/`, comments and literals left
+//! out; a literal or comment that never ends fails closed):
+//!
+//! - `TrustedInput`'s two named constructors, `from_step_output` and
+//!   `from_owner_note`, are named only in `crates/am-engine/src/` and, in
+//!   am-domain, on their definition lines;
+//! - `Instruction::authored` (review P14), which turns text into a trusted
+//!   instruction, is named only where config or the owner's own words
+//!   become one: [`INSTRUCTION_SITES`], the `#[cfg(test)]` items of
+//!   [`INSTRUCTION_TEST_SITES`], and am-domain's definition line.
 
 use crate::Failure;
+use crate::forbid::{strip_comments_and_strings, unterminated_finding};
+use crate::seam_guard::names;
+use crate::shipped::{in_ranges, sources, test_ranges};
 use serde_json::Value;
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::process::Command;
+
+/// `TrustedInput`'s two named constructors (AD-10).
+const TRUSTED_CONSTRUCTORS: [&str; 2] = ["from_step_output", "from_owner_note"];
+
+/// The one crate that calls them.
+const TRUSTED_CALLER: &str = "crates/am-engine/src/";
+
+/// The crate that defines them.
+const TRUSTED_HOME: &str = "crates/am-domain/src/";
+
+/// The shipped files that may call `Instruction::authored` (review P14):
+/// am-app building a run's plan from the config snapshot (a seat's
+/// instructions, a step's instruction), the spike harness's and the
+/// Account test's fixed prompts, and the spike driver's fixed prompt.
+pub const INSTRUCTION_SITES: [&str; 4] = [
+    "crates/am-app/src/run.rs",
+    "crates/am-app/src/spike.rs",
+    "crates/am-app/src/accounts.rs",
+    "crates/am-engine/src/journal.rs",
+];
+
+/// The shipped files whose `#[cfg(test)]` items (only) may call it: the
+/// engine driver's own unit tests build plans with it.
+pub const INSTRUCTION_TEST_SITES: [&str; 1] = ["crates/am-engine/src/run.rs"];
+
+/// Every finding of the call-site rules on the shipped source under
+/// `root`.
+fn call_site_findings(root: &Path) -> Vec<String> {
+    let mut findings = Vec::new();
+    for source in sources(root) {
+        if let Some(finding) = unterminated_finding(&source.name, &source.text) {
+            findings.push(finding);
+            continue;
+        }
+        let code = strip_comments_and_strings(&source.text);
+        let tests = test_ranges(&source.text);
+        for (n, line) in code.lines().enumerate() {
+            let flat = line.split_whitespace().collect::<Vec<_>>().join(" ");
+            let definition = |name: &str| {
+                source.name.starts_with(TRUSTED_HOME)
+                    && flat.contains(&format!("fn {name}"))
+                    && flat.matches(name).count() == 1
+            };
+            for name in TRUSTED_CONSTRUCTORS {
+                if !names(line, name) || source.name.starts_with(TRUSTED_CALLER) || definition(name)
+                {
+                    continue;
+                }
+                findings.push(format!(
+                    "{}:{}: names TrustedInput::{name}; only am-engine builds a TrustedInput, from a clean step's journaled output or an owner's note (AD-10: its two constructors are called only in {TRUSTED_CALLER})",
+                    source.name,
+                    n + 1
+                ));
+            }
+            let allowed = INSTRUCTION_SITES.contains(&source.name.as_str())
+                || (INSTRUCTION_TEST_SITES.contains(&source.name.as_str())
+                    && in_ranges(&tests, n + 1))
+                || definition("authored");
+            if names(line, "authored") && !allowed {
+                findings.push(format!(
+                    "{}:{}: names Instruction::authored; text becomes a trusted Instruction only where config or the owner's own words do, at the sites xtask/src/deps.rs lists (AD-10; model, tool and file text is never an Instruction)",
+                    source.name,
+                    n + 1
+                ));
+            }
+        }
+    }
+    findings
+}
 
 /// What `am-domain` may use besides std (AD-4: no IO, no async runtime).
 const DOMAIN_EXTERNALS: &[&str] = &["serde", "thiserror", "jiff", "uuid"];
@@ -137,7 +222,18 @@ pub fn run(metadata: Option<&Path>, root: &Path) -> Result<String, Failure> {
     };
     let doc: Value = serde_json::from_str(&json)
         .map_err(|e| Failure::Setup(format!("cargo metadata is not JSON: {e}")))?;
-    check(&doc)
+    let calls = call_site_findings(root);
+    match check(&doc) {
+        Ok(summary) if calls.is_empty() => Ok(format!(
+            "{summary}; only am-engine builds a TrustedInput, and Instruction::authored is called only at its listed sites (AD-10)"
+        )),
+        Ok(_) => Err(Failure::Findings(calls)),
+        Err(Failure::Findings(mut findings)) => {
+            findings.extend(calls);
+            Err(Failure::Findings(findings))
+        }
+        Err(e) => Err(e),
+    }
 }
 
 fn cargo_metadata(root: &Path) -> Result<String, Failure> {

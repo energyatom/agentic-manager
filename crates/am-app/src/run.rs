@@ -31,21 +31,31 @@
 //!    honour yet (a run-graph key such as `review`, `handoff` or `seats`,
 //!    or an `output_schema`): such a step is never run as a plain turn;
 //! 9. every step has a seat with a model, and the context's provider
-//!    factory gives a provider for it.
+//!    factory gives a provider for it; a gate step (`gate: review`, story
+//!    3.3) makes no model call, so its seat needs no model and no provider
+//!    is asked for it.
 //!
 //! Only then is the run created, by the owner (`Actor::Human`); the
 //! engine's transitions are `System(engine)`'s. The command prints `run
 //! <id> <status>` and exits 0 when the run succeeded, 1 otherwise (the
-//! reason on stderr). A run the store stopped after it was created is
-//! named the same way, with the status its journal holds (which also
-//! decides the exit code), the failed step's reason if there was one, and
-//! the store's error.
+//! reason on stderr). A run that waits at a gate (story 3.3, Decision 4)
+//! prints `run <id> waiting_human` and `Review item <id> waits for you in
+//! the Inbox` and exits 0: waiting is not failing. A run the store stopped
+//! after it was created is named the same way, with the status its journal
+//! holds (which also decides the exit code), the failed step's reason if
+//! there was one, and the store's error.
+//!
+//! Story 3.3: each step's `loop_back` and `limits` go to the engine's plan
+//! as they are; the binary hands the engine no tool (a tool request fails
+//! its step in words).
 //!
 //! The binary's factory ([`unwired_providers`]) wires no provider yet and
 //! refuses every model in words; tests pass am-testkit's `FakeLlm` through
 //! [`RunContext`]. No env var, flag or feature swaps a provider in here.
 //!
-//! `status` lists the project's runs, newest first, with their steps. It
+//! `status` lists the project's runs, newest first, with every attempt of
+//! their steps (story 3.3: `attempt <n>` and the attempt's state) and
+//! their open Inbox items (kind and id). It
 //! reads without the project's lock ([`crate::runtime::find_runtime`], a
 //! read-only connection), so it works while a run or `serve` holds the
 //! project, and it has no terminal rule.
@@ -55,9 +65,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use am_config::{ConfigSnapshot, ModelRef, Severity};
-use am_domain::{Instruction, LlmProvider, ProjectIdentity, Terminal};
-use am_engine::run::{RunError, RunOutcome, RunPlan, StepPlan, run_plan};
-use am_store::{RunRow, StepRow};
+use am_domain::{
+    BoxFuture, CancelSignal, ChatOutcome, ChatRequest, EventSink, Instruction, LlmProvider,
+    ModelCapabilities, ProjectIdentity, ProviderError, Terminal,
+};
+use am_engine::run::{HandOff, Limits, RunError, RunOutcome, RunPlan, StepPlan, run_plan};
+use am_store::{InboxItemRow, RunRow, StepRow};
 use tokio_util::sync::CancellationToken;
 
 use crate::cli::{EXIT_ERRORS, EXIT_OK, EXIT_USAGE};
@@ -69,6 +82,9 @@ const STATUS_USAGE: &str =
 
 /// A step's output limit when it names no `max_tokens`.
 const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 4096;
+
+/// The outcome of a run that waits for a person (story 3.3).
+const WAITING: &str = "waiting_human";
 
 /// What started a run made by `agentic run`.
 const ORIGIN_MANUAL: &str = "manual";
@@ -102,6 +118,35 @@ pub fn unwired_providers() -> Providers {
             model.model, model.account
         ))
     })
+}
+
+/// A gate step's provider (story 3.3): a gate makes no model call, so the
+/// engine never calls it; were it called, it refuses in words and sends
+/// nothing.
+struct NoModelAtGate;
+
+impl LlmProvider for NoModelAtGate {
+    fn account_id(&self) -> String {
+        "none".into()
+    }
+    fn capabilities(&self, _model: &str) -> ModelCapabilities {
+        ModelCapabilities::default()
+    }
+    fn check_file_parts(&self, _request: &ChatRequest) -> Result<(), ProviderError> {
+        Ok(())
+    }
+    fn stream(
+        &self,
+        _request: ChatRequest,
+        _cancel: std::sync::Arc<dyn CancelSignal>,
+        _sink: std::sync::Arc<dyn EventSink>,
+    ) -> BoxFuture<Result<ChatOutcome, ProviderError>> {
+        Box::pin(async {
+            Err(ProviderError::Protocol(
+                "a gate step makes no model call; a person resolves it in the Inbox".into(),
+            ))
+        })
+    }
 }
 
 /// The words after the command: the positional ones and `--project`.
@@ -270,6 +315,34 @@ fn plan_of(
                 step.id
             ));
         };
+        // A seat with no instructions sends no system part (never an empty one).
+        let system = if seat.instructions.trim().is_empty() {
+            Vec::new()
+        } else {
+            vec![Instruction::authored(seat.instructions.clone())]
+        };
+        let limits = Limits {
+            iterations: step.limits.iterations,
+            tool_calls: step.limits.tool_calls,
+            wall_clock: step.limits.wall_clock,
+        };
+        // A gate makes no model call (AD-36): its seat needs no model, and
+        // no provider is asked for it.
+        if step.gate.is_some() {
+            steps.push(StepPlan {
+                key: step.id.clone(),
+                seat: seat_id.to_string(),
+                system,
+                instruction: Instruction::authored(step.instruction.clone()),
+                inputs: Vec::new(),
+                hand_off: HandOff::Gate,
+                limits,
+                model: String::new(),
+                max_output_tokens: step.max_tokens.unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS),
+                provider: Arc::new(NoModelAtGate),
+            });
+            continue;
+        }
         let Some(model) = &seat.model else {
             return Err(format!(
                 "step `{}` of the workflow `{workflow}` runs on the seat `{seat_id}`, which has no model; set `model:` (its `account` and `model`) in seats/{seat_id}.md. {NOT_STARTED}",
@@ -277,16 +350,22 @@ fn plan_of(
             ));
         };
         let provider = providers(model).map_err(|why| format!("{why}. {NOT_STARTED}"))?;
-        // A seat with no instructions sends no system part (never an empty one).
-        let system = if seat.instructions.trim().is_empty() {
-            Vec::new()
-        } else {
-            vec![Instruction::authored(seat.instructions.clone())]
+        let hand_off = match &step.loop_back {
+            Some(l) => HandOff::LoopBack {
+                to: l.to.clone(),
+                field: l.reasons.clone(),
+                max: l.max,
+            },
+            None => HandOff::Next,
         };
         steps.push(StepPlan {
             key: step.id.clone(),
+            seat: seat_id.to_string(),
             system,
             instruction: Instruction::authored(step.instruction.clone()),
+            inputs: Vec::new(),
+            hand_off,
+            limits,
             model: model.model.clone(),
             max_output_tokens: step.max_tokens.unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS),
             provider,
@@ -419,11 +498,26 @@ fn report(done: Result<RunOutcome, Stop>, out: &mut dyn Write, err: &mut dyn Wri
     match done {
         Ok(outcome) => {
             let _ = writeln!(out, "run {} {}", outcome.run_id, outcome.status);
+            if outcome.status == WAITING {
+                // Waiting is not failing (Decision 4): the run row stays
+                // `running`, and only a person resolves the item.
+                if let Some(item) = &outcome.item {
+                    let _ = writeln!(out, "Review item {item} waits for you in the Inbox");
+                }
+                return EXIT_OK;
+            }
             if let Some(reason) = &outcome.reason {
                 let _ = writeln!(
                     err,
                     "agentic: run {} {}: {reason}",
                     outcome.run_id, outcome.status
+                );
+            }
+            if let Some(item) = &outcome.item {
+                let _ = writeln!(
+                    err,
+                    "agentic: run {}: Failure item {item} is in the Inbox",
+                    outcome.run_id
                 );
             }
             if outcome.status == "succeeded" {
@@ -539,20 +633,39 @@ fn run_line(run: &RunRow) -> String {
 }
 
 fn step_line(step: &StepRow) -> String {
-    format!(
-        "    {}  {}  {}",
-        step.step_key,
-        step.status,
+    // A step that waits for a person is not running (story 3.3).
+    let took = if step.status == WAITING {
+        "waiting".to_string()
+    } else {
         duration(
             step.started_at.as_deref(),
             step.finished_at.as_deref(),
-            ended(&step.status)
+            ended(&step.status),
         )
+    };
+    format!(
+        "    {}  attempt {}  {}  {took}",
+        step.step_key, step.attempt, step.status
     )
 }
 
-/// The runs of the project at `project`, newest first, each with its steps.
-fn read_runs(places: &Places, project: &Path) -> Result<Vec<(RunRow, Vec<StepRow>)>, String> {
+/// An open Inbox item of a run (story 3.3): its kind and id, never its
+/// words.
+fn item_line(item: &InboxItemRow) -> String {
+    format!(
+        "    {} item {}  {}",
+        item.kind.title(),
+        item.id,
+        item.status
+    )
+}
+
+/// A run, its step attempts and its open Inbox items.
+type RunLines = (RunRow, Vec<StepRow>, Vec<InboxItemRow>);
+
+/// The runs of the project at `project`, newest first, each with its steps
+/// and its open Inbox items.
+fn read_runs(places: &Places, project: &Path) -> Result<Vec<RunLines>, String> {
     let layout = crate::runtime::find_runtime(places, project).map_err(|e| e.to_string())?;
     let db = layout.state_db();
     if !db.is_file() {
@@ -575,7 +688,13 @@ fn read_runs(places: &Places, project: &Path) -> Result<Vec<(RunRow, Vec<StepRow
     let mut all = Vec::new();
     for run in reader.runs().map_err(|e| e.to_string())? {
         let steps = reader.steps(&run.id).map_err(|e| e.to_string())?;
-        all.push((run, steps));
+        let items = reader
+            .inbox_items(&run.id)
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .filter(|i| i.status == "open")
+            .collect();
+        all.push((run, steps, items));
     }
     Ok(all)
 }
@@ -583,7 +702,8 @@ fn read_runs(places: &Places, project: &Path) -> Result<Vec<(RunRow, Vec<StepRow
 /// `agentic status [--project <folder>]`: `args` are the words after
 /// `status`. Prints each run, newest first (id, workflow, status, the first
 /// 12 characters of its snapshot hash, duration), and under it each step
-/// (key, status, duration). Reads only, without the project's lock and with
+/// attempt (key, `attempt <n>`, status, duration, or `waiting` for a step
+/// that waits for a person) and each open Inbox item (kind and id). Reads only, without the project's lock and with
 /// any stdin. Returns 0 (also with no runs), 2 for bad usage, 1 when the
 /// project has no runtime folder or database on this Mac, or one this
 /// version has not migrated yet, each in words on `err`.
@@ -608,10 +728,13 @@ pub fn status(args: &[String], places: &Places, out: &mut dyn Write, err: &mut d
         let _ = writeln!(out, "agentic: no runs in {} yet", project.display());
         return EXIT_OK;
     }
-    for (run, steps) in &runs {
+    for (run, steps, items) in &runs {
         let _ = writeln!(out, "{}", run_line(run));
         for step in steps {
             let _ = writeln!(out, "{}", step_line(step));
+        }
+        for item in items {
+            let _ = writeln!(out, "{}", item_line(item));
         }
     }
     EXIT_OK

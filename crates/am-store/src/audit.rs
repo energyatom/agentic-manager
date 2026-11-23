@@ -29,8 +29,10 @@ use crate::{Reader, StoreError, migrations};
 /// The `prev_hash` of the first entry.
 pub const GENESIS: &str = "genesis";
 
-/// sha256 hex of `text` (content stands in the log only as this).
-pub(crate) fn sha256_hex(text: &str) -> String {
+/// sha256 hex of `text` (content stands in the log only as this). Public
+/// since story 3.3: the engine journals a tool name no manifest holds only
+/// as this hash (review P15).
+pub fn sha256_hex(text: &str) -> String {
     hex::encode(Sha256::digest(text.as_bytes()))
 }
 

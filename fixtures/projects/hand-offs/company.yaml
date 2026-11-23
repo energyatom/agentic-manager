@@ -1,0 +1,8 @@
+schema_version: 2
+name: Hand-offs
+description: A synthetic project for steps, hand-offs and Inbox items (epic 3 story 3).
+timezone: UTC
+currency: EUR
+teams:
+  - id: core
+    name: Core team

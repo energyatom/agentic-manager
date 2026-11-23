@@ -9,7 +9,7 @@
 
 use std::path::{Path, PathBuf};
 
-use am_domain::{Actor, Usage};
+use am_domain::{Actor, Taint, Usage};
 use am_store::{
     OpenReport, Reader, SCHEMA_VERSION, Store, StoreError, TriggerRow, WriteCommand, verify_jsonl,
 };
@@ -78,6 +78,8 @@ fn populated(root: &Path) -> Store {
                 call_seq: seq,
                 reserved_micro_usd: 5000,
                 rate_snapshot: "rates-1".into(),
+                // Story 3.3: raised, never lowered (AD-10).
+                taint: Taint::Clean,
             },
         )
         .unwrap();
@@ -110,11 +112,21 @@ fn populated(root: &Path) -> Store {
         },
     )
     .unwrap();
+    // Story 3.3: the writer enforces AD-8's transitions, so step b starts
+    // before it finishes (a queued step never finishes, and `skipped` is
+    // not a step state).
+    w.exec(
+        sys(),
+        WriteCommand::StartStep {
+            step_run_id: b.clone(),
+        },
+    )
+    .unwrap();
     w.exec(
         sys(),
         WriteCommand::FinishStep {
             step_run_id: b,
-            status: "skipped".into(),
+            status: "failed".into(),
             output: None,
         },
     )
@@ -257,7 +269,7 @@ fn args_are_redacted_ids_hashes_counts_and_statuses() {
     );
     assert_eq!(
         finished[1]["args"],
-        json!({"output_sha256": null, "status": "skipped"})
+        json!({"output_sha256": null, "status": "failed"})
     );
     assert_eq!(
         entry(&all, "run.finished")["args"],

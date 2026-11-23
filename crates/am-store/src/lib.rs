@@ -27,6 +27,16 @@
 //! started and when a step and a run finished. Config History (the intent
 //! rows and History entries of AD-16's apply order) is in
 //! [`StoreConfigHistory`].
+//!
+//! Epic 3 story 3 (AD-8, AD-10, AD-28, AD-43): every step attempt is a
+//! step-run row with an `attempt` number and a `taint` flag that only ever
+//! rises; the writer enforces AD-8's step transitions (a step starts only
+//! from `queued`, finishes only from `running`, and nothing leaves
+//! `waiting_human` in this story); a step attempt's inputs are journaled
+//! (`step_inputs`) in the transaction that starts it; tool calls are
+//! journal rows; and the one Inbox item entity (`inbox_items`, AD-28's
+//! seven kinds) is created only by an `Actor::System` command, together
+//! with the step change it belongs to, and never changed after.
 #![forbid(unsafe_code)]
 
 use std::collections::BTreeMap;
@@ -34,7 +44,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, mpsc};
 use std::thread;
 
-use am_domain::{Actor, NewIntent, Usage};
+use am_domain::{Actor, InboxKind, NewIntent, StepStatus, Taint, Usage};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use serde_json::{Value, json};
 
@@ -190,17 +200,43 @@ pub enum WriteCommand {
         steps: Vec<String>,
         config_hash: Option<String>,
     },
-    /// The step is `running`; stamps its `started_at` (kept if already set).
+    /// A `queued` step is `running`; stamps its `started_at` (kept if
+    /// already set). Any other state is refused in words (AD-8); an unknown
+    /// id changes nothing, as in story 3.1 (story 3.18's). It starts the
+    /// attempt with no inputs and leaves its taint as it is; the engine
+    /// starts an attempt with [`WriteCommand::StartAttempt`].
     StartStep {
         step_run_id: String,
     },
+    /// Story 3.3: a `queued` step attempt is `running`, with its inputs
+    /// journaled (`step_inputs`) and its taint raised, in one transaction,
+    /// before its first model call (AD-8, AD-10, AD-43). The attempt's taint
+    /// becomes the highest of what it was, `taint`, each input's and each
+    /// input already journaled for it (a loop-back target's); an input's
+    /// taint is at least its producer's committed taint, and a producer must
+    /// be a step run of the same run that finished with its output
+    /// (`succeeded` or `looped_back`). An input's kind decides its producer
+    /// and taint: `untrusted` has none and is always tainted, `step_output`
+    /// and `loop_back` name one. Refused on a finished run, or while
+    /// another step of the run waits for a person. Audited `step.started`
+    /// with the taint and the number of inputs, never an input's text.
+    StartAttempt {
+        step_run_id: String,
+        inputs: Vec<StepInput>,
+        taint: Taint,
+    },
     /// Journal the call and reserve its spend, before the call is made (AD-8, AD-9).
+    /// The step must be `running`. `taint` raises the attempt's taint in the
+    /// same transaction (a tool result the call carries, AD-10); a clean
+    /// value never lowers it. Audited `model_call.reserved` with the taint
+    /// the call goes out with (the attempt's, after the raise).
     ReserveCall {
         step_run_id: String,
         call_id: String,
         call_seq: i64,
         reserved_micro_usd: i64,
         rate_snapshot: String,
+        taint: Taint,
     },
     /// Settle from provider usage; missing usage settles at the reservation.
     SettleCall {
@@ -229,7 +265,69 @@ pub enum WriteCommand {
         status: String,
         output: Option<String>,
     },
-    /// The run's final status; stamps its `finished_at`.
+    /// Story 3.3 (AD-36): settle the producing attempt's call and end the
+    /// attempt `looped_back` with `output` (which holds its reasons) stored,
+    /// and queue attempt n+1 of every step from the step `to` through the
+    /// producer, with the target's new attempt's `loop_back` input (from the
+    /// producer, labelled `loop-back:<key>@<attempt>`, with its taint), in
+    /// one transaction. `to` must be an earlier step of the run, and no step
+    /// from `to` through the producer may wait for a person; anything else
+    /// is refused with nothing changed. Old attempts are never rewritten.
+    /// Audited `model_call.settled+step.looped_back`.
+    SettleAndLoopBack {
+        call_id: String,
+        usage: Option<Usage>,
+        cost_micro_usd: Option<i64>,
+        step_run_id: String,
+        output: String,
+        to: String,
+    },
+    /// Story 3.3 (AD-8, AD-28): a `running` step is `waiting_human`, with
+    /// its inputs and taint (as for [`WriteCommand::StartAttempt`]) and its
+    /// Inbox item, in one transaction; a `queued` one (a gate) first starts
+    /// (`running`, `started_at` stamped, audited `step.started`) in the
+    /// same transaction, as AD-8 has no edge from `queued` to
+    /// `waiting_human`. Only an `Actor::System` creates an item. The item's
+    /// taint is at least its payload's and its attempt's; its payload is a
+    /// finished step run (`succeeded`, `looped_back`, `failed`) or its own
+    /// attempt. Refused on a finished run, or while another step of the run
+    /// waits. Audited `step.waiting` and `inbox.created`.
+    PauseStep {
+        step_run_id: String,
+        inputs: Vec<StepInput>,
+        taint: Taint,
+        item: NewInboxItem,
+    },
+    /// Story 3.3 (AD-36, AD-11): settle the call (if given), end the
+    /// `running` step `failed` with `output`, create its Inbox item (a
+    /// Failure) and finish the run `failed`, in one transaction (refused
+    /// while another step of the run waits). Only an `Actor::System`
+    /// creates an item. Audited as the settlement or the
+    /// step's finish, `inbox.created` and `run.finished`.
+    FailWithItem {
+        step_run_id: String,
+        settle: Option<CallSettlement>,
+        output: Option<String>,
+        item: NewInboxItem,
+    },
+    /// Story 3.3 (AD-8, AD-11): a tool call a `running` step's model asked
+    /// for, journaled `issued` before the tool runs or `refused` (by
+    /// ToolGate or a cap). Audited `tool_call.recorded`.
+    RecordToolCall {
+        tool_call_id: String,
+        step_run_id: String,
+        call_seq: i64,
+        tool: String,
+        status: String,
+    },
+    /// Story 3.3: an `issued` tool call ended, `succeeded` or `failed`.
+    /// Audited `tool_call.finished`.
+    FinishToolCall {
+        tool_call_id: String,
+        status: String,
+    },
+    /// The run's final status; stamps its `finished_at`. Refused while a
+    /// step of the run waits for a person (story 3.3).
     FinishRun {
         run_id: String,
         status: String,
@@ -285,7 +383,8 @@ impl WriteCommand {
     /// content hashes, counts and statuses only. Content fields (a step's
     /// `output`) appear only as their sha256 hex; nothing is copied. The
     /// config History commands build theirs from the intent row in the
-    /// transaction instead (`None` here).
+    /// transaction instead (`None` here), and so do the story 3.3 commands
+    /// whose entries carry a committed taint ([`execute`] builds those).
     fn audit_entry(&self) -> Option<(String, String, Option<Value>)> {
         let output_sha256 = |o: &Option<String>| o.as_deref().map(audit::sha256_hex);
         let tokens = |u: &Option<Usage>| {
@@ -311,25 +410,37 @@ impl WriteCommand {
                     "workflow": workflow,
                 })),
             ),
-            WriteCommand::StartStep { step_run_id } => {
-                ("step.started".into(), step_run_id.clone(), Some(json!({})))
-            }
-            WriteCommand::ReserveCall {
+            WriteCommand::StartStep { .. }
+            | WriteCommand::StartAttempt { .. }
+            | WriteCommand::SettleAndLoopBack { .. }
+            | WriteCommand::PauseStep { .. }
+            | WriteCommand::FailWithItem { .. } => return None,
+            WriteCommand::RecordToolCall {
+                tool_call_id,
                 step_run_id,
-                call_id,
                 call_seq,
-                reserved_micro_usd,
-                rate_snapshot,
+                tool,
+                status,
             } => (
-                "model_call.reserved".into(),
-                call_id.clone(),
+                "tool_call.recorded".into(),
+                tool_call_id.clone(),
                 Some(json!({
                     "call_seq": call_seq,
-                    "rate_snapshot": rate_snapshot,
-                    "reserved_micro_usd": reserved_micro_usd,
+                    "status": status,
                     "step_run_id": step_run_id,
+                    "tool": tool,
                 })),
             ),
+            WriteCommand::FinishToolCall {
+                tool_call_id,
+                status,
+            } => (
+                "tool_call.finished".into(),
+                tool_call_id.clone(),
+                Some(json!({"status": status})),
+            ),
+            // Built in `execute`, with the taint the call goes out with.
+            WriteCommand::ReserveCall { .. } => return None,
             WriteCommand::SettleCall {
                 call_id,
                 usage,
@@ -439,6 +550,41 @@ impl WriteCommand {
     }
 }
 
+/// One input of a step attempt (AD-43's `step_inputs`; story 3.3): the
+/// command's and the read's. `kind` is `step_output` (a `next` input),
+/// `loop_back` (a loop-back's reasons) or `untrusted` (a plan input);
+/// `from_step_run` is the producing attempt (`None` for a plan input). The
+/// text stays where it was written (AD-43: never stored twice).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StepInput {
+    pub kind: String,
+    pub from_step_run: Option<String>,
+    pub label: String,
+    pub taint: Taint,
+}
+
+/// An Inbox item to create (AD-28; story 3.3). `payload` is the step run
+/// whose output it carries; `title` and `body` are the engine's words,
+/// never model text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewInboxItem {
+    pub id: String,
+    pub kind: InboxKind,
+    pub payload: Option<String>,
+    pub taint: Taint,
+    pub title: String,
+    pub body: String,
+}
+
+/// The settlement of a call that ends with a failure
+/// ([`WriteCommand::FailWithItem`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallSettlement {
+    pub call_id: String,
+    pub usage: Option<Usage>,
+    pub cost_micro_usd: Option<i64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TriggerRow {
     pub id: String,
@@ -489,6 +635,16 @@ impl Writer {
     /// # fn f(w: am_store::Writer) -> Result<(), am_store::StoreError> {
     /// let actor = am_domain::Actor::System { component: "docs".into() };
     /// w.exec(actor, am_store::WriteCommand::FinishRun { run_id: "r".into(), status: "succeeded".into() })
+    /// # }
+    /// ```
+    ///
+    /// Nothing resolves an Inbox item yet: there is no command that changes
+    /// an item after it is created (story 3.4 adds the Human-only one):
+    ///
+    /// ```compile_fail
+    /// # fn f(w: am_store::Writer) -> Result<(), am_store::StoreError> {
+    /// let owner = am_domain::Actor::Human { person: "owner".into(), hat: "Reviewer".into() };
+    /// w.exec(owner, am_store::WriteCommand::ResolveInboxItem { item_id: "i".into() })
     /// # }
     /// ```
     ///
@@ -704,8 +860,21 @@ pub(crate) fn execute(
             "refused run: `config_hash` must be 64 lowercase hex characters (sha256)".into(),
         ));
     }
+    // AD-28: only the app itself creates an Inbox item, before anything.
+    if matches!(
+        cmd,
+        WriteCommand::PauseStep { .. } | WriteCommand::FailWithItem { .. }
+    ) && !matches!(actor, Actor::System { .. })
+    {
+        return Err(StoreError::Invalid(format!(
+            "refused: only the app's engine creates an Inbox item (AD-28); {} cannot, and nothing was written",
+            actor.describe()
+        )));
+    }
     let now = now_ts();
     let mut config_entry = None;
+    // The entries of the story 3.3 commands, built from what committed.
+    let mut built: Option<Vec<Entry>> = None;
     // The audit notes a committed or reconciled config intent carried
     // (story 2.1): written right after its own entry, in this transaction,
     // each with the intent's own Actor.
@@ -730,10 +899,29 @@ pub(crate) fn execute(
             }
         }
         WriteCommand::StartStep { step_run_id } => {
-            tx.execute(
-                "UPDATE step_runs SET status = 'running', started_at = COALESCE(started_at, ?2), updated_at = ?2 WHERE id = ?1",
-                params![step_run_id, now],
+            // A known step starts as a clean attempt with no inputs; an
+            // unknown id changes nothing and is audited as before (story
+            // 3.18 owns commands that change no row). Its entry is 3.1's.
+            let known: bool = tx.query_row(
+                "SELECT EXISTS (SELECT 1 FROM step_runs WHERE id = ?1)",
+                params![step_run_id],
+                |r| r.get(0),
             )?;
+            if known {
+                start_attempt(tx, step_run_id, &[], Taint::Clean, &now)?;
+            }
+            built = Some(vec![(
+                "step.started".into(),
+                step_run_id.clone(),
+                Some(json!({})),
+            )]);
+        }
+        WriteCommand::StartAttempt {
+            step_run_id,
+            inputs,
+            taint,
+        } => {
+            built = Some(vec![start_attempt(tx, step_run_id, inputs, *taint, &now)?]);
         }
         WriteCommand::ReserveCall {
             step_run_id,
@@ -741,12 +929,15 @@ pub(crate) fn execute(
             call_seq,
             reserved_micro_usd,
             rate_snapshot,
+            taint,
         } => {
-            let run_id: String = tx.query_row(
-                "SELECT run_id FROM step_runs WHERE id = ?1",
-                params![step_run_id],
-                |r| r.get(0),
-            )?;
+            let step = step_of(tx, step_run_id)?;
+            require(&step, &[StepStatus::Running], "reserves a model call")?;
+            raise_taint(tx, step_run_id, *taint, &now)?;
+            // The taint the call goes out with: the attempt's, after the
+            // raise (story 3.3, review P16).
+            let carried = step.taint.raise(*taint);
+            let run_id = step.run_id;
             tx.execute(
                 "INSERT INTO model_calls (id, step_run_id, call_seq, status, settled, created_at) VALUES (?1, ?2, ?3, 'issued', 0, ?4)",
                 params![call_id, step_run_id, call_seq, now],
@@ -755,6 +946,17 @@ pub(crate) fn execute(
                 "INSERT INTO ledger (id, model_call_id, run_id, kind, reserved_micro_usd, state, rate_snapshot, created_at) VALUES (?1, ?2, ?3, 'model', ?4, 'reserved', ?5, ?6)",
                 params![new_id(), call_id, run_id, reserved_micro_usd, rate_snapshot, now],
             )?;
+            built = Some(vec![(
+                "model_call.reserved".into(),
+                call_id.clone(),
+                Some(json!({
+                    "call_seq": call_seq,
+                    "rate_snapshot": rate_snapshot,
+                    "reserved_micro_usd": reserved_micro_usd,
+                    "step_run_id": step_run_id,
+                    "taint": flag(carried),
+                })),
+            )]);
         }
         WriteCommand::SettleCall {
             call_id,
@@ -778,7 +980,14 @@ pub(crate) fn execute(
             step_run_id,
             status,
             output,
-        } => finish_step(tx, step_run_id, status, output, &now)?,
+        } => {
+            require(
+                &step_of(tx, step_run_id)?,
+                &[StepStatus::Running],
+                "finishes",
+            )?;
+            finish_step(tx, step_run_id, status, output, &now)?;
+        }
         WriteCommand::SettleAndFinishStep {
             call_id,
             usage,
@@ -787,14 +996,175 @@ pub(crate) fn execute(
             status,
             output,
         } => {
+            require(
+                &step_of(tx, step_run_id)?,
+                &[StepStatus::Running],
+                "finishes",
+            )?;
+            call_of_step(tx, call_id, step_run_id)?;
             settle(tx, call_id, *usage, *cost_micro_usd)?;
             finish_step(tx, step_run_id, status, output, &now)?;
         }
-        WriteCommand::FinishRun { run_id, status } => {
-            tx.execute(
-                "UPDATE runs SET status = ?2, finished_at = ?3, updated_at = ?3 WHERE id = ?1",
-                params![run_id, status, now],
+        WriteCommand::SettleAndLoopBack {
+            call_id,
+            usage,
+            cost_micro_usd,
+            step_run_id,
+            output,
+            to,
+        } => {
+            let step = step_of(tx, step_run_id)?;
+            require(&step, &[StepStatus::Running], "loops back")?;
+            call_of_step(tx, call_id, step_run_id)?;
+            settle(tx, call_id, *usage, *cost_micro_usd)?;
+            let queued = loop_back(tx, &step, output, to, &now)?;
+            let (input, output_tokens) = (
+                usage.map(|u| u.input_tokens as i64),
+                usage.map(|u| u.output_tokens as i64),
+            );
+            built = Some(vec![(
+                "model_call.settled+step.looped_back".into(),
+                call_id.clone(),
+                Some(json!({
+                    "cost_micro_usd": cost_micro_usd,
+                    "input_tokens": input,
+                    "output_sha256": audit::sha256_hex(output),
+                    "output_tokens": output_tokens,
+                    "queued": queued,
+                    "step_run_id": step_run_id,
+                    "to": to,
+                })),
+            )]);
+        }
+        WriteCommand::PauseStep {
+            step_run_id,
+            inputs,
+            taint,
+            item,
+        } => {
+            let step = step_of(tx, step_run_id)?;
+            require(
+                &step,
+                &[StepStatus::Queued, StepStatus::Running],
+                "waits for a person",
             )?;
+            run_open_for(tx, &step)?;
+            let mut entries = Vec::new();
+            // AD-8 has no edge from `queued` to `waiting_human`: a queued
+            // step starts first (its inputs, taint and `started_at`), then
+            // waits, in this one transaction (story 3.3, review P3).
+            let journaled = if step.status == StepStatus::Queued {
+                entries.push(start_attempt(tx, step_run_id, inputs, *taint, &now)?);
+                0
+            } else {
+                let (raised, journaled) = journal_inputs(tx, &step, inputs, *taint, &now)?;
+                raise_taint(tx, step_run_id, raised, &now)?;
+                journaled
+            };
+            let attempt = step_of(tx, step_run_id)?;
+            tx.execute(
+                "UPDATE step_runs SET status = 'waiting_human', updated_at = ?2 WHERE id = ?1",
+                params![step_run_id, now],
+            )?;
+            entries.push((
+                "step.waiting".into(),
+                step_run_id.clone(),
+                Some(json!({
+                    "inputs": journaled,
+                    "item": item.id,
+                    "taint": flag(attempt.taint),
+                })),
+            ));
+            entries.push(create_item(tx, &attempt, item, &now)?);
+            built = Some(entries);
+        }
+        WriteCommand::FailWithItem {
+            step_run_id,
+            settle: settlement,
+            output,
+            item,
+        } => {
+            let step = step_of(tx, step_run_id)?;
+            require(&step, &[StepStatus::Running], "fails")?;
+            let first = match settlement {
+                Some(c) => {
+                    call_of_step(tx, &c.call_id, step_run_id)?;
+                    settle(tx, &c.call_id, c.usage, c.cost_micro_usd)?;
+                    finish_step(tx, step_run_id, "failed", output, &now)?;
+                    WriteCommand::SettleAndFinishStep {
+                        call_id: c.call_id.clone(),
+                        usage: c.usage,
+                        cost_micro_usd: c.cost_micro_usd,
+                        step_run_id: step_run_id.clone(),
+                        status: "failed".into(),
+                        output: output.clone(),
+                    }
+                }
+                None => {
+                    finish_step(tx, step_run_id, "failed", output, &now)?;
+                    WriteCommand::FinishStep {
+                        step_run_id: step_run_id.clone(),
+                        status: "failed".into(),
+                        output: output.clone(),
+                    }
+                }
+            };
+            let created = create_item(tx, &step, item, &now)?;
+            let finished = WriteCommand::FinishRun {
+                run_id: step.run_id.clone(),
+                status: "failed".into(),
+            };
+            finish_run(tx, &step.run_id, "failed", &now)?;
+            built = Some(
+                [first.audit_entry(), Some(created), finished.audit_entry()]
+                    .into_iter()
+                    .flatten()
+                    .collect(),
+            );
+        }
+        WriteCommand::RecordToolCall {
+            tool_call_id,
+            step_run_id,
+            call_seq,
+            tool,
+            status,
+        } => {
+            require(
+                &step_of(tx, step_run_id)?,
+                &[StepStatus::Running],
+                "calls a tool",
+            )?;
+            if !matches!(status.as_str(), "issued" | "refused") {
+                return Err(StoreError::Invalid(format!(
+                    "refused: a tool call is recorded `issued` or `refused`, not `{status}`"
+                )));
+            }
+            tx.execute(
+                "INSERT INTO tool_calls (id, step_run_id, call_seq, tool, status, created_at, finished_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, CASE WHEN ?5 = 'refused' THEN ?6 END)",
+                params![tool_call_id, step_run_id, call_seq, tool, status, now],
+            )?;
+        }
+        WriteCommand::FinishToolCall {
+            tool_call_id,
+            status,
+        } => {
+            if !matches!(status.as_str(), "succeeded" | "failed") {
+                return Err(StoreError::Invalid(format!(
+                    "refused: a tool call ends `succeeded` or `failed`, not `{status}`"
+                )));
+            }
+            let n = tx.execute(
+                "UPDATE tool_calls SET status = ?2, finished_at = ?3 WHERE id = ?1 AND status = 'issued'",
+                params![tool_call_id, status, now],
+            )?;
+            if n != 1 {
+                return Err(StoreError::Invalid(format!(
+                    "refused: tool call {tool_call_id} is not an issued call"
+                )));
+            }
+        }
+        WriteCommand::FinishRun { run_id, status } => {
+            finish_run(tx, run_id, status, &now)?;
         }
         WriteCommand::UpsertTrigger { trigger: t } => {
             tx.execute(
@@ -836,14 +1206,21 @@ pub(crate) fn execute(
             config_entry = Some(config_history::drop_intent(tx, intent_id)?);
         }
     }
-    let Some((action, target, args)) = config_entry.or_else(|| cmd.audit_entry()) else {
-        return Err(StoreError::Invalid("the command has no audit entry".into()));
+    let entries = match (config_entry, built) {
+        (Some(entry), _) => vec![entry],
+        (None, Some(entries)) => entries,
+        (None, None) => cmd.audit_entry().into_iter().collect(),
     };
+    if entries.is_empty() {
+        return Err(StoreError::Invalid("the command has no audit entry".into()));
+    }
     let outcome = match cmd {
         WriteCommand::Audit { outcome, .. } => outcome.clone(),
         _ => "ok".to_string(),
     };
-    audit::append(tx, actor, &action, &target, &outcome, args.as_ref(), &now)?;
+    for (action, target, args) in &entries {
+        audit::append(tx, actor, action, target, &outcome, args.as_ref(), &now)?;
+    }
     for (asked, (action, target, args)) in &config_notes {
         audit::append(tx, asked, action, target, "ok", args.as_ref(), &now)?;
     }
@@ -880,6 +1257,453 @@ fn settle(
     Ok(())
 }
 
+/// One audit entry: action, target and redacted `args`.
+type Entry = (String, String, Option<Value>);
+
+/// A taint as its journal column holds it.
+fn flag(taint: Taint) -> i64 {
+    i64::from(taint.is_tainted())
+}
+
+/// The journal column's 0 or 1 as a taint.
+fn taint_of(flag: i64) -> Taint {
+    Taint::of_flag(flag != 0)
+}
+
+/// What the writer reads of one step attempt before it changes it.
+struct StepState {
+    id: String,
+    run_id: String,
+    step_key: String,
+    seq: i64,
+    attempt: i64,
+    status: StepStatus,
+    taint: Taint,
+}
+
+fn step_of(tx: &rusqlite::Transaction, step_run_id: &str) -> Result<StepState, StoreError> {
+    let row: Option<(String, String, i64, i64, String, i64)> = tx
+        .query_row(
+            "SELECT run_id, step_key, seq, attempt, status, taint FROM step_runs WHERE id = ?1",
+            params![step_run_id],
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((run_id, step_key, seq, attempt, status, taint)) = row else {
+        return Err(StoreError::Invalid(format!("step {step_run_id} not found")));
+    };
+    let status = StepStatus::parse(&status).ok_or_else(|| {
+        StoreError::Invalid(format!(
+            "step run {step_run_id} has the unknown state `{status}`"
+        ))
+    })?;
+    Ok(StepState {
+        id: step_run_id.to_string(),
+        run_id,
+        step_key,
+        seq,
+        attempt,
+        status,
+        taint: taint_of(taint),
+    })
+}
+
+/// AD-8's transition table: `step` moves only from one of `from`; anything
+/// else is refused in words naming its state, and nothing changes.
+fn require(step: &StepState, from: &[StepStatus], what: &str) -> Result<(), StoreError> {
+    if from.contains(&step.status) {
+        return Ok(());
+    }
+    let states: Vec<&str> = from.iter().map(|s| s.as_str()).collect();
+    let mut words = format!(
+        "refused: step run {} ({} attempt {}) is {}, and a step {what} only from {} (AD-8); nothing was changed",
+        step.id,
+        step.step_key,
+        step.attempt,
+        step.status.as_str(),
+        states.join(" or ")
+    );
+    if step.status == StepStatus::WaitingHuman {
+        words.push_str(". A step leaves waiting_human only when a person resolves its Inbox item");
+    }
+    Err(StoreError::Invalid(words))
+}
+
+/// The call `call_id` belongs to the step run `step_run_id`.
+fn call_of_step(
+    tx: &rusqlite::Transaction,
+    call_id: &str,
+    step_run_id: &str,
+) -> Result<(), StoreError> {
+    let owner: Option<String> = tx
+        .query_row(
+            "SELECT step_run_id FROM model_calls WHERE id = ?1",
+            params![call_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    match owner {
+        Some(o) if o == step_run_id => Ok(()),
+        Some(_) => Err(StoreError::Invalid(format!(
+            "refused: call {call_id} is not a call of step run {step_run_id}"
+        ))),
+        None => Err(StoreError::Invalid(format!("call {call_id} is not open"))),
+    }
+}
+
+/// Raises the step run's taint to at least `taint` (AD-10: it only rises).
+fn raise_taint(
+    tx: &rusqlite::Transaction,
+    step_run_id: &str,
+    taint: Taint,
+    now: &str,
+) -> Result<(), StoreError> {
+    if taint.is_tainted() {
+        tx.execute(
+            "UPDATE step_runs SET taint = 1, updated_at = ?2 WHERE id = ?1 AND taint = 0",
+            params![step_run_id, now],
+        )?;
+    }
+    Ok(())
+}
+
+/// The kinds of input story 3.3 journals (AD-43; story 3.17 adds the rest).
+const INPUT_KINDS: [&str; 3] = ["step_output", "loop_back", "untrusted"];
+
+/// Journals `inputs` of the attempt `step` and returns the attempt's taint
+/// (the highest of its own, `taint` and each input's) and how many rows
+/// were written. An input from a producer carries at least the producer's
+/// committed taint; a producer must be a step run of the same run.
+fn journal_inputs(
+    tx: &rusqlite::Transaction,
+    step: &StepState,
+    inputs: &[StepInput],
+    taint: Taint,
+    now: &str,
+) -> Result<(Taint, usize), StoreError> {
+    let mut attempt = step.taint.raise(taint);
+    for input in inputs {
+        if !INPUT_KINDS.contains(&input.kind.as_str()) {
+            return Err(StoreError::Invalid(format!(
+                "refused: `{}` is not a kind of step input ({})",
+                input.kind,
+                INPUT_KINDS.join(", ")
+            )));
+        }
+        // The kind decides the producer and the taint (review R6): a plan
+        // input is untrusted, always tainted and has no producer; a step's
+        // output and a loop-back's reasons come from a producer.
+        let mut input_taint = input.taint;
+        match (input.kind.as_str(), &input.from_step_run) {
+            ("untrusted", None) => input_taint = Taint::Tainted,
+            ("untrusted", Some(_)) => {
+                return Err(StoreError::Invalid(
+                    "refused: an `untrusted` input comes from no step run (a step's output is a `step_output` input); nothing was changed".into(),
+                ));
+            }
+            (kind, None) => {
+                return Err(StoreError::Invalid(format!(
+                    "refused: a `{kind}` input names the step run that produced it; nothing was changed"
+                )));
+            }
+            (_, Some(from)) => {
+                input_taint = input_taint.raise(finished_producer(tx, from, &step.run_id)?);
+            }
+        }
+        attempt = attempt.raise(input_taint);
+        tx.execute(
+            "INSERT INTO step_inputs (step_run_id, kind, from_step_run, label, taint, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![step.id, input.kind, input.from_step_run, input.label, flag(input_taint), now],
+        )?;
+    }
+    Ok((attempt, inputs.len()))
+}
+
+/// The committed taint of `step_run_id`, which must be a step run of
+/// `run_id`.
+fn producer_in_run(
+    tx: &rusqlite::Transaction,
+    step_run_id: &str,
+    run_id: &str,
+) -> Result<Taint, StoreError> {
+    let found: Option<i64> = tx
+        .query_row(
+            "SELECT taint FROM step_runs WHERE id = ?1 AND run_id = ?2",
+            params![step_run_id, run_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    found.map(taint_of).ok_or_else(|| {
+        StoreError::Invalid(format!(
+            "refused: {step_run_id} is not a step run of run {run_id}"
+        ))
+    })
+}
+
+/// The committed taint of `step_run_id`, a step run of `run_id` that has
+/// finished with its output (`succeeded`, or `looped_back` with its
+/// reasons): an input never comes from an attempt still queued, running or
+/// waiting (story 3.3, review P16).
+fn finished_producer(
+    tx: &rusqlite::Transaction,
+    step_run_id: &str,
+    run_id: &str,
+) -> Result<Taint, StoreError> {
+    let taint = producer_in_run(tx, step_run_id, run_id)?;
+    let producer = step_of(tx, step_run_id)?;
+    if !matches!(
+        producer.status,
+        StepStatus::Succeeded | StepStatus::LoopedBack
+    ) {
+        return Err(StoreError::Invalid(format!(
+            "refused: step run {step_run_id} ({} attempt {}) is {}, and an input comes only from a step run that has finished with its output; nothing was changed",
+            producer.step_key,
+            producer.attempt,
+            producer.status.as_str()
+        )));
+    }
+    Ok(taint)
+}
+
+/// The run of `step` is open to a step starting or pausing (review R4):
+/// it has not finished, and no other step of it waits for a person.
+fn run_open_for(tx: &rusqlite::Transaction, step: &StepState) -> Result<(), StoreError> {
+    let (status, finished): (String, Option<String>) = tx.query_row(
+        "SELECT status, finished_at FROM runs WHERE id = ?1",
+        params![step.run_id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    if finished.is_some() || matches!(status.as_str(), "succeeded" | "failed" | "cancelled") {
+        return Err(StoreError::Invalid(format!(
+            "refused: run {} has finished ({status}), so no step of it starts or waits; nothing was changed",
+            step.run_id
+        )));
+    }
+    let waiting: Option<String> = tx
+        .query_row(
+            "SELECT step_key FROM step_runs WHERE run_id = ?1 AND status = 'waiting_human' AND id <> ?2 LIMIT 1",
+            params![step.run_id, step.id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    match waiting {
+        Some(key) => Err(StoreError::Invalid(format!(
+            "refused: step `{key}` of run {} waits for a person (waiting_human), so no other step of the run starts or waits until its Inbox item is resolved; nothing was changed",
+            step.run_id
+        ))),
+        None => Ok(()),
+    }
+}
+
+/// No step of `run_id` waits for a person: a run does not finish while
+/// one does (story 3.3, review P16; only a Human resolve moves it on).
+fn no_step_waits(tx: &rusqlite::Transaction, run_id: &str) -> Result<(), StoreError> {
+    let waiting: Option<String> = tx
+        .query_row(
+            "SELECT step_key FROM step_runs WHERE run_id = ?1 AND status = 'waiting_human' LIMIT 1",
+            params![run_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    match waiting {
+        Some(key) => Err(StoreError::Invalid(format!(
+            "refused: step `{key}` of run {run_id} is waiting_human, so the run does not finish until a person resolves its Inbox item; nothing was changed"
+        ))),
+        None => Ok(()),
+    }
+}
+
+/// Starts the `queued` attempt `step_run_id` with its inputs and taint;
+/// its `step.started` entry. The attempt's taint is at least that of every
+/// input already journaled for it (a loop-back target's `loop_back` input).
+fn start_attempt(
+    tx: &rusqlite::Transaction,
+    step_run_id: &str,
+    inputs: &[StepInput],
+    taint: Taint,
+    now: &str,
+) -> Result<Entry, StoreError> {
+    let step = step_of(tx, step_run_id)?;
+    require(&step, &[StepStatus::Queued], "starts")?;
+    run_open_for(tx, &step)?;
+    let journaled_before: i64 = tx.query_row(
+        "SELECT COALESCE(MAX(taint), 0) FROM step_inputs WHERE step_run_id = ?1",
+        params![step_run_id],
+        |r| r.get(0),
+    )?;
+    let taint = taint.raise(taint_of(journaled_before));
+    let (taint, journaled) = journal_inputs(tx, &step, inputs, taint, now)?;
+    tx.execute(
+        "UPDATE step_runs SET status = 'running', taint = MAX(taint, ?3), started_at = COALESCE(started_at, ?2), updated_at = ?2 WHERE id = ?1",
+        params![step_run_id, now, flag(taint)],
+    )?;
+    Ok((
+        "step.started".into(),
+        step_run_id.to_string(),
+        Some(json!({"inputs": journaled, "taint": flag(taint)})),
+    ))
+}
+
+/// Ends the producing attempt `looped_back` with `output` and queues
+/// attempt n+1 of every step from `to` through the producer; returns how
+/// many attempts were queued. The target's new attempt gets its `loop_back`
+/// input (from the producer, with the producer's taint) here, so the edge
+/// is journaled once (AD-43). A loop-back never crosses a step that waits
+/// for a person.
+fn loop_back(
+    tx: &rusqlite::Transaction,
+    producer: &StepState,
+    output: &str,
+    to: &str,
+    now: &str,
+) -> Result<usize, StoreError> {
+    let target: Option<i64> = tx
+        .query_row(
+            "SELECT seq FROM step_runs WHERE run_id = ?1 AND step_key = ?2 LIMIT 1",
+            params![producer.run_id, to],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let Some(target_seq) = target else {
+        return Err(StoreError::Invalid(format!(
+            "refused: run {} has no step `{to}` to loop back to; nothing was changed",
+            producer.run_id
+        )));
+    };
+    if target_seq >= producer.seq {
+        return Err(StoreError::Invalid(format!(
+            "refused: step `{to}` is not earlier than step `{}`, and a loop-back returns to an earlier step (AD-36); nothing was changed",
+            producer.step_key
+        )));
+    }
+    let waiting: Option<String> = tx
+        .query_row(
+            "SELECT step_key FROM step_runs WHERE run_id = ?1 AND seq BETWEEN ?2 AND ?3 AND status = 'waiting_human' LIMIT 1",
+            params![producer.run_id, target_seq, producer.seq],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if let Some(key) = waiting {
+        return Err(StoreError::Invalid(format!(
+            "refused: step `{key}` waits for a person (waiting_human), and a loop-back from step `{}` to step `{to}` would pass it; nothing was changed",
+            producer.step_key
+        )));
+    }
+    tx.execute(
+        "UPDATE step_runs SET status = 'looped_back', output = ?2, finished_at = ?3, updated_at = ?3 WHERE id = ?1",
+        params![producer.id, output, now],
+    )?;
+    let mut st = tx.prepare(
+        "SELECT step_key, seq, MAX(attempt) FROM step_runs WHERE run_id = ?1 AND seq BETWEEN ?2 AND ?3 GROUP BY step_key, seq ORDER BY seq",
+    )?;
+    let rows: Vec<(String, i64, i64)> = st
+        .query_map(params![producer.run_id, target_seq, producer.seq], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })?
+        .collect::<Result<_, _>>()?;
+    for (key, seq, attempt) in &rows {
+        let id = new_id();
+        tx.execute(
+            "INSERT INTO step_runs (id, run_id, step_key, seq, attempt, status, taint, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, 'queued', 0, ?6)",
+            params![id, producer.run_id, key, seq, attempt + 1, now],
+        )?;
+        if key == to {
+            tx.execute(
+                "INSERT INTO step_inputs (step_run_id, kind, from_step_run, label, taint, created_at) VALUES (?1, 'loop_back', ?2, ?3, ?4, ?5)",
+                params![
+                    id,
+                    producer.id,
+                    format!("loop-back:{}@{}", producer.step_key, producer.attempt),
+                    flag(producer.taint),
+                    now
+                ],
+            )?;
+        }
+    }
+    Ok(rows.len())
+}
+
+/// Inserts the Inbox item of the attempt `step` (status `open`), with a
+/// taint at least its payload's and its attempt's (`step` as committed);
+/// its `inbox.created` entry (no words).
+fn create_item(
+    tx: &rusqlite::Transaction,
+    step: &StepState,
+    item: &NewInboxItem,
+    now: &str,
+) -> Result<Entry, StoreError> {
+    let mut taint = item.taint.raise(step_of(tx, &step.id)?.taint);
+    if let Some(payload) = &item.payload {
+        taint = taint.raise(producer_in_run(tx, payload, &step.run_id)?);
+        // A payload's taint can no longer rise once it finished (review
+        // R5): a finished step run, or the item's own attempt.
+        let carried = step_of(tx, payload)?;
+        let finished = matches!(
+            carried.status,
+            StepStatus::Succeeded | StepStatus::LoopedBack | StepStatus::Failed
+        );
+        if payload != &step.id && !finished {
+            return Err(StoreError::Invalid(format!(
+                "refused: an item's payload is a finished step run or its own attempt, and step run {payload} ({} attempt {}) is {}; nothing was changed",
+                carried.step_key,
+                carried.attempt,
+                carried.status.as_str()
+            )));
+        }
+    }
+    tx.execute(
+        "INSERT INTO inbox_items (id, kind, status, run_id, step_run_id, payload, taint, title, body, created_at) VALUES (?1, ?2, 'open', ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        params![
+            item.id,
+            item.kind.as_str(),
+            step.run_id,
+            step.id,
+            item.payload,
+            flag(taint),
+            item.title,
+            item.body,
+            now
+        ],
+    )?;
+    Ok((
+        "inbox.created".into(),
+        item.id.clone(),
+        Some(json!({
+            "kind": item.kind.as_str(),
+            "step_run_id": step.id,
+            "taint": flag(taint),
+        })),
+    ))
+}
+
+/// Finishes the run, never while a step of it waits for a person (review
+/// P16, R4: also when a failure would finish it).
+fn finish_run(
+    tx: &rusqlite::Transaction,
+    run_id: &str,
+    status: &str,
+    now: &str,
+) -> Result<(), StoreError> {
+    no_step_waits(tx, run_id)?;
+    tx.execute(
+        "UPDATE runs SET status = ?2, finished_at = ?3, updated_at = ?3 WHERE id = ?1",
+        params![run_id, status, now],
+    )?;
+    Ok(())
+}
+
+/// Finishes a `running` step (the caller checked the state) as
+/// `succeeded`, `failed` or `cancelled` (AD-8's edges out of `running`
+/// that finish it).
 fn finish_step(
     tx: &rusqlite::Transaction,
     step_run_id: &str,
@@ -887,6 +1711,14 @@ fn finish_step(
     output: &Option<String>,
     now: &str,
 ) -> Result<(), StoreError> {
+    if !matches!(
+        StepStatus::parse(status),
+        Some(StepStatus::Succeeded | StepStatus::Failed | StepStatus::Cancelled)
+    ) {
+        return Err(StoreError::Invalid(format!(
+            "refused: a running step finishes succeeded, failed or cancelled, not `{status}` (AD-8)"
+        )));
+    }
     let n = tx.execute(
         "UPDATE step_runs SET status = ?2, output = ?3, finished_at = ?4, updated_at = ?4 WHERE id = ?1",
         params![step_run_id, status, output, now],
@@ -959,13 +1791,20 @@ fn run_row(r: &rusqlite::Row) -> rusqlite::Result<RunRow> {
     })
 }
 
+/// One step attempt (story 3.3: a step's attempts are rows of their own).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StepRow {
     pub id: String,
     pub step_key: String,
     pub seq: i64,
+    /// 1 for a step's first attempt (and every row from before 0007); a
+    /// loop-back queues the next.
+    pub attempt: i64,
     pub status: String,
     pub output: Option<String>,
+    /// Whether the attempt read untrusted content (AD-10): the mark at rest
+    /// on it and its output. It only ever rises.
+    pub taint: Taint,
     /// When the step started; `None` while it is queued.
     pub started_at: Option<String>,
     /// When the step finished; `None` until then.
@@ -981,6 +1820,35 @@ pub struct CallRow {
     pub settled: bool,
     pub input_tokens: Option<i64>,
     pub output_tokens: Option<i64>,
+}
+
+/// One Inbox item (AD-28; story 3.3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InboxItemRow {
+    pub id: String,
+    pub kind: InboxKind,
+    /// `open` (story 3.4 resolves).
+    pub status: String,
+    pub run_id: String,
+    pub step_run_id: String,
+    pub payload: Option<String>,
+    pub taint: Taint,
+    pub title: String,
+    pub body: String,
+    pub created_at: String,
+    pub resolved_at: Option<String>,
+    pub resolved_by: Option<String>,
+}
+
+/// One tool call of a step attempt (AD-8; story 3.3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolCallRow {
+    pub id: String,
+    pub step_run_id: String,
+    pub call_seq: i64,
+    pub tool: String,
+    /// `issued`, `succeeded`, `failed` or `refused`.
+    pub status: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1049,30 +1917,44 @@ impl Reader {
             .optional()?)
     }
 
+    /// Every step attempt of the run, in workflow order, each step's
+    /// attempts in order.
     pub fn steps(&self, run_id: &str) -> Result<Vec<StepRow>, StoreError> {
         let mut st = self.conn.prepare(
-            "SELECT id, step_key, seq, status, output, started_at, finished_at FROM step_runs WHERE run_id = ?1 ORDER BY seq",
+            "SELECT id, step_key, seq, attempt, status, output, taint, started_at, finished_at FROM step_runs WHERE run_id = ?1 ORDER BY seq, attempt",
         )?;
         let rows = st.query_map(params![run_id], |r| {
             Ok(StepRow {
                 id: r.get(0)?,
                 step_key: r.get(1)?,
                 seq: r.get(2)?,
-                status: r.get(3)?,
-                output: r.get(4)?,
-                started_at: r.get(5)?,
-                finished_at: r.get(6)?,
+                attempt: r.get(3)?,
+                status: r.get(4)?,
+                output: r.get(5)?,
+                taint: taint_of(r.get(6)?),
+                started_at: r.get(7)?,
+                finished_at: r.get(8)?,
             })
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
     pub fn calls_for_run(&self, run_id: &str) -> Result<Vec<CallRow>, StoreError> {
-        let mut st = self.conn.prepare(
+        self.calls_where("s.run_id = ?1", run_id)
+    }
+
+    /// The model calls of one step attempt, in order (story 3.3: a step's
+    /// iterations are counted from these rows).
+    pub fn calls_for_step(&self, step_run_id: &str) -> Result<Vec<CallRow>, StoreError> {
+        self.calls_where("c.step_run_id = ?1", step_run_id)
+    }
+
+    fn calls_where(&self, filter: &str, id: &str) -> Result<Vec<CallRow>, StoreError> {
+        let mut st = self.conn.prepare(&format!(
             "SELECT c.id, c.step_run_id, c.call_seq, c.status, c.settled, c.input_tokens, c.output_tokens
-             FROM model_calls c JOIN step_runs s ON s.id = c.step_run_id WHERE s.run_id = ?1 ORDER BY s.seq, c.call_seq",
-        )?;
-        let rows = st.query_map(params![run_id], |r| {
+             FROM model_calls c JOIN step_runs s ON s.id = c.step_run_id WHERE {filter} ORDER BY s.seq, s.attempt, c.call_seq"
+        ))?;
+        let rows = st.query_map(params![id], |r| {
             Ok(CallRow {
                 id: r.get(0)?,
                 step_run_id: r.get(1)?,
@@ -1084,6 +1966,79 @@ impl Reader {
             })
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// The journaled inputs of one step attempt, in the order they were
+    /// written (story 3.3, AD-43).
+    pub fn step_inputs(&self, step_run_id: &str) -> Result<Vec<StepInput>, StoreError> {
+        let mut st = self.conn.prepare(
+            "SELECT kind, from_step_run, label, taint FROM step_inputs WHERE step_run_id = ?1 ORDER BY id",
+        )?;
+        let rows = st.query_map(params![step_run_id], |r| {
+            Ok(StepInput {
+                kind: r.get(0)?,
+                from_step_run: r.get(1)?,
+                label: r.get(2)?,
+                taint: taint_of(r.get(3)?),
+            })
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// The tool calls of one step attempt, in call order (story 3.3).
+    pub fn tool_calls(&self, step_run_id: &str) -> Result<Vec<ToolCallRow>, StoreError> {
+        let mut st = self.conn.prepare(
+            "SELECT id, step_run_id, call_seq, tool, status FROM tool_calls WHERE step_run_id = ?1 ORDER BY call_seq",
+        )?;
+        let rows = st.query_map(params![step_run_id], |r| {
+            Ok(ToolCallRow {
+                id: r.get(0)?,
+                step_run_id: r.get(1)?,
+                call_seq: r.get(2)?,
+                tool: r.get(3)?,
+                status: r.get(4)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// The Inbox items of a run, oldest first (story 3.3, AD-28).
+    pub fn inbox_items(&self, run_id: &str) -> Result<Vec<InboxItemRow>, StoreError> {
+        let mut st = self.conn.prepare(
+            "SELECT id, kind, status, run_id, step_run_id, payload, taint, title, body, created_at, resolved_at, resolved_by
+             FROM inbox_items WHERE run_id = ?1 ORDER BY created_at, rowid",
+        )?;
+        let rows = st.query_map(params![run_id], |r| {
+            Ok((
+                r.get::<_, String>(1)?,
+                InboxItemRow {
+                    id: r.get(0)?,
+                    kind: InboxKind::Review,
+                    status: r.get(2)?,
+                    run_id: r.get(3)?,
+                    step_run_id: r.get(4)?,
+                    payload: r.get(5)?,
+                    taint: taint_of(r.get(6)?),
+                    title: r.get(7)?,
+                    body: r.get(8)?,
+                    created_at: r.get(9)?,
+                    resolved_at: r.get(10)?,
+                    resolved_by: r.get(11)?,
+                },
+            ))
+        })?;
+        let mut items = Vec::new();
+        for row in rows {
+            let (kind, mut item) = row?;
+            item.kind = InboxKind::parse(&kind).ok_or_else(|| {
+                StoreError::Invalid(format!(
+                    "Inbox item {} has the unknown kind `{kind}`",
+                    item.id
+                ))
+            })?;
+            items.push(item);
+        }
+        Ok(items)
     }
 
     pub fn ledger_for_run(&self, run_id: &str) -> Result<Vec<LedgerRow>, StoreError> {
@@ -1166,6 +2121,13 @@ mod tests {
         .unwrap();
         let r = store.reader().unwrap();
         let step = r.steps("r1").unwrap()[0].id.clone();
+        w.exec(
+            sys(),
+            WriteCommand::StartStep {
+                step_run_id: step.clone(),
+            },
+        )
+        .unwrap();
         for (call, seq) in [("c1", 1), ("c2", 2), ("c3", 3)] {
             w.exec(
                 sys(),
@@ -1175,6 +2137,7 @@ mod tests {
                     call_seq: seq,
                     reserved_micro_usd: 1000,
                     rate_snapshot: "test".into(),
+                    taint: Taint::Clean,
                 },
             )
             .unwrap();
@@ -1268,12 +2231,20 @@ mod tests {
         let step = r.steps("r1").unwrap()[0].id.clone();
         w.exec(
             sys(),
+            WriteCommand::StartStep {
+                step_run_id: step.clone(),
+            },
+        )
+        .unwrap();
+        w.exec(
+            sys(),
             WriteCommand::ReserveCall {
                 step_run_id: step,
                 call_id: "c1".into(),
                 call_seq: 1,
                 reserved_micro_usd: 1000,
                 rate_snapshot: "t".into(),
+                taint: Taint::Clean,
             },
         )
         .unwrap();
@@ -1322,12 +2293,20 @@ mod tests {
         let step = r.steps("r1").unwrap()[0].id.clone();
         w.exec(
             sys(),
+            WriteCommand::StartStep {
+                step_run_id: step.clone(),
+            },
+        )
+        .unwrap();
+        w.exec(
+            sys(),
             WriteCommand::ReserveCall {
                 step_run_id: step.clone(),
                 call_id: "c1".into(),
                 call_seq: 1,
                 reserved_micro_usd: 1000,
                 rate_snapshot: "t".into(),
+                taint: Taint::Clean,
             },
         )
         .unwrap();

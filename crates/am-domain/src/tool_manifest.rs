@@ -2,6 +2,30 @@
 //! class, network needs and default `max_uses_per_step`, as data. The config
 //! validator resolves a seat's `tools:` against it; ToolGate adopts it later.
 //! MCP tools are not here: they come from a project's `tools.yaml` (AD-26).
+//! Story 3.3 adds the [`ToolRunner`] port, which no shipped code implements.
+
+use std::sync::Arc;
+
+use crate::content::UntrustedData;
+use crate::llm::ToolCall;
+use crate::{BoxFuture, CancelSignal};
+
+/// The port that runs a tool call (AD-11; story 3.3, owner condition 2).
+/// am-engine calls it only after ToolGate allowed the call, and only when a
+/// runner was handed to it: the shipped binary hands none and registers no
+/// tool (am-testkit's `FixtureTool` is the one runner, in tests). A result
+/// is always `UntrustedData` (AD-10), so it taints the step that reads it;
+/// an `Err` is the tool's failure in words.
+pub trait ToolRunner: Send + Sync {
+    /// The manifests of the tools this runner runs.
+    fn manifests(&self) -> Vec<ToolManifest>;
+    /// Runs one call; `cancel` ends it (a cap, Stop).
+    fn run(
+        &self,
+        call: ToolCall,
+        cancel: Arc<dyn CancelSignal>,
+    ) -> BoxFuture<Result<UntrustedData, String>>;
+}
 
 /// The action class a tool's manifest declares (AD-11).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

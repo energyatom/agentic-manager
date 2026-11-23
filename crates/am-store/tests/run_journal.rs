@@ -26,8 +26,10 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use am_domain::{Actor, RuntimeLayout, Usage};
-use am_store::{OpenReport, Reader, SCHEMA_VERSION, Store, StoreError, WriteCommand, new_id};
+use am_domain::{Actor, RuntimeLayout, Taint, Usage};
+use am_store::{
+    OpenReport, Reader, SCHEMA_VERSION, StepInput, Store, StoreError, WriteCommand, new_id,
+};
 use rusqlite::{Connection, params};
 use serde_json::{Value, json};
 
@@ -223,6 +225,8 @@ fn the_writer_stamps_step_and_run_times() {
             call_seq: 1,
             reserved_micro_usd: 0,
             rate_snapshot: "none".into(),
+            // Story 3.3: raised, never lowered (AD-10).
+            taint: Taint::Clean,
         },
     )
     .unwrap();
@@ -475,4 +479,490 @@ fn migration_0006_adds_the_pin_and_the_times_to_an_older_database() {
         "{all:#?}"
     );
     assert_eq!(reader.verify_audit_chain().unwrap(), None);
+}
+
+// ------------------------------------------------------------------ story 3.3
+//
+// Epic 3 story 3 (AD-7, AD-8): every step attempt is a step-run row with an
+// `attempt` number and a `taint` flag; migration 0007 rebuilds `step_runs`
+// (its `UNIQUE (run_id, step_key)` becomes `UNIQUE (run_id, step_key,
+// attempt)`) and adds `step_inputs`, `tool_calls` and `inbox_items`; a
+// loop-back closes the producing attempt `looped_back` and queues new
+// attempts from the target step through the producer, in one transaction,
+// never rewriting an old row. Written before migration 0007 and the
+// commands exist.
+
+/// The schema version before migration 0007.
+const BEFORE_ATTEMPTS: i64 = 6;
+
+/// Row 29, Old database: a schema-6 database holding a finished run and an
+/// unfinished one (a settled call, a queued step) migrates to 0007 after a
+/// backup; every row is kept as attempt 1, untainted, with its output,
+/// status and times; the new tables are empty; foreign keys still hold;
+/// the step is reported and audited; and the new commands work on it.
+#[test]
+fn migration_0007_keeps_every_row_as_attempt_one_untainted() {
+    let dir = tempfile::tempdir().unwrap();
+    existing_runtime(dir.path());
+    let path = db(dir.path());
+    am_store::testing::database_at_version(&path, BEFORE_ATTEMPTS).unwrap();
+    {
+        let c = Connection::open(&path).unwrap();
+        c.execute_batch(
+            "INSERT INTO runs (id, workflow, origin, status, created_at, updated_at, config_hash, finished_at)
+               VALUES ('old-run', 'wf-0', 'manual', 'running', '2026-01-02T10:00:00.000Z', '2026-01-02T10:00:04.000Z', NULL, NULL);
+             INSERT INTO step_runs (id, run_id, step_key, seq, status, output, updated_at, started_at, finished_at)
+               VALUES ('old-a', 'old-run', 'a', 0, 'succeeded', 'kept output', '2026-01-02T10:00:03.000Z', '2026-01-02T10:00:01.000Z', '2026-01-02T10:00:03.000Z');
+             INSERT INTO step_runs (id, run_id, step_key, seq, status, output, updated_at, started_at, finished_at)
+               VALUES ('old-b', 'old-run', 'b', 1, 'queued', NULL, '2026-01-02T10:00:00.000Z', NULL, NULL);
+             INSERT INTO model_calls (id, step_run_id, call_seq, status, settled, input_tokens, output_tokens, created_at)
+               VALUES ('old-call', 'old-a', 1, 'settled', 1, 12, 3, '2026-01-02T10:00:02.000Z');
+             INSERT INTO ledger (id, model_call_id, run_id, kind, reserved_micro_usd, settled_micro_usd, state, rate_snapshot, created_at)
+               VALUES ('old-ledger', 'old-call', 'old-run', 'model', 0, 0, 'settled', 'none', '2026-01-02T10:00:02.000Z');",
+        )
+        .unwrap();
+    }
+
+    let (store, report) = open_project(dir.path()).unwrap();
+
+    assert_eq!(SCHEMA_VERSION, BEFORE_ATTEMPTS + 1, "0007 is this story's");
+    assert_eq!(report.version, SCHEMA_VERSION);
+    let step = report
+        .applied
+        .iter()
+        .find(|m| m.from == BEFORE_ATTEMPTS)
+        .expect("the 6 to 7 step is reported");
+    assert_eq!(step.to, BEFORE_ATTEMPTS + 1);
+    assert!(
+        step.backup.as_ref().is_some_and(|b| b.is_file()),
+        "a pre-migration copy first (AD-7): {step:?}"
+    );
+    for column in ["attempt", "taint"] {
+        assert!(
+            columns(&path, "step_runs").contains(&column.to_string()),
+            "step_runs.{column}"
+        );
+    }
+    for table in ["step_inputs", "tool_calls", "inbox_items"] {
+        assert!(!columns(&path, table).is_empty(), "the table {table}");
+    }
+
+    let reader = store.reader().unwrap();
+    let steps = reader.steps("old-run").unwrap();
+    assert_eq!(
+        steps
+            .iter()
+            .map(|s| (
+                s.id.as_str(),
+                s.step_key.as_str(),
+                s.seq,
+                s.attempt,
+                s.status.as_str(),
+                s.output.as_deref(),
+                s.taint,
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                "old-a",
+                "a",
+                0,
+                1,
+                "succeeded",
+                Some("kept output"),
+                Taint::Clean
+            ),
+            ("old-b", "b", 1, 1, "queued", None, Taint::Clean),
+        ]
+    );
+    assert_eq!(
+        (
+            steps[0].started_at.as_deref(),
+            steps[0].finished_at.as_deref()
+        ),
+        (
+            Some("2026-01-02T10:00:01.000Z"),
+            Some("2026-01-02T10:00:03.000Z")
+        )
+    );
+    for s in &steps {
+        assert!(reader.step_inputs(&s.id).unwrap().is_empty());
+        assert!(reader.tool_calls(&s.id).unwrap().is_empty());
+    }
+    assert!(reader.inbox_items("old-run").unwrap().is_empty());
+    let calls = reader.calls_for_run("old-run").unwrap();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(
+        (calls[0].step_run_id.as_str(), calls[0].input_tokens),
+        ("old-a", Some(12))
+    );
+    assert_eq!(reader.ledger_for_run("old-run").unwrap().len(), 1);
+    let broken: i64 = Connection::open(&path)
+        .unwrap()
+        .query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(broken, 0, "the rebuild kept every reference");
+
+    // The new commands work on the old run: its queued step starts.
+    store
+        .writer()
+        .exec(
+            sys(),
+            WriteCommand::StartAttempt {
+                step_run_id: "old-b".into(),
+                inputs: vec![],
+                taint: Taint::Clean,
+            },
+        )
+        .unwrap();
+    assert_eq!(reader.steps("old-run").unwrap()[1].status, "running");
+
+    let all = audit_entries(&reader);
+    assert!(
+        all.iter().any(|e| e["action"] == "store.migrated"
+            && e["outcome"]
+                .as_str()
+                .is_some_and(|o| o.starts_with(&format!(
+                    "from version {BEFORE_ATTEMPTS} to {}",
+                    BEFORE_ATTEMPTS + 1
+                )))),
+        "{all:#?}"
+    );
+    assert_eq!(reader.verify_audit_chain().unwrap(), None);
+}
+
+/// Starts step `id` (clean, no inputs), reserves its call `call` and
+/// settles it with the step's finish `succeeded`, holding `output`.
+fn run_step(store: &Store, id: &str, call: &str, output: &str) {
+    let w = store.writer();
+    w.exec(
+        sys(),
+        WriteCommand::StartAttempt {
+            step_run_id: id.into(),
+            inputs: vec![],
+            taint: Taint::Clean,
+        },
+    )
+    .unwrap();
+    w.exec(
+        sys(),
+        WriteCommand::ReserveCall {
+            step_run_id: id.into(),
+            call_id: call.into(),
+            call_seq: 1,
+            reserved_micro_usd: 0,
+            rate_snapshot: "none".into(),
+            taint: Taint::Clean,
+        },
+    )
+    .unwrap();
+    w.exec(
+        sys(),
+        WriteCommand::SettleAndFinishStep {
+            call_id: call.into(),
+            usage: None,
+            cost_micro_usd: None,
+            step_run_id: id.into(),
+            status: "succeeded".into(),
+            output: Some(output.into()),
+        },
+    )
+    .unwrap();
+}
+
+/// Row 8 at the store: a loop-back from `check` to `draft` settles the
+/// producing call and closes `check`'s attempt 1 `looped_back` with its
+/// output stored, and queues attempt 2 of `draft`, `edit` and `check` (not
+/// of `publish`, after the producer), in one transaction; attempt-1 rows
+/// are never rewritten; the reader lists every attempt in workflow order.
+/// A target that is unknown or after the producer is refused and changes
+/// nothing.
+#[test]
+fn a_loop_back_keeps_the_old_attempt_and_queues_new_ones() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, _) = open_project(dir.path()).unwrap();
+    let w = store.writer();
+    create_run(
+        &store,
+        owner(),
+        "run-1",
+        Some(HASH_A),
+        &["draft", "edit", "check", "publish"],
+    );
+    let reader = store.reader().unwrap();
+    let ids: Vec<String> = reader
+        .steps("run-1")
+        .unwrap()
+        .into_iter()
+        .map(|s| s.id)
+        .collect();
+    run_step(&store, &ids[0], "call-1", "version one");
+    run_step(&store, &ids[1], "call-2", "edited one");
+    w.exec(
+        sys(),
+        WriteCommand::StartAttempt {
+            step_run_id: ids[2].clone(),
+            inputs: vec![],
+            taint: Taint::Clean,
+        },
+    )
+    .unwrap();
+    w.exec(
+        sys(),
+        WriteCommand::ReserveCall {
+            step_run_id: ids[2].clone(),
+            call_id: "call-3".into(),
+            call_seq: 1,
+            reserved_micro_usd: 0,
+            rate_snapshot: "none".into(),
+            taint: Taint::Clean,
+        },
+    )
+    .unwrap();
+    let before = reader.steps("run-1").unwrap();
+    let audited = audit_entries(&reader).len();
+    let reasons = r#"{"reasons":["tighten the opening"]}"#;
+
+    // Refused: a target the run does not have, or one after the producer.
+    for to in ["nowhere", "publish"] {
+        let refused = w.exec(
+            sys(),
+            WriteCommand::SettleAndLoopBack {
+                call_id: "call-3".into(),
+                usage: None,
+                cost_micro_usd: None,
+                step_run_id: ids[2].clone(),
+                output: reasons.into(),
+                to: to.into(),
+            },
+        );
+        assert!(refused.is_err(), "{to}");
+        assert_eq!(reader.steps("run-1").unwrap(), before, "{to}");
+        assert!(!reader.calls_for_run("run-1").unwrap()[2].settled, "{to}");
+        assert_eq!(audit_entries(&reader).len(), audited, "{to}");
+    }
+
+    w.exec(
+        sys(),
+        WriteCommand::SettleAndLoopBack {
+            call_id: "call-3".into(),
+            usage: Some(Usage {
+                input_tokens: 4,
+                output_tokens: 2,
+            }),
+            cost_micro_usd: None,
+            step_run_id: ids[2].clone(),
+            output: reasons.into(),
+            to: "draft".into(),
+        },
+    )
+    .unwrap();
+
+    let after = reader.steps("run-1").unwrap();
+    assert_eq!(
+        after
+            .iter()
+            .map(|s| (s.step_key.as_str(), s.seq, s.attempt, s.status.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("draft", 0, 1, "succeeded"),
+            ("draft", 0, 2, "queued"),
+            ("edit", 1, 1, "succeeded"),
+            ("edit", 1, 2, "queued"),
+            ("check", 2, 1, "looped_back"),
+            ("check", 2, 2, "queued"),
+            ("publish", 3, 1, "queued"),
+        ]
+    );
+    let old = |key: &str, rows: &[am_store::StepRow]| {
+        rows.iter()
+            .find(|s| s.step_key == key && s.attempt == 1)
+            .cloned()
+            .unwrap()
+    };
+    for key in ["draft", "edit", "publish"] {
+        assert_eq!(old(key, &after), old(key, &before), "{key} attempt 1");
+    }
+    let check1 = old("check", &after);
+    assert_eq!(check1.output.as_deref(), Some(reasons));
+    assert!(check1.finished_at.is_some());
+    assert_eq!(check1.started_at, old("check", &before).started_at);
+    for s in after.iter().filter(|s| s.attempt == 2) {
+        assert!(!ids.contains(&s.id), "a new row: {s:?}");
+        assert_eq!((s.started_at.clone(), s.finished_at.clone()), (None, None));
+        assert_eq!(s.output, None);
+        assert_eq!(s.taint, Taint::Clean);
+    }
+    let call = reader.calls_for_run("run-1").unwrap()[2].clone();
+    assert!(call.settled);
+    assert_eq!((call.input_tokens, call.output_tokens), (Some(4), Some(2)));
+
+    // Audited once, with ids and counts only.
+    let all = audit_entries(&reader);
+    let looped: Vec<&Value> = all
+        .iter()
+        .filter(|e| {
+            e["action"]
+                .as_str()
+                .is_some_and(|a| a.contains("step.looped_back"))
+        })
+        .collect();
+    assert_eq!(looped.len(), 1, "{all:#?}");
+    assert!(!looped[0].to_string().contains("tighten the opening"));
+    assert_eq!(reader.verify_audit_chain().unwrap(), None);
+}
+
+// ------------------------------------------------------- review round 1
+//
+// Story 3.3 review patch round 1 (coordinator's triage, 2026-11-23): P9
+// (the loop-back edge is stored once, as the target's `loop_back` input,
+// AD-43) and P10 (a migration step fails only on a reference it broke).
+// Written before the patches.
+
+/// P9: the journal holds the loop-back edge once: `step_runs` has no
+/// `loop_back_from` column, and the loop-back's own transaction writes the
+/// target's new attempt's `loop_back` input (from the producing attempt,
+/// labelled `loop-back:<key>@<attempt>`, with the producer's taint), while
+/// that attempt is still `queued`. The other new attempts have no input
+/// yet (theirs come when they start).
+#[test]
+fn the_loop_back_input_is_journaled_by_the_loop_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, _) = open_project(dir.path()).unwrap();
+    create_run(
+        &store,
+        owner(),
+        "run-1",
+        Some(HASH_A),
+        &["draft", "edit", "check"],
+    );
+    assert!(
+        !columns(&db(dir.path()), "step_runs").contains(&"loop_back_from".to_string()),
+        "the edge is not stored twice (AD-43)"
+    );
+    let reader = store.reader().unwrap();
+    let ids: Vec<String> = reader
+        .steps("run-1")
+        .unwrap()
+        .into_iter()
+        .map(|s| s.id)
+        .collect();
+    run_step(&store, &ids[0], "call-1", "version one");
+    run_step(&store, &ids[1], "call-2", "edited one");
+    let w = store.writer();
+    w.exec(
+        sys(),
+        WriteCommand::StartAttempt {
+            step_run_id: ids[2].clone(),
+            inputs: vec![],
+            taint: Taint::Tainted,
+        },
+    )
+    .unwrap();
+    w.exec(
+        sys(),
+        WriteCommand::ReserveCall {
+            step_run_id: ids[2].clone(),
+            call_id: "call-3".into(),
+            call_seq: 1,
+            reserved_micro_usd: 0,
+            rate_snapshot: "none".into(),
+            taint: Taint::Tainted,
+        },
+    )
+    .unwrap();
+    w.exec(
+        sys(),
+        WriteCommand::SettleAndLoopBack {
+            call_id: "call-3".into(),
+            usage: None,
+            cost_micro_usd: None,
+            step_run_id: ids[2].clone(),
+            output: r#"{"reasons":["tighten the opening"]}"#.into(),
+            to: "draft".into(),
+        },
+    )
+    .unwrap();
+
+    let steps = reader.steps("run-1").unwrap();
+    let attempt2 = |key: &str| {
+        steps
+            .iter()
+            .find(|s| s.step_key == key && s.attempt == 2)
+            .cloned()
+            .unwrap()
+    };
+    let draft2 = attempt2("draft");
+    assert_eq!(draft2.status, "queued");
+    assert_eq!(
+        reader.step_inputs(&draft2.id).unwrap(),
+        vec![StepInput {
+            kind: "loop_back".into(),
+            from_step_run: Some(ids[2].clone()),
+            label: "loop-back:check@1".into(),
+            taint: Taint::Tainted,
+        }],
+        "written by the loop-back, before the attempt starts"
+    );
+    for key in ["edit", "check"] {
+        assert!(
+            reader.step_inputs(&attempt2(key).id).unwrap().is_empty(),
+            "{key}"
+        );
+    }
+}
+
+/// P10: a reference that was already broken before a migration step (a
+/// row left by an older bug, or by hand, with foreign keys off) does not
+/// fail the step: the step fails only on a reference it broke. The row is
+/// kept as it was.
+#[test]
+fn a_reference_broken_before_the_migration_does_not_fail_it() {
+    let dir = tempfile::tempdir().unwrap();
+    existing_runtime(dir.path());
+    let path = db(dir.path());
+    am_store::testing::database_at_version(&path, BEFORE_ATTEMPTS).unwrap();
+    {
+        let c = Connection::open(&path).unwrap();
+        c.pragma_update(None, "foreign_keys", "OFF").unwrap();
+        c.execute_batch(
+            "INSERT INTO runs (id, workflow, origin, status, created_at, updated_at)
+               VALUES ('old-run', 'wf-0', 'manual', 'failed', '2026-01-02T10:00:00.000Z', '2026-01-02T10:00:04.000Z');
+             INSERT INTO model_calls (id, step_run_id, call_seq, status, settled, created_at)
+               VALUES ('orphan-call', 'no-such-step', 1, 'settled', 1, '2026-01-02T10:00:02.000Z');",
+        )
+        .unwrap();
+        let broken: i64 = c
+            .query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(broken, 1, "the fixture holds one broken reference");
+    }
+
+    let opened = open_project(dir.path());
+
+    let (store, report) = opened.expect("a reference broken before the step does not fail it");
+    assert_eq!(report.version, SCHEMA_VERSION);
+    let kept: i64 = Connection::open(&path)
+        .unwrap()
+        .query_row(
+            "SELECT count(*) FROM model_calls WHERE id = 'orphan-call'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(kept, 1, "the row is kept as it was");
+    assert_eq!(
+        store
+            .reader()
+            .unwrap()
+            .run("old-run")
+            .unwrap()
+            .unwrap()
+            .status,
+        "failed"
+    );
 }

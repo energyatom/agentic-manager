@@ -3,7 +3,8 @@
 # every crate forbids unsafe, AD-23 vocabulary denylist, AD-32 runtime paths,
 # AD-12 fixed hosts and the egress seam guard), am-store's doctests
 # (the `compile_fail` proof that a write needs an Actor, story 1.6) and `agentic validate`
-# over the valid fixture projects (story 1.4) and templates/ (story 1.5).
+# over the valid fixture projects (story 1.4; story 3.3 adds hand-offs/) and
+# templates/ (story 1.5).
 # `just supply-chain` runs the licence, bans and sources policy (cargo-deny)
 # and cargo-audit.
 
@@ -29,11 +30,14 @@ test:
     cargo nextest run
 
 # nextest runs no doctests; am-store's include the `compile_fail` proof that
-# `Writer::exec` needs an Actor (AD-24, story 1.6).
+# `Writer::exec` needs an Actor (AD-24, story 1.6) and that no command
+# resolves an Inbox item yet (story 3.3); am-domain's, that nothing converts
+# into or out of a TrustedInput (AD-10, story 3.3).
 doctest:
-    cargo test --doc -p am-store
+    cargo test --doc -p am-store -p am-domain
 
-# AD-4: crate edges follow the Design Paradigm matrix (cargo metadata, offline).
+# AD-4: crate edges follow the Design Paradigm matrix (cargo metadata, offline);
+# story 3.3 (AD-10): only am-engine calls TrustedInput's two constructors.
 check-deps:
     cargo xtask check-deps
 
@@ -57,7 +61,8 @@ fixed-hosts:
 
 # Story 2.2, decision 7: shipped code never names am-net's test-only
 # constructor NetEgress::with_seams; story 3.2: nor am-server's test-only
-# fixture route (router_with_fixture, FixtureRoute).
+# fixture route (router_with_fixture, FixtureRoute); story 3.3: nor
+# am-engine's tool seam (run_plan_with_tools).
 seam-guard:
     cargo xtask seam-guard
 
@@ -70,7 +75,7 @@ validate:
     #!/usr/bin/env bash
     set -euo pipefail
     cargo build -q -p am-app --bin agentic
-    for project in fixtures/projects/valid*/ fixtures/projects/anatomy/ fixtures/projects/one-step/ templates/departments/*/ templates/roles/*/ templates/samples/*/; do
+    for project in fixtures/projects/valid*/ fixtures/projects/anatomy/ fixtures/projects/one-step/ fixtures/projects/hand-offs/ templates/departments/*/ templates/roles/*/ templates/samples/*/; do
         "$CARGO_TARGET_DIR/debug/agentic" validate --template "$project"
     done
 

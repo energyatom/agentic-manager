@@ -3,15 +3,22 @@
 //! authorises; on restart an unfinished run resumes at its last committed
 //! transition, a call without `settled` is marked lost (settled at its
 //! reservation) and re-issued.
+//!
+//! Story 3.3 (AD-10, amended 2026-11-23): earlier steps' journaled outputs
+//! reach a step as inputs, never as an `Instruction`. Each goes through
+//! `TrustedInput::from_step_output` with the producing step run's taint as
+//! the journal holds it (also on resume): a clean producer's output is a
+//! trusted input labelled `step:<key>@<attempt>`, a tainted one's is fenced
+//! `UntrustedData` with the same label and taints the step.
 
 use std::path::Path;
 use std::sync::Arc;
 
 use am_domain::{
     Actor, ChatRequest, EventSink, Instruction, LlmProvider, Message, Part, Role, StopReason,
-    StreamEvent, Usage,
+    StreamEvent, TrustedInput, Usage,
 };
-use am_store::{Reader, StoreError, WriteCommand, Writer, new_id};
+use am_store::{Reader, StepInput, StepRow, StoreError, WriteCommand, Writer, new_id};
 use tokio_util::sync::CancellationToken;
 
 use crate::TokenSignal;
@@ -103,10 +110,12 @@ pub async fn drive_run(
         return Ok(run.status);
     }
     let calls = reader.calls_for_run(run_id)?;
-    let mut previous_outputs: Vec<String> = Vec::new();
+    // The earlier steps that succeeded, as the journal holds them (their
+    // outputs and their committed taint).
+    let mut earlier: Vec<StepRow> = Vec::new();
     for step in reader.steps(run_id)? {
         if step.status == "succeeded" {
-            previous_outputs.push(step.output.unwrap_or_default());
+            earlier.push(step);
             continue;
         }
         let step_calls: Vec<_> = calls.iter().filter(|c| c.step_run_id == step.id).collect();
@@ -119,20 +128,40 @@ pub async fn drive_run(
                 },
             )?;
         }
+        // Each earlier output is an input: trusted from a clean producer,
+        // fenced from a tainted one (by its committed taint, AD-10).
+        let mut inputs = Vec::new();
+        let (mut trusted, mut fenced) = (Vec::new(), Vec::new());
+        let mut taint = step.taint;
+        for prev in &earlier {
+            let label = format!("step:{}@{}", prev.step_key, prev.attempt);
+            let text = prev.output.clone().unwrap_or_default();
+            match TrustedInput::from_step_output(label.clone(), text, prev.taint) {
+                part @ Part::Trusted(_) => trusted.push(part),
+                part => fenced.push(part),
+            }
+            taint = taint.raise(prev.taint);
+            inputs.push(StepInput {
+                kind: "step_output".into(),
+                from_step_run: Some(prev.id.clone()),
+                label,
+                taint: prev.taint,
+            });
+        }
         if step.status == "queued" {
             writer.exec(
                 system("engine"),
-                WriteCommand::StartStep {
+                WriteCommand::StartAttempt {
                     step_run_id: step.id.clone(),
+                    inputs,
+                    taint,
                 },
             )?;
         }
         let call_seq = step_calls.iter().map(|c| c.call_seq).max().unwrap_or(0) + 1;
         let prompt = format!(
-            "Step {} of workflow {}. Earlier steps said: {}. Reply with one short line.",
-            step.step_key,
-            wf.workflow,
-            previous_outputs.join(" | ")
+            "Step {} of workflow {}. Reply with one short line.",
+            step.step_key, wf.workflow
         );
         let est_input = (prompt.len() as u64 / 4).max(1);
         let reserved = wf.price.cost(est_input, wf.max_output_tokens as u64);
@@ -145,14 +174,18 @@ pub async fn drive_run(
                 call_seq,
                 reserved_micro_usd: reserved,
                 rate_snapshot: wf.price.snapshot.clone(),
+                taint,
             },
         )?;
+        let mut parts = vec![Part::Instruction(Instruction::authored(prompt))];
+        parts.extend(trusted);
+        parts.extend(fenced);
         let request = ChatRequest {
             model: wf.model.clone(),
             system: vec![Instruction::authored("You are a step in a test workflow.")],
             messages: vec![Message {
                 role: Role::User,
-                parts: vec![Part::Instruction(Instruction::authored(prompt))],
+                parts,
             }],
             tools: vec![],
             max_output_tokens: wf.max_output_tokens,
@@ -190,7 +223,6 @@ pub async fn drive_run(
                     )?;
                     return Ok("cancelled".into());
                 }
-                previous_outputs.push(out.text.clone());
                 // Settle and finish in one transaction: no crash window in
                 // which a paid call sits under an unfinished step (AD-8).
                 writer.exec(
@@ -204,6 +236,12 @@ pub async fn drive_run(
                         output: Some(out.text),
                     },
                 )?;
+                // The step as the journal now holds it (its output and its
+                // committed taint) is an earlier step of the next, on a
+                // fresh run as on a resumed one (review P6).
+                if let Some(done) = reader.steps(run_id)?.into_iter().find(|s| s.id == step.id) {
+                    earlier.push(done);
+                }
             }
             Err(e) => {
                 writer.exec(

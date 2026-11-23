@@ -10,7 +10,9 @@ use am_domain::{
 use base64::Engine as _;
 use serde_json::{Value, json};
 
-use crate::common::{drive_sse, file_label, render_untrusted_text, send_cancellable};
+use crate::common::{
+    drive_sse, file_label, render_trusted_input, render_untrusted_text, send_cancellable,
+};
 
 pub const ANTHROPIC_HOST: &str = "api.anthropic.com";
 pub const ANTHROPIC_VERSION: &str = "2026-10-21";
@@ -47,6 +49,9 @@ impl AnthropicProvider {
                     (Role::User, Part::Instruction(i)) => {
                         content.push(json!({"type": "text", "text": i.text()}))
                     }
+                    (Role::User, Part::Trusted(t)) => content.push(
+                        json!({"type": "text", "text": render_trusted_input(t.label(), t.text())}),
+                    ),
                     (Role::User, Part::Untrusted(d)) => {
                         content.extend(untrusted_blocks(d, &req.model)?)
                     }
@@ -81,7 +86,15 @@ impl AnthropicProvider {
                             json!({"type": "tool_use", "id": c.id, "name": c.name, "input": input}),
                         )
                     }
-                    _ => {
+                    // Every variant by name (AD-10): a new one must be placed.
+                    (Role::User, Part::AssistantText(_) | Part::ToolCall(_))
+                    | (
+                        Role::Assistant,
+                        Part::Instruction(_)
+                        | Part::Trusted(_)
+                        | Part::Untrusted(_)
+                        | Part::ToolResult { .. },
+                    ) => {
                         return Err(ProviderError::Protocol(
                             "a part was placed in the wrong role".into(),
                         ));

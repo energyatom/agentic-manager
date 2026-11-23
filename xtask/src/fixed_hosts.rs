@@ -2,7 +2,9 @@
 //! shipped source names must be on one named list, kept here with a reason
 //! for each. The scan reads every string literal of `crates/*/src` (a
 //! crate's `tests/` and its `#[cfg(test)]` items are left out; comments are
-//! not code) and finds each host by its URL (`scheme://host[:port]`,
+//! not code; story 3.3 reads every `.rs` of a crate but its `tests/`,
+//! `benches/` and `examples/`, reads C strings as literals, and fails
+//! closed on a literal that never ends) and finds each host by its URL (`scheme://host[:port]`,
 //! anywhere in a literal) or by its bare name (a literal that is only a DNS
 //! name ending in a common top-level domain, or an IPv4 address, with an
 //! optional `:port`; a name inside a sentence, such as an example in a
@@ -16,7 +18,7 @@
 use std::path::Path;
 
 use crate::Failure;
-use crate::forbid::string_literals;
+use crate::forbid::{string_literals, unterminated_finding};
 use crate::shipped::{in_ranges, sources, test_ranges};
 
 /// The one named list: host, port, and why the app may name it. A host
@@ -359,6 +361,11 @@ pub fn run(root: &Path) -> Result<String, Failure> {
     let mut scanned = 0usize;
     for source in sources(root) {
         scanned += 1;
+        // A literal that never ends hides the rest: fail closed (review P4).
+        if let Some(finding) = unterminated_finding(&source.name, &source.text) {
+            findings.push(finding);
+            continue;
+        }
         let tests = test_ranges(&source.text);
         for (line, text) in string_literals(&source.text) {
             if in_ranges(&tests, line) {

@@ -220,6 +220,45 @@ impl<'n> Fields<'n> {
         }
     }
 
+    /// Optional duration within `min..=max`, written `<n>s`, `<n>m` or
+    /// `<n>h` (story 3.3: a step's `wall_clock`).
+    pub fn duration(
+        &self,
+        rep: &mut Report,
+        name: &str,
+        min: std::time::Duration,
+        max: std::time::Duration,
+    ) -> Option<std::time::Duration> {
+        let node = self.get(name)?;
+        let parsed = match &node.kind {
+            Kind::Str(s) => parse_duration(s),
+            Kind::Null => return None,
+            _ => None,
+        };
+        let Some(d) = parsed else {
+            self.wrong(rep, name, node, "a duration such as 30s, 10m or 2h");
+            return None;
+        };
+        if d < min || d > max {
+            rep.error(
+                node.line,
+                format!(
+                    "'{name}' is {}; it must be from {} to {}",
+                    duration_words(d),
+                    duration_words(min),
+                    duration_words(max)
+                ),
+                format!(
+                    "set `{name}:` to a duration from {} to {}, such as 30s, 10m or 2h",
+                    duration_words(min),
+                    duration_words(max)
+                ),
+            );
+            return None;
+        }
+        Some(d)
+    }
+
     /// Optional non-negative amount of money or price, as i64 micro-units.
     pub fn micros(&self, rep: &mut Report, name: &str) -> Option<i64> {
         let node = self.get(name)?;
@@ -313,5 +352,55 @@ pub(crate) fn unique(rep: &mut Report, what: &str, ids: &[Text]) {
                 format!("remove the second '{}' or give it its own id", t.value),
             );
         }
+    }
+}
+
+/// `<n>s`, `<n>m` or `<n>h` (a whole number of seconds, minutes or hours).
+pub(crate) fn parse_duration(text: &str) -> Option<std::time::Duration> {
+    let text = text.trim();
+    let unit = text.chars().last()?;
+    let seconds = match unit {
+        's' => 1,
+        'm' => 60,
+        'h' => 3600,
+        _ => return None,
+    };
+    let digits = &text[..text.len() - 1];
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let n: u64 = digits.parse().ok()?;
+    Some(std::time::Duration::from_secs(n.checked_mul(seconds)?))
+}
+
+/// A duration in its shortest whole unit: `2h`, `10m`, `30s`.
+pub(crate) fn duration_words(d: std::time::Duration) -> String {
+    let s = d.as_secs();
+    if s > 0 && s.is_multiple_of(3600) {
+        format!("{}h", s / 3600)
+    } else if s > 0 && s.is_multiple_of(60) {
+        format!("{}m", s / 60)
+    } else {
+        format!("{s}s")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn durations_are_whole_seconds_minutes_or_hours() {
+        assert_eq!(parse_duration("30s"), Some(Duration::from_secs(30)));
+        assert_eq!(parse_duration("10m"), Some(Duration::from_secs(600)));
+        assert_eq!(parse_duration("2h"), Some(Duration::from_secs(7200)));
+        for bad in ["", "s", "10", "ten minutes", "1.5h", "-5s", "10 m", "5d"] {
+            assert_eq!(parse_duration(bad), None, "{bad:?}");
+        }
+        assert_eq!(duration_words(Duration::from_secs(7200)), "2h");
+        assert_eq!(duration_words(Duration::from_secs(120 * 60)), "2h");
+        assert_eq!(duration_words(Duration::from_secs(90)), "90s");
+        assert_eq!(duration_words(Duration::from_secs(600)), "10m");
     }
 }

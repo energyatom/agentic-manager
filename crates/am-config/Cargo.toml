@@ -36,3 +36,6 @@ notify.workspace = true
 tempfile.workspace = true
 am-testkit.workspace = true
 am-config = { path = ".", features = ["test-support"] }
+# Story 3.3: the run and proposal ids of a seat's and the Assistant's Actor
+# (tests/writer_actor.rs).
+uuid.workspace = true
