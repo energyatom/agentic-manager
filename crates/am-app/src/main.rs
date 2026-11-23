@@ -3,7 +3,9 @@
 //! - `agentic serve [--project <path> [--confirm-move] [--take-over]] [--port N] [--no-browser]`
 //!   (story 3.2: prints the address without any code, where this launch's
 //!   CLI token file is, and a terminal pairing code; while serve runs in the
-//!   foreground of a terminal, pressing Enter prints a new pairing code)
+//!   foreground of a terminal, pressing Enter prints a new pairing code;
+//!   story 3.19: the terminal is read only while serve is its foreground
+//!   job, so `agentic serve &` keeps answering)
 //! - `agentic validate [--template] [<folder>]` (exit 0 no errors, 1 errors, 2 usage or no folder)
 //! - `agentic audit export <project> [--out <file>]`, `agentic audit verify <file>`
 //!   (exit 0 OK, 1 failure or a broken chain, 2 usage)
@@ -202,7 +204,11 @@ fn status(args: &[String]) -> i32 {
     }
 }
 
-const SERVE_USAGE: &str = "usage: agentic serve [--project <path> [--confirm-move] [--take-over]] [--port N] [--no-browser]";
+/// Story 3.19: the usage says when Enter works and how to run serve in the
+/// background without it ever reading the terminal.
+const SERVE_USAGE: &str = "usage: agentic serve [--project <path> [--confirm-move] [--take-over]] [--port N] [--no-browser]
+  With agentic serve in the foreground of a terminal, press Enter there for a new pairing code.
+  To run it in the background, start it as `agentic serve < /dev/null &`: it then never reads the terminal.";
 
 /// `agentic serve`: with a project, resolves and opens it (AD-32, story
 /// 1.13: the runtime folder outside the project, the marker, the store and
@@ -332,8 +338,10 @@ async fn serve(args: &Args) -> i32 {
     let _ = am_server::print_pairing_code(&state, &mut std::io::stdout());
     // Enter prints a new one, read only when stdin is a terminal (review
     // P9): with stdin redirected (a service, `< /dev/null`, a test) nothing
-    // reads it. The Enter key works with serve in the foreground.
-    let enter_for_codes = am_app::serving::stdin_reads_the_owner();
+    // reads it. The Enter key works with serve in the foreground. Off macOS
+    // the foreground check is not supported yet (AD-47): no Enter reader
+    // and no Enter line there (story 3.19, review P2).
+    let enter_for_codes = cfg!(target_os = "macos") && am_app::serving::stdin_reads_the_owner();
     if enter_for_codes {
         println!(
             "agentic: press Enter here for a new pairing code (with agentic serve in the foreground)"
@@ -351,11 +359,21 @@ async fn serve(args: &Args) -> i32 {
     }
     if enter_for_codes {
         // Enter in this terminal prints a fresh pairing code (and
-        // invalidates the unused one). The thread ends with stdin.
+        // invalidates the unused one). Story 3.19: it reads only while serve
+        // is the terminal's foreground job, asked before each read; in the
+        // background it re-checks without touching stdin (1 s, backing off
+        // to 10 s), so job control never stops a backgrounded serve
+        // (SIGTTIN) and no code is issued there. The thread ends at the end
+        // of input or once stdin is no longer a terminal.
         let state = state.clone();
         std::thread::spawn(move || {
             let stdin = std::io::stdin();
-            let mut input = stdin.lock();
+            let mut input = am_app::serving::ForegroundInput::new(
+                stdin.lock(),
+                Box::new(am_app::serving::serve_is_foreground),
+                Box::new(am_app::serving::stdin_reads_the_owner),
+                Box::new(std::thread::sleep),
+            );
             let _ = am_server::pairing_terminal(&state, &mut input, &mut std::io::stdout());
         });
     }
