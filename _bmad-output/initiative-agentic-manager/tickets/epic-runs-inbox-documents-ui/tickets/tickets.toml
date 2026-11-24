@@ -4,6 +4,7 @@
 # Lanes after the run view: the run and Inbox lane (2, 3, then 6-9, because a Failure's fix button uses story 3's Re-run step)
 # and the editor lane (4, 5) beside it.
 # Cross-epic prerequisites pin the epic 3, 4 and 5 stories each entry needs (initiative breakdown, Decision 2026-11-18).
+# 2026-11-24 owner decision (re-slice of epic 3 story 6, twice): 9 now waits on 3.21 (document versions and Draft items) and 3.22 (rows reaching later steps), and reaches 3.6 through them.
 # Definition of Done for every UI story (final review UX M3), whether or not its verify repeats it: axe clean in light and dark,
 # the story's path completed keyboard-only, and reduced motion honoured.
 
@@ -102,7 +103,7 @@ title = "Documents with citations and export"
 description = "Documents render through the sanitising renderer (no raw HTML, scripts or remote images; links show their host) with a version picker per run, an estimate against actual header, am:// citations that open the cited row or run and flag any that does not resolve, Copy draft on each draft with 'Drafts only. Agentic Manager never sends email.', and Export Markdown and PDF working offline; settles the deferred PDF export choice (server-side renderer or webview print) as a Decision. Matches key-inbox.html §3."
 verify = "Playwright opens the golden run's Report R1: every action line's citation opens its row or run, a planted unresolved citation is flagged, a planted script and remote image render inert with no network request, Copy draft copies the draft text, an older version opens from the picker, and both exports work with the network blocked and keep the citations as links."
 covers = ["R9"]
-after = [8, "3.6"]
+after = [8, "3.21", "3.22"]
 hitl = false
 risk = "high"
 
