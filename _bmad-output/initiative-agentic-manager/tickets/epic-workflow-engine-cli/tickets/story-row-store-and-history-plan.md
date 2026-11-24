@@ -845,12 +845,13 @@ The no-requeue guard adds 8 more lines of SQL. The slice's code is about 1,230 l
 
 **Size (owner rule: code and test lines reported separately):** 1,288 lines of code (source and migration, doc comments included) and 3,844 lines of tests.
 
-**Tests:** 48 store tests in `rows.rs`, plus migration tests, xtask tests for rows 48 and 49, doctests, and literal updates. Every test was written and seen red first, with red runs logged for the build and both review rounds. `just check`: 1460 passed, 8 skipped (after round 3).
+**Tests:** 48 store tests in `rows.rs`, plus migration tests, xtask tests for rows 48 and 49, doctests, and literal updates. Every test was written and seen red first, with red runs logged for the build and both review rounds. `just check`: 1464 passed, 8 skipped (after round 4).
 
 **Review:** a correctness review and an adversarial security review, then a follow-up review, all on Opus. None found a way through the row command.
 - Round 1 fixed R1–R13 and R2b. The worst was a rowid collision that could re-create a tainted row clean.
 - Round 2 fixed T1–T6. T1(b) was closed by the never-back-to-`queued` guard, because the `started_at` clause conflicted with a 3.3 fixture.
 - Round 3 (owner, 2026-11-24) brought that guard in line with AD-8. A move to `queued` is refused except from `waiting_branches`, the fan-in edge story 3.14 builds. A move into `waiting_branches` is refused except from `queued`. `waiting_branches → queued` is refused when the row has a seat, a table or a `started_at`.
+- Round 4 (quick security re-review) fixed U1–U3. An attempt's identity never changes, which closes an `UPDATE OR REPLACE` identity swap that could reopen a finished, written attempt. `started_at` is set once. A new attempt is inserted only as `queued`, with no seat, table or start. D5 and D6 are accepted and recorded in the register for 3.14.
 - D1–D4 are accepted, with reasons above.
 
 **For the owner:**
@@ -909,3 +910,69 @@ So AD-8's fan-in edges, `queued → waiting_branches → queued`, pass for an at
 - `cargo test --doc -p am-store -p am-domain`: green.
 
 **Final `just check`:** green (exit 0). `Summary [56.182s] 1460 tests run: 1460 passed, 8 skipped`.
+
+### Review triage round 4 (manager, 2026-11-24)
+
+A quick security re-review of round 3 (owner: "quick security re-review of the trigger change") found the three new triggers sound. Every route back to `queued` or `waiting_branches` is refused, and every AD-8 edge the engine uses today works. It found one medium gap that was already in the slice, and two low ones.
+
+| Id | From | Finding | Decision |
+|----|------|---------|----------|
+| U1 | Q1 | Identity swap: `UPDATE OR REPLACE step_runs SET id=<A>, rowid=<A's rowid>, …` on a fresh queued row B deletes the finished, written A. B takes over A's identity, with foreign keys intact, taint 0, and a free choice of seat and table. | Fix: an `id`, rowid, `run_id`, `step_key`, `seq` or `attempt` change on `step_runs` aborts, the same pattern as `tool_calls_identity_fixed`. Test with the exact swap. |
+| U2 | Q2 | `started_at` can be changed or nulled. | Fix: `started_at` is set once. Test. |
+| U3 | Q3 | An INSERT can preset a seat or table, or use any status. | Fix: a new attempt is inserted only as `queued`, with no seat, no table and no `started_at`. The implementer checks every insert path (`lib.rs` near 1175 and 2362, the spike `journal.rs`) and stops and reports if one conflicts. Test. |
+
+**Accepted:**
+- **D5 (Q1, part):** a plain DELETE of an attempt, followed by a re-insert, stays possible with raw SQL. AD-25's run deletion must be able to delete attempts (as D1 for `tool_calls`), and raw SQL by the same user is AD-13's accepted residual.
+- **D6 (Q4):** AD-8's `waiting_branches → waiting_human → running` path cannot set a seat or table under `writes_set_at_start`, and AD-8's `looped_back → queued` edge is realised as a new attempt row (story 3.3), never a same-row move. Both go into the register for 3.14.
+
+### Red run round 4 (store slice, 2026-11-24)
+
+The tester's response to U1–U3, tests first. Four tests are appended to `crates/am-store/tests/rows.rs`, with no `src/` or migration change, and `cargo fmt --all` passes.
+
+**Words pinned** (tester's choice):
+- U1: `an attempt's identity never changes`;
+- U2: `an attempt's start time is set once`;
+- U3: `a new attempt is inserted only as queued, with no seat, table or start`.
+
+**Commands** (`CARGO_TARGET_DIR=/Users/hiteshmamgain/cargo-target/agentic-manager`):
+- `cargo nextest run -p am-store --test rows --no-fail-fast`: 57 run, 53 passed, 4 failed;
+- `cargo clippy -p am-store --tests -- -D warnings`: clean.
+
+| Test | Covers | Today |
+|---|---|---|
+| `the_identity_swap_onto_a_finished_attempt_aborts` | **U1, the exact swap.** A is `succeeded`, tainted, with a seat, a table, a tool call and an after-image. B is a fresh queued attempt. The statement is `UPDATE OR REPLACE step_runs SET id = A, rowid = A's rowid, step_key, seq, attempt = A's WHERE id = B`. It must abort with the words. A and B must stay cell for cell (rowid included), every table must be unchanged, and A keeps its writes, its call and its after-image | **red**: "the identity swap: must abort, changed 1 row(s)". The swap goes through today. |
+| `an_attempts_identity_never_changes` | **U1, one case per column**, on a fresh queued attempt: `id`, rowid, `run_id` (to a run that exists), `step_key`, `seq`, `attempt`. Each must abort with the words and leave the attempt unchanged. Controls: an `updated_at`-only update goes through, and the attempt then starts and finishes | **red**: "id: must abort, changed 1 row(s)" |
+| `an_attempts_start_time_is_set_once` | **U2.** The normal start sets `started_at` the first time, from `NULL`, both by `StartAttempt` with writes and by `StartStep`. After that, a raw change and a raw `NULL` must each abort with the words, on a running attempt (with and without writes) and on a succeeded one, and leave the attempt unchanged | **red**: "running, with writes, changed: must abort, changed 1 row(s)" |
+| `a_new_attempt_is_inserted_only_queued_and_unstarted` | **U3.** A raw insert must abort with the words for any status other than `queued` (the seven of round 3, plus `waiting_branches`). So must a queued insert with a seat, with a table, or with a `started_at`. Each leaves every table unchanged. Controls: a plain queued insert goes through. A new run (`lib.rs` near 1175) and a loop-back's next attempt (`lib.rs` near 2362) still queue unstarted attempts with no writes | **red**: "running: must abort, changed 1 row(s)" |
+
+**Corrections to two tests** (tester; they still pass today):
+- U3's guard also refuses the rows that `an_attempt_is_never_replaced` (T1 (a)) re-inserts. SQLite fires the trigger created last first: checked with `sqlite3`, two `BEFORE INSERT` guards abort with the newer one's words. So the test now sets the other `step_runs` guards aside with `leave_only`, and keeps asserting its own words.
+- Round 3's `a_started_attempt_never_goes_back_from_waiting_branches` builds its `waiting_branches` rows by a raw insert with a seat, table or start, which U3 refuses. That test now sets the other guards aside the same way.
+
+**Stub check.** This was a scratch copy with its own `CARGO_TARGET_DIR` under the tester's scratchpad. It had three stub triggers on 0010: `tool_calls_identity_fixed`'s pattern over `rowid`, `id`, `run_id`, `step_key`, `seq` and `attempt`; `started_at` refused when `OLD.started_at IS NOT NULL AND NEW.started_at IS NOT OLD.started_at`; and an insert refused unless it is `queued` with `seat`, `writes_table` and `started_at` all NULL. Results:
+- `cargo nextest run -p am-store`: 221 run, 221 passed, so all four tests and both corrections are green with the fix;
+- `cargo nextest run -p am-engine`: 72 run, 72 passed, `loop_caps` included.
+
+**Note for the implementer (U2):** `crates/am-engine/tests/loop_caps.rs` (`backdate`, near line 640) sets `started_at` by hand on a *queued* attempt. That is a first set, from `NULL`. A guard that refuses only a change or a `NULL` once the column is set keeps that test green. A guard that allows the first set only on `queued → running` breaks it.
+
+The `.git/wip` patches are untouched. The ToolGate tests stay stashed.
+
+### Implementation round 4 (store slice, 2026-11-24)
+
+*Implementer, on Opus, against "Review triage round 4" and "Red run round 4". Only migration 0010 changed, in place (+22 lines). No test or `src/` file changed; no `--workspace` build; nothing was recorded in git.*
+
+**Built:**
+- **U1, `step_runs_identity_fixed`:** any update that changes an attempt's rowid, `id`, `run_id`, `step_key`, `seq` or `attempt` aborts, with "an attempt's identity never changes". That includes the exact `UPDATE OR REPLACE` identity swap.
+- **U2, `step_runs_started_at_set_once`:** a `started_at` already set may not change or go back to NULL, with "an attempt's start time is set once". The first set, from NULL, passes on any status. That keeps `StartAttempt`'s `COALESCE` and `loop_caps`'s queued backdate working.
+- **U3, `step_runs_inserted_queued`:** an insert is refused unless it is `queued` with `seat`, `writes_table` and `started_at` all NULL, with "a new attempt is inserted only as queued, with no seat, table or start".
+
+**The insert-path check (U3):** no path conflicts.
+- `lib.rs` 1175 (`CreateRun`) and 2362 (the next attempts of a loop-back or a gate return) insert `queued`, with no seat, table or start.
+- The spike's `journal.rs` and the engine insert only through those commands.
+- The raw inserts in `run_journal.rs` and `prompt_journal.rs` all go into databases older than 0010.
+
+**Verification:**
+- `cargo nextest run -p am-store -p am-engine`: 293 of 293 pass, `loop_caps` included.
+- `cargo test --doc -p am-store -p am-domain`: green.
+
+**Final `just check`:** green (exit 0). `Summary [53.714s] 1464 tests run: 1464 passed, 8 skipped`.

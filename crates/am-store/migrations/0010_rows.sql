@@ -173,6 +173,28 @@ BEGIN SELECT RAISE(ABORT, 'an attempt is never replaced'); END;
 -- never started: no seat, no table, no `started_at`. Its one edge into
 -- `waiting_branches` is from `queued`. (Story 3.9 relaxes this in its own
 -- migration should resume ever requeue an attempt.)
+-- An attempt's identity never changes (review U1): its id, rowid, run,
+-- step, position and attempt number. An `UPDATE OR REPLACE` taking another
+-- attempt's id or rowid would delete that attempt and take its place.
+CREATE TRIGGER step_runs_identity_fixed BEFORE UPDATE ON step_runs
+WHEN NEW.rowid IS NOT OLD.rowid OR NEW.id IS NOT OLD.id OR NEW.run_id IS NOT OLD.run_id
+  OR NEW.step_key IS NOT OLD.step_key OR NEW.seq IS NOT OLD.seq OR NEW.attempt IS NOT OLD.attempt
+BEGIN SELECT RAISE(ABORT, 'an attempt''s identity never changes'); END;
+
+-- Its start time is set once, from NULL (review U2), also on a still-queued
+-- attempt (story 3.3's resume fixture), and never changed or cleared after.
+CREATE TRIGGER step_runs_started_at_set_once BEFORE UPDATE OF started_at ON step_runs
+WHEN OLD.started_at IS NOT NULL AND NEW.started_at IS NOT OLD.started_at
+BEGIN SELECT RAISE(ABORT, 'an attempt''s start time is set once'); END;
+
+-- A new attempt is inserted only `queued`, with no seat, table or start
+-- (review U3): a run's steps and a loop-back's or gate return's next
+-- attempts, the only inserts there are.
+CREATE TRIGGER step_runs_inserted_queued BEFORE INSERT ON step_runs
+WHEN NEW.status IS NOT 'queued' OR NEW.seat IS NOT NULL OR NEW.writes_table IS NOT NULL
+  OR NEW.started_at IS NOT NULL
+BEGIN SELECT RAISE(ABORT, 'a new attempt is inserted only as queued, with no seat, table or start'); END;
+
 CREATE TRIGGER step_runs_never_requeued BEFORE UPDATE OF status ON step_runs
 WHEN NEW.status = 'queued' AND OLD.status IS NOT 'queued' AND OLD.status IS NOT 'waiting_branches'
 BEGIN SELECT RAISE(ABORT, 'an attempt never goes back to queued'); END;

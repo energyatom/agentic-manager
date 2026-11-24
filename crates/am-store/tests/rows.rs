@@ -2823,13 +2823,17 @@ fn a_tool_calls_identity_never_changes() {
 /// under another seat and table and a lower taint: by its id, by its rowid
 /// (under a new id) and by its (run, step, attempt) (under a new id). Each
 /// is aborted with "an attempt is never replaced", and the attempt keeps
-/// its writes and its taint.
+/// its writes and its taint. The other guards on `step_runs` are set aside
+/// in this test's database (round 4: U3's insert guard also refuses these
+/// rows, and SQLite fires the trigger created last first), so the words are
+/// this guard's.
 #[test]
 fn an_attempt_is_never_replaced() {
     let r = rig();
     let a = r.begin(&r.run, "collect", Some(TABLE), None, Taint::Tainted);
     let before = r.state();
     let c = r.raw();
+    leave_only(&c, "step_runs", "an attempt is never replaced");
 
     for (what, sql) in [
         (
@@ -3212,7 +3216,8 @@ fn set_status(c: &Connection, id: &str, status: &str) {
 }
 
 /// A raw attempt row of a new run's step `s` (attempt 2), already
-/// `waiting_branches`, with the given seat, table and start.
+/// `waiting_branches`, with the given seat, table and start (a row only a
+/// database with the insert guard set aside holds, round 4: U3).
 fn waiting_row(
     r: &Rig,
     c: &Connection,
@@ -3324,11 +3329,18 @@ fn only_a_queued_attempt_waits_for_branches() {
 /// `waiting_branches → queued` is only for an attempt that never started:
 /// a waiting row with a seat, with a table, or with a `started_at` (one
 /// case each) is refused the move with "only an attempt that never started
-/// goes back to queued", and stays `waiting_branches`.
+/// goes back to queued", and stays `waiting_branches`. Round 4 (U3)
+/// refuses inserting such a row, so the test sets every other guard on
+/// `step_runs` aside in its own database to make them.
 #[test]
 fn a_started_attempt_never_goes_back_from_waiting_branches() {
     let r = rig();
     let c = r.raw();
+    leave_only(
+        &c,
+        "step_runs",
+        "only an attempt that never started goes back to queued",
+    );
     for (what, seat, table, started_at) in [
         ("a seat", Some(SEAT), None, None),
         ("a table", None, Some(TABLE), None),
@@ -3390,4 +3402,296 @@ fn the_round_trip_through_waiting_branches_is_refused() {
         r.reader().attempt_writes(&a.id).unwrap(),
         Some(writes(Some(TABLE), None))
     );
+}
+
+// ------------------------------------------- review triage round 4 (U1–U3)
+//
+// The manager's triage of the security re-review (2026-11-24, the store
+// plan's "Review triage round 4"): an attempt's identity never changes
+// (U1), its `started_at` is set once (U2), and a new attempt is inserted
+// only as `queued`, with no seat, table or start (U3). Raw SQL reaches the
+// guards. Written before the fixes.
+
+/// Every cell of attempt `id`, its rowid first; `None` when it is gone.
+fn attempt_cells(c: &Connection, id: &str) -> Option<Vec<Cell>> {
+    let mut st = c
+        .prepare("SELECT rowid, * FROM step_runs WHERE id = ?1")
+        .unwrap();
+    let n = st.column_count();
+    st.query_map(params![id], |r| {
+        (0..n)
+            .map(|i| r.get::<_, Cell>(i))
+            .collect::<rusqlite::Result<Vec<Cell>>>()
+    })
+    .unwrap()
+    .next()
+    .map(|cells| cells.unwrap())
+}
+
+/// U1, the exact swap: a fresh queued attempt B takes a finished attempt
+/// A's identity with `UPDATE OR REPLACE` (A's id, rowid, step, sequence and
+/// attempt), which would delete A and leave B, with taint 0 and no writes,
+/// owning A's tool calls and after-images. A is `succeeded`, tainted, with
+/// a seat and a table, a tool call and an after-image. The swap is aborted
+/// with "an attempt's identity never changes"; A and B are as they were,
+/// and so is every table.
+#[test]
+fn the_identity_swap_onto_a_finished_attempt_aborts() {
+    let r = rig();
+    let a = r.begin(&r.run, "collect", Some(TABLE), None, Taint::Tainted);
+    let row = r.insert(&a, 1, &json!({ "ref": "r-1" }));
+    r.finish(&a);
+    let b = r.latest(&r.run, "check").id;
+    let a_row = r.step(&a.id);
+    assert_eq!(a_row.status, "succeeded", "setup: A finished");
+    assert_eq!(a_row.taint, Taint::Tainted, "setup: A tainted");
+    assert_eq!(
+        r.reader().attempt_writes(&a.id).unwrap(),
+        Some(writes(Some(TABLE), None)),
+        "setup: A has a seat and a table"
+    );
+    assert_eq!(r.reader().tool_calls(&a.id).unwrap().len(), 1, "setup");
+    assert_eq!(r.history(&row).len(), 1, "setup: A's after-image");
+    assert_eq!(r.step(&b).status, "queued", "setup: B is fresh");
+    let c = r.raw();
+    let rowid: i64 = c
+        .query_row(
+            "SELECT rowid FROM step_runs WHERE id = ?1",
+            params![a.id],
+            |x| x.get(0),
+        )
+        .unwrap();
+    let (a_cells, b_cells) = (attempt_cells(&c, &a.id), attempt_cells(&c, &b));
+    let before = tables_of(&r.db);
+
+    let words = aborted_with(
+        c.execute(
+            &format!(
+                "UPDATE OR REPLACE step_runs SET id = '{}', rowid = {rowid}, step_key = '{}', seq = {}, attempt = {} WHERE id = '{b}'",
+                a.id, a_row.step_key, a_row.seq, a_row.attempt
+            ),
+            [],
+        ),
+        "the identity swap",
+    );
+
+    assert!(
+        words.contains("an attempt's identity never changes"),
+        "{words}"
+    );
+    assert_eq!(attempt_cells(&c, &a.id), a_cells, "A, cell for cell");
+    assert_eq!(attempt_cells(&c, &b), b_cells, "B, cell for cell");
+    drop(c);
+    assert_eq!(tables_of(&r.db), before, "every table as it was");
+    assert_eq!(r.step(&a.id), a_row);
+    assert_eq!(
+        r.reader().attempt_writes(&a.id).unwrap(),
+        Some(writes(Some(TABLE), None))
+    );
+    assert_eq!(r.reader().tool_calls(&a.id).unwrap().len(), 1);
+    assert_eq!(
+        r.history(&row)[0].step_run_id.as_deref(),
+        Some(a.id.as_str())
+    );
+}
+
+/// U1, one column at a time: on a fresh queued attempt, a raw change of its
+/// `id`, its rowid, its `run_id` (to another run that exists), its
+/// `step_key`, its `seq` or its `attempt` is each aborted with "an
+/// attempt's identity never changes", and the attempt stays as it was. An
+/// update that names none of them goes through (the control), and the
+/// attempt then starts and finishes as any does.
+#[test]
+fn an_attempts_identity_never_changes() {
+    let r = rig();
+    let run = r.new_run(&["s"]);
+    let id = r.latest(&run, "s").id;
+    let c = r.raw();
+    let before = attempt_cells(&c, &id);
+
+    for (what, sql) in [
+        (
+            "id",
+            "UPDATE step_runs SET id = 'a-forged-attempt-id' WHERE id = ?1",
+        ),
+        (
+            "rowid",
+            "UPDATE step_runs SET rowid = (SELECT MAX(rowid) + 100 FROM step_runs) WHERE id = ?1",
+        ),
+        ("run_id", "UPDATE step_runs SET run_id = ?2 WHERE id = ?1"),
+        (
+            "step_key",
+            "UPDATE step_runs SET step_key = 'another-step' WHERE id = ?1",
+        ),
+        ("seq", "UPDATE step_runs SET seq = 99 WHERE id = ?1"),
+        ("attempt", "UPDATE step_runs SET attempt = 99 WHERE id = ?1"),
+    ] {
+        let result = if sql.contains("?2") {
+            c.execute(sql, params![id, r.run.id])
+        } else {
+            c.execute(sql, params![id])
+        };
+        let words = aborted_with(result, what);
+        assert!(
+            words.contains("an attempt's identity never changes"),
+            "{what}: {words}"
+        );
+        assert_eq!(attempt_cells(&c, &id), before, "{what}: as it was");
+    }
+
+    let control = c.execute(
+        "UPDATE step_runs SET updated_at = '2026-11-24T10:00:00.000Z' WHERE id = ?1",
+        params![id],
+    );
+    assert_eq!(control.as_ref().ok(), Some(&1), "the control: {control:?}");
+    drop(c);
+    let a = r.begin(&run, "s", Some(TABLE), None, Taint::Clean);
+    assert_eq!(a.id, id);
+    r.finish(&a);
+    assert_eq!(r.step(&id).status, "succeeded");
+}
+
+/// U2: an attempt's `started_at` is set once. The normal start sets it the
+/// first time (`StartAttempt` with writes, `StartStep` with none, both from
+/// `NULL`); after that a raw change of it, or a raw `NULL`, is each aborted
+/// with "an attempt's start time is set once", on a running attempt (with
+/// and without writes) and on a finished one, and the attempt stays as it
+/// was.
+#[test]
+fn an_attempts_start_time_is_set_once() {
+    let r = rig();
+    for key in ["collect", "check", "plain"] {
+        assert_eq!(r.latest(&r.run, key).started_at, None, "{key}: queued");
+    }
+    let with_writes = r.begin(&r.run, "collect", Some(TABLE), None, Taint::Clean);
+    let bare = r.latest(&r.run, "check").id;
+    r.exec(WriteCommand::StartStep {
+        step_run_id: bare.clone(),
+    })
+    .unwrap();
+    let done = r.begin(&r.run, "plain", Some(TABLE), None, Taint::Clean);
+    r.finish(&done);
+    let c = r.raw();
+
+    for (what, id) in [
+        ("running, with writes", &with_writes.id),
+        ("running, started with none", &bare),
+        ("succeeded", &done.id),
+    ] {
+        let set = r.step(id);
+        assert_timestamp(
+            set.started_at
+                .as_deref()
+                .unwrap_or_else(|| panic!("{what}: the normal start sets it")),
+        );
+        for (how, sql) in [
+            (
+                "changed",
+                "UPDATE step_runs SET started_at = '2030-01-01T00:00:00.000Z' WHERE id = ?1",
+            ),
+            (
+                "nulled",
+                "UPDATE step_runs SET started_at = NULL WHERE id = ?1",
+            ),
+        ] {
+            let words = aborted_with(c.execute(sql, params![id]), &format!("{what}, {how}"));
+            assert!(
+                words.contains("an attempt's start time is set once"),
+                "{what}, {how}: {words}"
+            );
+            assert_eq!(r.step(id), set, "{what}, {how}: as it was");
+        }
+    }
+}
+
+/// A raw insert of attempt 1 of step `key` of `run`, with `status`, seat,
+/// table and start.
+fn insert_attempt(
+    c: &Connection,
+    run: &str,
+    key: &str,
+    status: &str,
+    seat: Option<&str>,
+    table: Option<&str>,
+    started_at: Option<&str>,
+) -> rusqlite::Result<usize> {
+    c.execute(
+        "INSERT INTO step_runs (id, run_id, step_key, seq, attempt, status, output, taint, updated_at, started_at, finished_at, seat, writes_table)
+         VALUES (?1, ?2, ?3, 0, 1, ?4, NULL, 0, '2026-11-24T10:00:00.000Z', ?5, NULL, ?6, ?7)",
+        params![new_id(), run, key, status, started_at, seat, table],
+    )
+}
+
+/// U3: a new attempt is inserted only as `queued`, with no seat, no table
+/// and no `started_at`. A raw insert with any other status (each of
+/// `running`, `waiting_human`, `waiting_review`, `succeeded`, `failed`,
+/// `cancelled`, `looped_back` and `waiting_branches`), or a queued one with
+/// a seat, with a table or with a `started_at`, is each aborted with "a new
+/// attempt is inserted only as queued, with no seat, table or start", and
+/// nothing changes. A plain queued insert goes through, and the store's own
+/// two insert paths (a new run, a loop-back's next attempt) still queue
+/// attempts.
+#[test]
+fn a_new_attempt_is_inserted_only_queued_and_unstarted() {
+    let r = rig_with(&["collect", "check"]);
+    let c = r.raw();
+    let before = tables_of(&r.db);
+    let refused = NOT_QUEUED
+        .iter()
+        .chain(["waiting_branches"].iter())
+        .map(|status| (status.to_string(), *status, None, None, None))
+        .chain([
+            ("a seat".to_string(), "queued", Some(SEAT), None, None),
+            ("a table".to_string(), "queued", None, Some(TABLE), None),
+            (
+                "a start".to_string(),
+                "queued",
+                None,
+                None,
+                Some("2026-11-24T10:00:00.000Z"),
+            ),
+        ]);
+
+    for (i, (what, status, seat, table, started_at)) in refused.enumerate() {
+        let words = aborted_with(
+            insert_attempt(
+                &c,
+                &r.run.id,
+                &format!("new-{i}"),
+                status,
+                seat,
+                table,
+                started_at,
+            ),
+            &what,
+        );
+        assert!(
+            words
+                .contains("a new attempt is inserted only as queued, with no seat, table or start"),
+            "{what}: {words}"
+        );
+    }
+    assert_eq!(tables_of(&r.db), before, "nothing inserted");
+
+    let plain = insert_attempt(&c, &r.run.id, "new-plain", "queued", None, None, None);
+    assert_eq!(
+        plain.as_ref().ok(),
+        Some(&1),
+        "a plain queued insert: {plain:?}"
+    );
+    drop(c);
+
+    let run = r.new_run(&["a", "b"]);
+    for key in ["a", "b"] {
+        let s = r.latest(&run, key);
+        assert_eq!((s.status.as_str(), s.started_at), ("queued", None), "{key}");
+        assert_eq!(r.reader().attempt_writes(&s.id).unwrap(), None, "{key}");
+    }
+    let first = r.begin(&r.run, "collect", Some(TABLE), None, Taint::Clean);
+    r.finish(&first);
+    r.loop_back(&r.run, "check", "collect");
+    let next = r.latest(&r.run, "collect");
+    assert_eq!((next.attempt, next.status.as_str()), (2, "queued"));
+    assert_eq!(next.started_at, None);
+    assert_eq!(r.reader().attempt_writes(&next.id).unwrap(), None);
 }
