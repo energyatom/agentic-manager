@@ -176,6 +176,7 @@ impl Rig {
             inputs: vec![StepInput {
                 kind: "step_output".into(),
                 from_step_run: Some(self.draft.clone()),
+                from_item: None,
                 label: "step:draft@1".into(),
                 taint: Taint::Clean,
             }],
@@ -187,6 +188,7 @@ impl Rig {
                 taint: Taint::Clean,
                 title: "Review the version".into(),
                 body: "Step approve waits for your review of step draft's output.".into(),
+                max_returns: Some(2),
             },
         }
     }
@@ -236,6 +238,7 @@ impl Rig {
                 taint: Taint::Clean,
                 title: "A step stopped".into(),
                 body: "Step approve stopped at its limit of 3 iterations.".into(),
+                max_returns: None,
             },
         }
     }
@@ -383,6 +386,7 @@ fn creating_an_item_twice_changes_nothing() {
         vec![StepInput {
             kind: "step_output".into(),
             from_step_run: Some(r.draft.clone()),
+            from_item: None,
             label: "step:draft@1".into(),
             taint: Taint::Clean,
         }]
@@ -702,6 +706,7 @@ fn an_item_is_never_cleaner_than_its_attempt() {
             inputs.push(StepInput {
                 kind: "untrusted".into(),
                 from_step_run: None,
+                from_item: None,
                 label: "test:poisoned-page".into(),
                 taint: Taint::Tainted,
             });
@@ -737,6 +742,7 @@ fn an_input_from_an_unfinished_producer_is_refused() {
     let from = |producer: &str| StepInput {
         kind: "step_output".into(),
         from_step_run: Some(producer.into()),
+        from_item: None,
         label: "step:publish@1".into(),
         taint: Taint::Clean,
     };
@@ -796,6 +802,7 @@ fn an_input_from_an_unfinished_producer_is_refused() {
                 inputs: vec![StepInput {
                     kind: "step_output".into(),
                     from_step_run: Some(r.draft.clone()),
+                    from_item: None,
                     label: "step:draft@1".into(),
                     taint: Taint::Clean,
                 }],
@@ -973,6 +980,7 @@ fn a_failure_never_finishes_a_run_while_another_step_waits() {
                 taint: Taint::Clean,
                 title: "A step stopped".into(),
                 body: "Step publish stopped at a cap.".into(),
+                max_returns: None,
             },
         },
     );
@@ -1062,6 +1070,7 @@ fn nothing_starts_or_pauses_while_another_step_waits() {
                     taint: Taint::Clean,
                     title: "Review".into(),
                     body: "A second gate.".into(),
+                    max_returns: Some(2),
                 },
             },
         ),
@@ -1110,6 +1119,7 @@ fn an_items_payload_is_a_finished_step_run_or_its_own_attempt() {
             taint: Taint::Clean,
             title: "A step stopped".into(),
             body: "Step approve stopped at a cap.".into(),
+            max_returns: None,
         },
     };
     assert!(
@@ -1142,6 +1152,7 @@ fn an_inputs_kind_decides_its_producer_and_taint() {
                 inputs: vec![StepInput {
                     kind: "untrusted".into(),
                     from_step_run: None,
+                    from_item: None,
                     label: "test:poisoned-page".into(),
                     taint: Taint::Clean,
                 }],
@@ -1163,6 +1174,7 @@ fn an_inputs_kind_decides_its_producer_and_taint() {
             StepInput {
                 kind: "untrusted".into(),
                 from_step_run: Some(r.draft.clone()),
+                from_item: None,
                 label: "test:poisoned-page".into(),
                 taint: Taint::Tainted,
             },
@@ -1172,6 +1184,7 @@ fn an_inputs_kind_decides_its_producer_and_taint() {
             StepInput {
                 kind: "step_output".into(),
                 from_step_run: None,
+                from_item: None,
                 label: "step:draft@1".into(),
                 taint: Taint::Clean,
             },
@@ -1181,6 +1194,7 @@ fn an_inputs_kind_decides_its_producer_and_taint() {
             StepInput {
                 kind: "loop_back".into(),
                 from_step_run: None,
+                from_item: None,
                 label: "loop-back:check@1".into(),
                 taint: Taint::Clean,
             },

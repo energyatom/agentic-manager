@@ -5,7 +5,9 @@
 //! accepts GET or HEAD. Today's `/api/v1` routes are `health`, `runs`,
 //! `runs/{id}` and `events` (all CLI class, reads) plus the `session` and
 //! `pair` exchanges; the UI-class fixture route exists only when a test
-//! builds the router with `router_with_fixture`. Written first.
+//! builds the router with `router_with_fixture`. Written first. Story 3.4
+//! adds the Inbox: `inbox` and `inbox/{id}` (CLI class, reads) and
+//! `inbox/{id}/resolve` (UI class, POST).
 #![forbid(unsafe_code)]
 
 use std::collections::BTreeSet;
@@ -40,6 +42,17 @@ fn expected() -> Vec<RouteSpec> {
         spec("GET", "/api/v1/runs", RouteClass::CliClass, false),
         spec("GET", "/api/v1/runs/{id}", RouteClass::CliClass, false),
         spec("GET", "/api/v1/events", RouteClass::CliClass, false),
+        // Story 3.4: the Inbox reads are CLI class; the resolve is UI class
+        // (Question 4, an owner-approved deviation from the ticket's "CLI
+        // class", 2026-11-24) and changes state.
+        spec("GET", "/api/v1/inbox", RouteClass::CliClass, false),
+        spec("GET", "/api/v1/inbox/{id}", RouteClass::CliClass, false),
+        spec(
+            "POST",
+            "/api/v1/inbox/{id}/resolve",
+            RouteClass::UiClass,
+            true,
+        ),
     ]
 }
 

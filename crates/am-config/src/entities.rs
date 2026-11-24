@@ -340,6 +340,13 @@ pub struct Step {
     /// call. Removing it, or moving its step to a seat with a model, is
     /// privilege-widening (AD-15, AD-42; classified by epic 4 story 17).
     pub gate: Option<Gate>,
+    /// Story 3.4 (AD-36; Decision 1): `max_returns` beside `gate: review`,
+    /// how many times the owner may return the gate's Review before the
+    /// gate fails with a Failure item, 0 to 5; 2 when the gate omits it (and
+    /// on a step with no gate, where it is unused and refused if written).
+    /// Raising it raises a cap, so it is privilege-widening (epic 4 story
+    /// 17 classifies it).
+    pub max_returns: u32,
     /// Story 3.3 (AD-11, RULE-11): the step attempt's caps under `limits:`,
     /// with the defaults where a key is absent. Raising one is
     /// privilege-widening (epic 4 story 17).

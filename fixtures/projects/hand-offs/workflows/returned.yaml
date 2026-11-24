@@ -1,0 +1,16 @@
+schema_version: 2
+name: Returned
+team: core
+description: A step, then a human gate that takes one return at most, then a step that runs only after the gate is resolved (epic 3 story 4).
+steps:
+  - id: draft
+    seat: first
+    instruction: Write the first version.
+  - id: approve
+    seat: owner
+    instruction: Approve or return the version.
+    gate: review
+    max_returns: 1
+  - id: publish
+    seat: second
+    instruction: Prepare the approved version.

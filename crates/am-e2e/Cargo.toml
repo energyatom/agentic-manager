@@ -145,6 +145,26 @@ path = "tests/engine/handoff_loop_back.rs"
 name = "handoff_gate"
 path = "tests/engine/handoff_gate.rs"
 
+# Story 3.4: the Owner gate. The engine applies a person's resolution and
+# goes on (tests/engine/); only a person resolves, the Inbox over /api/v1
+# (RULE-15) and the return note as a TrustedInput (AD-10) (tests/trust/).
+# Story 3.4's server rig addition lives in tests/trust/support/inbox.rs.
+[[test]]
+name = "handoff_gate_resolve"
+path = "tests/engine/handoff_gate_resolve.rs"
+
+[[test]]
+name = "inbox_resolve_human_only"
+path = "tests/trust/inbox_resolve_human_only.rs"
+
+[[test]]
+name = "rule_15_inbox"
+path = "tests/trust/rule_15_inbox.rs"
+
+[[test]]
+name = "taint_trusted_input_gate_note"
+path = "tests/trust/taint_trusted_input_gate_note.rs"
+
 [dev-dependencies]
 am-app.workspace = true
 # Story 3.2: the error envelope and the run and event DTOs (AD-14).

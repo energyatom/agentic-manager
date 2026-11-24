@@ -44,7 +44,8 @@ mod unix {
 
     use am_domain::{SecretString, Terminal, TerminalError};
     use nix::sys::termios::{
-        LocalFlags, SetArg, SpecialCharacterIndices, Termios, tcgetattr, tcsetattr,
+        FlushArg, LocalFlags, SetArg, SpecialCharacterIndices, Termios, tcflush, tcgetattr,
+        tcsetattr,
     };
 
     const CTRL_C: u8 = 0x03;
@@ -218,7 +219,10 @@ mod unix {
             }
         }
 
-        /// One line typed with the terminal's settings as they are.
+        /// One line typed with the terminal's settings as they are. Only a
+        /// line ended by Return is a line (story 3.4, R11): a partial line
+        /// followed by the end of input (Ctrl-D twice) is `Closed`, and
+        /// what was typed is dropped.
         fn line(&mut self, timeout: Option<Duration>) -> Result<Vec<u8>, TerminalError> {
             let deadline = timeout.map(|t| Instant::now() + t);
             let mut line = Vec::new();
@@ -226,8 +230,10 @@ mod unix {
                 match self.next(deadline) {
                     Ok(b'\n') => return Ok(line),
                     Ok(b) => line.push(b),
-                    Err(TerminalError::Closed) if !line.is_empty() => return Ok(line),
-                    Err(e) => return Err(e),
+                    Err(e) => {
+                        wipe(&mut line);
+                        return Err(e);
+                    }
                 }
             }
         }
@@ -325,6 +331,32 @@ mod unix {
             Ok(SecretString::new(text(typed?)?))
         }
 
+        /// Drops what was typed ahead (story 3.4, R9): the bytes the reader
+        /// thread already took and the ones the terminal still holds
+        /// (`tcflush(TCIFLUSH)`); a pending interrupt is kept.
+        fn discard_typed_ahead(&mut self) {
+            if let Some(input) = self.input.as_mut() {
+                let mut kept = VecDeque::new();
+                let pending: Vec<Event> = input
+                    .held
+                    .drain(..)
+                    .chain(std::iter::from_fn(|| input.events.try_recv().ok()))
+                    .collect();
+                for event in pending {
+                    match event {
+                        Event::Interrupt => kept.push_back(Event::Interrupt),
+                        // The byte asked for arrived (and is dropped).
+                        Event::Byte(_) | Event::End | Event::Failed(_) => input.asked = false,
+                    }
+                }
+                input.held = kept;
+            }
+            if let Ok(tty) = std::io::stdin().as_fd().try_clone_to_owned() {
+                // Not a terminal (a pipe): nothing to flush.
+                let _ = tcflush(&tty, FlushArg::TCIFLUSH);
+            }
+        }
+
         fn interrupted(&mut self) -> bool {
             // Before the first read no signal is watched: its default
             // action ends the process, with the terminal as it was.
@@ -380,6 +412,8 @@ mod other {
         fn read_secret(&mut self) -> Result<SecretString, TerminalError> {
             Err(unsupported())
         }
+
+        fn discard_typed_ahead(&mut self) {}
 
         fn interrupted(&mut self) -> bool {
             false

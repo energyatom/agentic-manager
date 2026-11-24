@@ -2111,9 +2111,13 @@ const RUN_GRAPH_KEYS: &[&str] = &[
 ];
 
 /// A step's hand-off and loop keys (story 3.3, AD-36, AD-11): `loop_back`,
-/// `gate` and `limits`. They are not run-graph keys: `agentic run`
-/// honours them.
-const STEP_LOOP_KEYS: &[&str] = &["loop_back", "gate", "limits"];
+/// `gate` and `limits`, and story 3.4's `max_returns` beside `gate`. They
+/// are not run-graph keys: `agentic run` honours them.
+const STEP_LOOP_KEYS: &[&str] = &["loop_back", "gate", "limits", "max_returns"];
+
+/// How many returns a gate takes when it names no `max_returns` (story
+/// 3.4, Decision 1).
+const DEFAULT_MAX_RETURNS: u32 = 2;
 
 /// What the checks across a workflow's steps need of one step (story 3.3).
 struct StepHandOff {
@@ -2187,6 +2191,28 @@ fn step_gate(rep: &mut Report, s: &Fields) -> Option<Gate> {
         "write `gate: review` for a step a person reviews in the Inbox, or remove `gate:`",
     );
     None
+}
+
+/// `max_returns` (story 3.4, AD-36): only beside `gate:`, a whole number
+/// 0 to 5; [`DEFAULT_MAX_RETURNS`] when absent.
+fn step_max_returns(rep: &mut Report, s: &Fields, gated: bool) -> u32 {
+    let Some(line) = s
+        .get("max_returns")
+        .filter(|n| n.kind != Kind::Null)
+        .and_then(|_| line_of_key(s, "max_returns"))
+    else {
+        return DEFAULT_MAX_RETURNS;
+    };
+    if !gated {
+        rep.error(
+            line,
+            "a step without `gate: review` declares `max_returns`; max_returns counts the returns of a human gate, so it is written only beside `gate:`",
+            "remove `max_returns:` from this step, or add `gate: review` to make it a human gate",
+        );
+        return DEFAULT_MAX_RETURNS;
+    }
+    s.int(rep, "max_returns", 0, 5)
+        .map_or(DEFAULT_MAX_RETURNS, |v| v as u32)
 }
 
 /// `limits: { iterations, tool_calls, wall_clock }` (AD-11, RULE-11), each
@@ -2364,6 +2390,7 @@ pub(crate) fn workflow(
         let max_tokens = s.int(rep, "max_tokens", 1, 10_000_000).map(|v| v as u32);
         let (loop_back, to) = step_loop_back(rep, &s);
         let gate = step_gate(rep, &s);
+        let max_returns = step_max_returns(rep, &s, gate.is_some() || !s.absent("gate"));
         let limits = step_limits(rep, &s);
         if gate.is_some() {
             // A gate makes no model call (AD-36): it neither loops back nor
@@ -2401,6 +2428,7 @@ pub(crate) fn workflow(
                 run_graph,
                 loop_back,
                 gate,
+                max_returns,
                 limits,
             });
         }

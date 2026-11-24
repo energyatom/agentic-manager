@@ -19,6 +19,7 @@ use axum::routing::{MethodRouter, get, post};
 use crate::envelope;
 use crate::events;
 use crate::guard::{self, Authed, Guard};
+use crate::inbox;
 use crate::pairing::Attempt;
 use crate::runs;
 use crate::state::AppState;
@@ -111,7 +112,7 @@ impl Route {
 
 /// The shipped routes with their handlers.
 fn shipped() -> Vec<Route> {
-    use RouteClass::{CliClass, Exchange, Page};
+    use RouteClass::{CliClass, Exchange, Page, UiClass};
     vec![
         Route::read("/", Page, index),
         Route::read("/app.js", Page, app_js),
@@ -121,6 +122,12 @@ fn shipped() -> Vec<Route> {
         Route::read("/api/v1/runs", CliClass, runs::list),
         Route::read("/api/v1/runs/{id}", CliClass, runs::one),
         Route::read(EVENTS_PATH, CliClass, event_stream),
+        // Story 3.4: the Inbox. Reads are CLI class; a resolve is UI class
+        // (Question 4, owner-approved 2026-11-24): the CLI token alone
+        // resolves nothing.
+        Route::read("/api/v1/inbox", CliClass, inbox::list),
+        Route::read("/api/v1/inbox/{id}", CliClass, inbox::one),
+        Route::change("/api/v1/inbox/{id}/resolve", UiClass, inbox::resolve),
     ]
 }
 

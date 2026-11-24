@@ -7,14 +7,20 @@
 //! is the first producer: it reads the open project's runs and steps
 //! through a read-only connection and publishes `run.updated` and
 //! `step.updated` when a row's status or times change, so runs started by
-//! `agentic run` in another process show up.
+//! `agentic run` in another process show up. Story 3.4: it publishes
+//! `inbox.updated` once per Inbox change (an item made `open`, an item
+//! `resolved`), whose data is only the item's id and status (owner
+//! condition 4): never its payload, title, body, decision, note or run.
 
 use std::collections::{HashMap, VecDeque};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use am_api::{EVENT_RESYNC, EVENT_RUN_UPDATED, EVENT_STEP_UPDATED, EventDto, RunDto, StepDto};
+use am_api::{
+    EVENT_INBOX_UPDATED, EVENT_RESYNC, EVENT_RUN_UPDATED, EVENT_STEP_UPDATED, EventDto,
+    InboxUpdatedDto, RunDto, StepDto,
+};
 use axum::extract::ws::{Message, WebSocket};
 use tokio::sync::watch;
 
@@ -140,16 +146,30 @@ pub(crate) async fn stream(mut socket: WebSocket, log: EventLog, since: Option<u
 struct Seen {
     runs: HashMap<String, RunDto>,
     steps: HashMap<String, StepDto>,
+    /// Each Inbox item's status, by id (story 3.4).
+    items: HashMap<String, String>,
 }
 
 /// One look at the project's runs and steps through a read-only
 /// connection: the runs, and the steps of every run that is unfinished,
-/// new or changed (a finished run's steps no longer change).
-fn look(db: &Path, seen: &Seen) -> Option<(Vec<RunDto>, Vec<StepDto>)> {
+/// new or changed (a finished run's steps no longer change), and every
+/// Inbox item's id and status (a finished run's items are still resolved).
+fn look(db: &Path, seen: &Seen) -> Option<Looked> {
     let reader = am_store::Reader::open(db).ok()?;
     let runs: Vec<RunDto> = reader.runs().ok()?.into_iter().map(run_dto).collect();
     let mut steps = Vec::new();
+    let mut items = Vec::new();
     for run in &runs {
+        items.extend(
+            reader
+                .inbox_items(&run.id)
+                .ok()?
+                .into_iter()
+                .map(|i| InboxUpdatedDto {
+                    id: i.id,
+                    status: i.status,
+                }),
+        );
         let unchanged_and_done = seen
             .runs
             .get(&run.id)
@@ -160,11 +180,11 @@ fn look(db: &Path, seen: &Seen) -> Option<(Vec<RunDto>, Vec<StepDto>)> {
         let rows = reader.steps(&run.id).ok()?;
         steps.extend(rows.into_iter().map(|s| step_dto(&run.id, s)));
     }
-    Some((runs, steps))
+    Some((runs, steps, items))
 }
 
-/// What one look found: the runs and the steps it read.
-type Looked = (Vec<RunDto>, Vec<StepDto>);
+/// What one look found: the runs, the steps and the items it read.
+type Looked = (Vec<RunDto>, Vec<StepDto>, Vec<InboxUpdatedDto>);
 
 /// Runs `look` on a blocking thread with what was seen; gives back what
 /// was seen and what the look found (`None` when it found nothing or
@@ -205,7 +225,7 @@ pub fn watch_runs(state: &AppState, every: Duration) -> tokio::task::JoinHandle<
             let path = db.clone();
             let looked;
             (seen, looked) = read_off_thread(seen, move |before| look(&path, before)).await;
-            let Some((runs, steps)) = looked else {
+            let Some((runs, steps, items)) = looked else {
                 continue;
             };
             for run in runs {
@@ -225,6 +245,16 @@ pub fn watch_runs(state: &AppState, every: Duration) -> tokio::task::JoinHandle<
                     );
                 }
                 seen.steps.insert(step.id.clone(), step);
+            }
+            // Story 3.4: one event per Inbox change, its id and status only.
+            for item in items {
+                if !first && seen.items.get(&item.id) != Some(&item.status) {
+                    log.publish(
+                        EVENT_INBOX_UPDATED,
+                        serde_json::to_value(&item).unwrap_or_default(),
+                    );
+                }
+                seen.items.insert(item.id, item.status);
             }
             first = false;
         }

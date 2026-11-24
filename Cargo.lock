@@ -240,6 +240,7 @@ version = "0.0.1"
 dependencies = [
  "am-api",
  "am-domain",
+ "am-engine",
  "am-store",
  "axum",
  "getrandom 0.4.3",

@@ -20,6 +20,7 @@ fn untrusted_input() -> StepInput {
     StepInput {
         kind: "untrusted".into(),
         from_step_run: None,
+        from_item: None,
         label: "test:poisoned-page".into(),
         taint: Taint::Tainted,
     }
@@ -33,6 +34,7 @@ fn review(payload: &str, taint: Taint) -> NewInboxItem {
         taint,
         title: "Review the version".into(),
         body: "The gate waits for your review of the previous step.".into(),
+        max_returns: Some(2),
     }
 }
 
@@ -160,6 +162,7 @@ fn no_command_clears_a_step_or_item_taint() {
             inputs: vec![StepInput {
                 kind: "step_output".into(),
                 from_step_run: Some(draft.clone()),
+                from_item: None,
                 label: "step:draft@1".into(),
                 taint: Taint::Tainted,
             }],

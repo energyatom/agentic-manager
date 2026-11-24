@@ -7,12 +7,17 @@
 //!   the chain check name that entry and line.
 //! - A step output and a secret canary (from a `FakeSecretStore`) written as
 //!   step output appear nowhere in the export; only their hashes do.
+//! - Story 3.4 (AD-24, AD-25): a resolution is one `inbox.resolved` entry
+//!   by "You (Reviewer)" holding the note's hash, never the note; the
+//!   engine's apply follows as `System (engine)`.
 #![forbid(unsafe_code)]
 
 use std::path::{Path, PathBuf};
 
-use am_domain::{Actor, SecretStore, Taint, Usage};
-use am_store::{OpenReport, Store, StoreError, TriggerRow, WriteCommand, verify_jsonl};
+use am_domain::{Actor, Decision, HumanActor, InboxKind, REVIEWER_HAT, SecretStore, Taint, Usage};
+use am_store::{
+    NewInboxItem, OpenReport, StepInput, Store, StoreError, TriggerRow, WriteCommand, verify_jsonl,
+};
 use am_testkit::FakeSecretStore;
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
@@ -311,4 +316,160 @@ fn no_row_content_or_secret_canary_in_the_export() {
         assert!(!row.contains("am-content-canary"), "{row}");
         assert!(!row.contains(SECRET_CANARY), "{row}");
     }
+}
+
+/// Story 3.4, row 10: a return at a gate, resolved by the owner as
+/// Reviewer and applied by the engine, is audited once as
+/// `inbox.resolved`: actor `{"kind":"human","person":"owner","hat":
+/// "Reviewer"}` (`describe()` "You (Reviewer)"), target the item, args the
+/// kind, the decision, the step run, the taint and the note's sha256. The
+/// note's text is nowhere in the export or in `audit_log`; the apply's
+/// entries are `System (engine)`'s; the export verifies.
+#[test]
+fn a_resolution_is_audited_as_you_reviewer_without_the_note() {
+    const NOTE_CANARY: &str = "am-note-canary-41b9 tighten the opening";
+    let dir = tempfile::tempdir().unwrap();
+    let (store, _) = open_project(dir.path()).unwrap();
+    let w = store.writer();
+    let engine = Actor::System {
+        component: "engine".into(),
+    };
+    w.exec(
+        engine.clone(),
+        WriteCommand::CreateRun {
+            run_id: "run-g".into(),
+            workflow: "wf-g".into(),
+            origin: "manual".into(),
+            steps: vec!["draft".into(), "approve".into(), "publish".into()],
+            config_hash: Some(sha256_hex("the config files")),
+        },
+    )
+    .unwrap();
+    let steps = store.reader().unwrap().steps("run-g").unwrap();
+    let (draft, approve) = (steps[0].id.clone(), steps[1].id.clone());
+    w.exec(
+        engine.clone(),
+        WriteCommand::StartAttempt {
+            step_run_id: draft.clone(),
+            inputs: vec![],
+            taint: Taint::Clean,
+        },
+    )
+    .unwrap();
+    w.exec(
+        engine.clone(),
+        WriteCommand::ReserveCall {
+            step_run_id: draft.clone(),
+            call_id: "call-g".into(),
+            call_seq: 1,
+            reserved_micro_usd: 0,
+            rate_snapshot: "none".into(),
+            taint: Taint::Clean,
+        },
+    )
+    .unwrap();
+    w.exec(
+        engine.clone(),
+        WriteCommand::SettleAndFinishStep {
+            call_id: "call-g".into(),
+            usage: None,
+            cost_micro_usd: None,
+            step_run_id: draft.clone(),
+            status: "succeeded".into(),
+            output: Some("the version".into()),
+        },
+    )
+    .unwrap();
+    w.exec(
+        engine.clone(),
+        WriteCommand::PauseStep {
+            step_run_id: approve.clone(),
+            inputs: vec![StepInput {
+                kind: "step_output".into(),
+                from_step_run: Some(draft.clone()),
+                from_item: None,
+                label: "step:draft@1".into(),
+                taint: Taint::Clean,
+            }],
+            taint: Taint::Clean,
+            item: NewInboxItem {
+                id: "item-g".into(),
+                kind: InboxKind::Review,
+                payload: Some(draft),
+                taint: Taint::Clean,
+                title: "Review before step approve goes on".into(),
+                body: "Step `approve` waits for your review.".into(),
+                max_returns: Some(2),
+            },
+        },
+    )
+    .unwrap();
+
+    w.resolve_inbox_item(
+        HumanActor::new("owner", REVIEWER_HAT),
+        "item-g",
+        Decision::Return,
+        Some(NOTE_CANARY.to_string()),
+    )
+    .unwrap();
+    w.exec(
+        engine,
+        WriteCommand::ApplyResolution {
+            item_id: "item-g".into(),
+            past_max: None,
+        },
+    )
+    .unwrap();
+
+    let (text, count, head) = export(&store);
+    let entries: Vec<serde_json::Value> = text
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    let resolved: Vec<&serde_json::Value> = entries
+        .iter()
+        .filter(|e| e["action"] == "inbox.resolved")
+        .collect();
+    assert_eq!(resolved.len(), 1, "{text}");
+    let e = resolved[0];
+    assert_eq!(
+        e["actor"],
+        serde_json::json!({"kind": "human", "person": "owner", "hat": "Reviewer"})
+    );
+    let actor: Actor = serde_json::from_value(e["actor"].clone()).unwrap();
+    assert_eq!(actor.describe(), "You (Reviewer)");
+    assert_eq!(e["target"], "item-g");
+    assert_eq!(e["args"]["kind"], "review");
+    assert_eq!(e["args"]["decision"], "return");
+    assert_eq!(e["args"]["step_run_id"], approve.as_str());
+    assert!(
+        e["args"]["taint"] == serde_json::json!(0)
+            || e["args"]["taint"] == serde_json::json!(false),
+        "{e}"
+    );
+    assert_eq!(e["args"]["note_sha256"], sha256_hex(NOTE_CANARY));
+    let at = entries
+        .iter()
+        .position(|x| x["action"] == "inbox.resolved")
+        .unwrap();
+    assert!(entries.len() > at + 1, "the apply is audited");
+    for later in &entries[at + 1..] {
+        assert_eq!(later["actor"]["kind"], "system", "{later}");
+        assert_eq!(later["actor"]["component"], "engine", "{later}");
+    }
+    assert!(!text.contains(NOTE_CANARY), "the note leaked into:\n{text}");
+    assert!(!text.contains("am-note-canary"), "{text}");
+    let c = Connection::open(db(dir.path())).unwrap();
+    let rows: Vec<String> = c
+        .prepare("SELECT at || actor || action || target || outcome || coalesce(args, '') FROM audit_log")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    for row in rows {
+        assert!(!row.contains("am-note-canary"), "{row}");
+    }
+    let ok = verify_jsonl(text.as_bytes()).unwrap();
+    assert_eq!((ok.entries, ok.head), (count, head));
 }

@@ -26,11 +26,14 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use am_domain::{Actor, RuntimeLayout, Taint, Usage};
+use am_domain::{
+    Actor, Decision, HumanActor, InboxKind, REVIEWER_HAT, RuntimeLayout, Taint, Usage,
+};
 use am_store::{
     OpenReport, Reader, SCHEMA_VERSION, StepInput, Store, StoreError, WriteCommand, new_id,
 };
-use rusqlite::{Connection, params};
+use rusqlite::types::Value as Cell;
+use rusqlite::{Connection, OpenFlags, params};
 use serde_json::{Value, json};
 
 /// The schema version before migration 0006.
@@ -525,7 +528,14 @@ fn migration_0007_keeps_every_row_as_attempt_one_untainted() {
 
     let (store, report) = open_project(dir.path()).unwrap();
 
-    assert_eq!(SCHEMA_VERSION, BEFORE_ATTEMPTS + 1, "0007 is this story's");
+    // Story 3.4: 0008 follows 0007, so the 6 → 7 step is applied (and
+    // reported, below) but is no longer the last.
+    const {
+        assert!(
+            SCHEMA_VERSION > BEFORE_ATTEMPTS,
+            "the 6 → 7 step is applied"
+        )
+    };
     assert_eq!(report.version, SCHEMA_VERSION);
     let step = report
         .applied
@@ -901,6 +911,7 @@ fn the_loop_back_input_is_journaled_by_the_loop_back() {
         vec![StepInput {
             kind: "loop_back".into(),
             from_step_run: Some(ids[2].clone()),
+            from_item: None,
             label: "loop-back:check@1".into(),
             taint: Taint::Tainted,
         }],
@@ -965,4 +976,635 @@ fn a_reference_broken_before_the_migration_does_not_fail_it() {
             .status,
         "failed"
     );
+}
+
+// ------------------------------------------------------------------ story 3.4
+//
+// Epic 3 story 4 (AD-7, AD-28): migration 0008 rebuilds `inbox_items` so an
+// item can be resolved: `status` takes `open` or `resolved`, the new
+// columns `max_returns` (a Review's), `decision` and `note` join
+// `resolved_by` and `resolved_at`, a table CHECK ties them to the status,
+// 0007's taint trigger is made again beside two new ones (a resolved row
+// never changes; an item's own fields never change), an index on
+// `(status, created_at)` is added, and `step_inputs` gains `from_item`. It
+// runs behind AD-7's pre-migration copy; every item keeps every 0007 column
+// and stays `open`, a Review taking `max_returns` 2 (3.3's gates had the
+// default). Written before migration 0008 exists.
+
+/// The schema version before migration 0008.
+const BEFORE_RESOLUTION: i64 = 7;
+
+/// Every column `inbox_items` has at version 7.
+const ITEM_COLUMNS_0007: &str = "id, kind, status, run_id, step_run_id, payload, taint, title, body, created_at, resolved_at, resolved_by";
+
+/// The columns of a step run at version 7.
+const STEP_COLUMNS_0007: &str = "id, run_id, step_key, seq, attempt, status, output, taint, updated_at, started_at, finished_at";
+
+/// A schema-7 database in the project's runtime folder, made by hand.
+fn database_at_7(root: &Path) -> PathBuf {
+    existing_runtime(root);
+    let path = db(root);
+    am_store::testing::database_at_version(&path, BEFORE_RESOLUTION).unwrap();
+    path
+}
+
+/// Row 37's schema-7 rows: run `old-run` waits at its gate `approve` with
+/// an open, tainted Review item whose payload is `draft`'s tainted
+/// attempt, and the gate's journaled `step_output` input; run `old-fail`
+/// failed at its step `work` with an open, clean Failure item.
+fn row_37(path: &Path) {
+    Connection::open(path)
+        .unwrap()
+        .execute_batch(&format!(
+            "INSERT INTO runs (id, workflow, origin, status, created_at, updated_at, config_hash, finished_at)
+               VALUES ('old-run', 'wf-gated', 'manual', 'running', '2026-11-20T10:00:00.000Z', '2026-11-20T10:00:04.000Z', NULL, NULL);
+             INSERT INTO step_runs ({STEP_COLUMNS_0007})
+               VALUES ('old-draft', 'old-run', 'draft', 0, 1, 'succeeded', 'the old version', 1, '2026-11-20T10:00:03.000Z', '2026-11-20T10:00:01.000Z', '2026-11-20T10:00:03.000Z');
+             INSERT INTO step_runs ({STEP_COLUMNS_0007})
+               VALUES ('old-approve', 'old-run', 'approve', 1, 1, 'waiting_human', NULL, 1, '2026-11-20T10:00:04.000Z', '2026-11-20T10:00:04.000Z', NULL);
+             INSERT INTO step_runs ({STEP_COLUMNS_0007})
+               VALUES ('old-publish', 'old-run', 'publish', 2, 1, 'queued', NULL, 0, '2026-11-20T10:00:00.000Z', NULL, NULL);
+             INSERT INTO step_inputs (step_run_id, kind, from_step_run, label, taint, created_at)
+               VALUES ('old-approve', 'step_output', 'old-draft', 'step:draft@1', 1, '2026-11-20T10:00:04.000Z');
+             INSERT INTO inbox_items (id, kind, status, run_id, step_run_id, payload, taint, title, body, created_at)
+               VALUES ('old-review', 'review', 'open', 'old-run', 'old-approve', 'old-draft', 1, 'Review before step approve goes on', 'Step `approve` waits for your review.', '2026-11-20T10:00:04.000Z');
+             INSERT INTO runs (id, workflow, origin, status, created_at, updated_at, config_hash, finished_at)
+               VALUES ('old-fail', 'wf-capped', 'manual', 'failed', '2026-11-20T11:00:00.000Z', '2026-11-20T11:00:09.000Z', NULL, '2026-11-20T11:00:09.000Z');
+             INSERT INTO step_runs ({STEP_COLUMNS_0007})
+               VALUES ('old-work', 'old-fail', 'work', 0, 1, 'failed', NULL, 0, '2026-11-20T11:00:09.000Z', '2026-11-20T11:00:01.000Z', '2026-11-20T11:00:09.000Z');
+             INSERT INTO inbox_items (id, kind, status, run_id, step_run_id, payload, taint, title, body, created_at)
+               VALUES ('old-failure', 'failure', 'open', 'old-fail', 'old-work', 'old-work', 0, 'A step stopped', 'Step `work` stopped at its limit of 3 iterations.', '2026-11-20T11:00:09.000Z');"
+        ))
+        .unwrap();
+}
+
+/// Every row of `inbox_items` (by id) as the raw cells of `columns`.
+fn item_cells(conn: &Connection, columns: &str) -> Vec<Vec<Cell>> {
+    let mut st = conn
+        .prepare(&format!("SELECT {columns} FROM inbox_items ORDER BY id"))
+        .unwrap();
+    let n = st.column_count();
+    st.query_map([], |r| {
+        (0..n)
+            .map(|i| r.get::<_, Cell>(i))
+            .collect::<rusqlite::Result<Vec<Cell>>>()
+    })
+    .unwrap()
+    .collect::<Result<_, _>>()
+    .unwrap()
+}
+
+fn user_version(conn: &Connection) -> i64 {
+    conn.pragma_query_value(None, "user_version", |r| r.get(0))
+        .unwrap()
+}
+
+/// The names of the triggers on `inbox_items`.
+fn item_triggers(path: &Path) -> Vec<String> {
+    Connection::open(path)
+        .unwrap()
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'inbox_items' ORDER BY name")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+/// The owner as the Reviewer: the one resolver (AD-15).
+fn reviewer() -> HumanActor {
+    HumanActor::new("owner", REVIEWER_HAT)
+}
+
+/// Row 37: a schema-7 database with an open, tainted Review (a waiting
+/// gate with its journaled input) and an open Failure migrates to 0008
+/// after a pre-migration copy; the step is reported 7 → 8; the new columns,
+/// `step_inputs.from_item` and the index exist; every item keeps every
+/// 0007 column value for value, stays `open` with no resolution, keeps its
+/// taint, and a Review takes `max_returns` 2; the input row is kept with no
+/// item; `UNIQUE (step_run_id, kind)` and the foreign keys hold; the new
+/// commands then resolve and apply the old Review; `store.migrated` is
+/// audited 7 → 8 and the chain verifies.
+#[test]
+fn migration_0008_keeps_every_item_open_with_its_taint() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = database_at_7(dir.path());
+    row_37(&path);
+    let before = item_cells(&Connection::open(&path).unwrap(), ITEM_COLUMNS_0007);
+
+    let (store, report) = open_project(dir.path()).unwrap();
+
+    assert_eq!(
+        SCHEMA_VERSION,
+        BEFORE_RESOLUTION + 1,
+        "0008 is this story's"
+    );
+    assert_eq!(report.version, SCHEMA_VERSION);
+    let step = report
+        .applied
+        .iter()
+        .find(|m| m.from == BEFORE_RESOLUTION)
+        .expect("the 7 to 8 step is reported");
+    assert_eq!(step.to, BEFORE_RESOLUTION + 1);
+    assert!(
+        step.backup.as_ref().is_some_and(|b| b.is_file()),
+        "a pre-migration copy first (AD-7): {step:?}"
+    );
+    assert!(
+        report
+            .lines()
+            .iter()
+            .any(|l| l.contains("from version 7 to 8")),
+        "{:?}",
+        report.lines()
+    );
+    for column in [
+        "max_returns",
+        "decision",
+        "note",
+        "resolved_by",
+        "resolved_at",
+    ] {
+        assert!(
+            columns(&path, "inbox_items").contains(&column.to_string()),
+            "inbox_items.{column}"
+        );
+    }
+    assert!(columns(&path, "step_inputs").contains(&"from_item".to_string()));
+    let c = Connection::open(&path).unwrap();
+    let index: i64 = c
+        .query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type = 'index' AND name = 'inbox_items_by_status' AND tbl_name = 'inbox_items'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(index, 1, "the (status, created_at) index");
+
+    // Every item: every 0007 column, value for value.
+    assert_eq!(item_cells(&c, ITEM_COLUMNS_0007), before);
+    let reader = store.reader().unwrap();
+    let review = reader.inbox_item("old-review").unwrap().expect("kept");
+    assert_eq!(
+        (review.kind, review.status.as_str(), review.taint),
+        (InboxKind::Review, "open", Taint::Tainted)
+    );
+    assert_eq!(
+        (
+            review.decision,
+            review.note.clone(),
+            review.resolved_by.clone(),
+            review.resolved_at.clone()
+        ),
+        (None, None, None, None)
+    );
+    assert_eq!(review.max_returns, Some(2), "a 3.3 gate had the default");
+    assert_eq!(review.payload.as_deref(), Some("old-draft"));
+    let failure = reader.inbox_item("old-failure").unwrap().expect("kept");
+    assert_eq!(
+        (failure.kind, failure.status.as_str(), failure.taint),
+        (InboxKind::Failure, "open", Taint::Clean)
+    );
+    assert_eq!(failure.max_returns, None);
+    let mut open: Vec<String> = reader
+        .open_items()
+        .unwrap()
+        .into_iter()
+        .map(|i| i.id)
+        .collect();
+    open.sort();
+    assert_eq!(
+        open,
+        vec!["old-failure".to_string(), "old-review".to_string()]
+    );
+    assert_eq!(
+        reader.step_inputs("old-approve").unwrap(),
+        vec![StepInput {
+            kind: "step_output".into(),
+            from_step_run: Some("old-draft".into()),
+            from_item: None,
+            label: "step:draft@1".into(),
+            taint: Taint::Tainted,
+        }]
+    );
+    let taints: Vec<(String, Taint)> = reader
+        .steps("old-run")
+        .unwrap()
+        .into_iter()
+        .map(|s| (s.step_key, s.taint))
+        .collect();
+    assert_eq!(
+        taints,
+        vec![
+            ("draft".to_string(), Taint::Tainted),
+            ("approve".to_string(), Taint::Tainted),
+            ("publish".to_string(), Taint::Clean),
+        ]
+    );
+    let broken: i64 = c
+        .query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(broken, 0, "the rebuild kept every reference");
+    assert!(
+        c.execute(
+            "INSERT INTO inbox_items (id, kind, status, run_id, step_run_id, payload, taint, title, body, created_at)
+             VALUES ('dup', 'review', 'open', 'old-run', 'old-approve', NULL, 1, 't', 'b', '2026-11-20T10:00:06.000Z')",
+            [],
+        )
+        .is_err(),
+        "UNIQUE (step_run_id, kind) holds"
+    );
+    drop(c);
+
+    // The new commands work on the migrated database.
+    store
+        .writer()
+        .resolve_inbox_item(reviewer(), "old-review", Decision::Approve, None)
+        .unwrap();
+    store
+        .writer()
+        .exec(
+            sys(),
+            WriteCommand::ApplyResolution {
+                item_id: "old-review".into(),
+                past_max: None,
+            },
+        )
+        .unwrap();
+    let approve = reader
+        .steps("old-run")
+        .unwrap()
+        .into_iter()
+        .find(|s| s.step_key == "approve")
+        .unwrap();
+    assert_eq!(approve.status, "succeeded");
+    let review = reader.inbox_item("old-review").unwrap().unwrap();
+    assert_eq!(review.status, "resolved");
+    assert_eq!(review.taint, Taint::Tainted, "resolving keeps the taint");
+
+    let all = audit_entries(&reader);
+    assert!(
+        all.iter().any(|e| e["action"] == "store.migrated"
+            && e["outcome"]
+                .as_str()
+                .is_some_and(|o| o.starts_with(&format!(
+                    "from version {BEFORE_RESOLUTION} to {}",
+                    BEFORE_RESOLUTION + 1
+                )))),
+        "{all:#?}"
+    );
+    assert_eq!(reader.verify_audit_chain().unwrap(), None);
+}
+
+/// Row 37: after 0008, `inbox_items` has 0007's taint trigger again and
+/// its two new triggers. A lower taint is aborted (a higher one is not);
+/// an `UPDATE` of an item's own fields (id, kind, run, step run, payload,
+/// title, body, creation time, `max_returns`) is aborted; the table CHECK
+/// refuses a status but `open` or `resolved`, an open row with a
+/// resolution, a resolved row without its decision, resolver or time, and
+/// a `max_returns` outside 0..=5; once resolved, any `UPDATE` of the row
+/// is aborted.
+#[test]
+fn migration_0008_keeps_the_taint_trigger_and_adds_its_own() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = database_at_7(dir.path());
+    row_37(&path);
+    let (store, _) = open_project(dir.path()).unwrap();
+
+    let triggers = item_triggers(&path);
+    for name in [
+        "inbox_items_taint_only_rises",
+        "inbox_items_resolved_never_change",
+        "inbox_items_fixed_fields",
+    ] {
+        assert!(triggers.contains(&name.to_string()), "{name}: {triggers:?}");
+    }
+
+    let c = Connection::open(&path).unwrap();
+    assert!(
+        c.execute(
+            "UPDATE inbox_items SET taint = 0 WHERE id = 'old-review'",
+            []
+        )
+        .is_err(),
+        "taint only rises"
+    );
+    for (column, value) in [
+        ("id", "'another-id'"),
+        ("kind", "'question'"),
+        ("run_id", "'old-fail'"),
+        ("step_run_id", "'old-draft'"),
+        ("payload", "NULL"),
+        ("title", "'another title'"),
+        ("body", "'another body'"),
+        ("created_at", "'2020-01-01T00:00:00.000Z'"),
+        ("max_returns", "3"),
+    ] {
+        assert!(
+            c.execute(
+                &format!("UPDATE inbox_items SET {column} = {value} WHERE id = 'old-review'"),
+                []
+            )
+            .is_err(),
+            "{column} never changes"
+        );
+    }
+    let insert = |status: &str, decision: &str, by: &str, at: &str, max: &str| {
+        c.execute(
+            &format!(
+                "INSERT INTO inbox_items (id, kind, status, run_id, step_run_id, payload, taint, title, body, created_at, max_returns, decision, note, resolved_by, resolved_at)
+                 VALUES ('{}', 'question', '{status}', 'old-run', 'old-draft', NULL, 0, 't', 'b', '2026-11-20T10:00:06.000Z', {max}, {decision}, NULL, {by}, {at})",
+                new_id()
+            ),
+            [],
+        )
+    };
+    let human = "'{\"kind\":\"human\",\"person\":\"owner\",\"hat\":\"Reviewer\"}'";
+    let when = "'2026-11-20T10:00:07.000Z'";
+    for (what, status, decision, by, at, max) in [
+        (
+            "a status but open or resolved",
+            "closed",
+            "NULL",
+            "NULL",
+            "NULL",
+            "NULL",
+        ),
+        (
+            "an open row with a decision",
+            "open",
+            "'answer'",
+            "NULL",
+            "NULL",
+            "NULL",
+        ),
+        (
+            "an open row with a resolver",
+            "open",
+            "NULL",
+            human,
+            when,
+            "NULL",
+        ),
+        (
+            "a resolved row without a decision",
+            "resolved",
+            "NULL",
+            human,
+            when,
+            "NULL",
+        ),
+        (
+            "a resolved row without a resolver",
+            "resolved",
+            "'answer'",
+            "NULL",
+            when,
+            "NULL",
+        ),
+        (
+            "a resolved row without a time",
+            "resolved",
+            "'answer'",
+            human,
+            "NULL",
+            "NULL",
+        ),
+        ("max_returns 6", "open", "NULL", "NULL", "NULL", "6"),
+        ("max_returns -1", "open", "NULL", "NULL", "NULL", "-1"),
+    ] {
+        assert!(
+            insert(status, decision, by, at, max).is_err(),
+            "the CHECK refuses {what}"
+        );
+    }
+    assert!(
+        c.execute(
+            "UPDATE inbox_items SET taint = 1 WHERE id = 'old-failure'",
+            []
+        )
+        .is_ok(),
+        "a taint may rise on an open item"
+    );
+    drop(c);
+
+    store
+        .writer()
+        .resolve_inbox_item(reviewer(), "old-failure", Decision::Dismiss, None)
+        .unwrap();
+    let c = Connection::open(&path).unwrap();
+    for sql in [
+        "UPDATE inbox_items SET note = 'x' WHERE id = 'old-failure'",
+        "UPDATE inbox_items SET decision = 'approve' WHERE id = 'old-failure'",
+        "UPDATE inbox_items SET status = 'open', decision = NULL, resolved_by = NULL, resolved_at = NULL WHERE id = 'old-failure'",
+    ] {
+        assert!(
+            c.execute(sql, []).is_err(),
+            "a resolved row never changes: {sql}"
+        );
+    }
+}
+
+/// Row 37: the first open migrates 7 → 8; reopening the migrated store
+/// applies nothing (no step, no line, no new `store.migrated` entry) and
+/// every item is as it was.
+#[test]
+fn reopening_a_migrated_store_applies_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = database_at_7(dir.path());
+    row_37(&path);
+    let (store, first) = open_project(dir.path()).unwrap();
+    assert!(
+        first.applied.iter().any(|m| m.from == BEFORE_RESOLUTION),
+        "the first open migrates 7 to 8: {first:?}"
+    );
+    let reader = store.reader().unwrap();
+    let items = (
+        reader.inbox_items("old-run").unwrap(),
+        reader.inbox_items("old-fail").unwrap(),
+    );
+    let migrated = audit_entries(&reader)
+        .iter()
+        .filter(|e| e["action"] == "store.migrated")
+        .count();
+    drop(reader);
+    drop(store);
+
+    let (store, again) = open_project(dir.path()).unwrap();
+
+    assert!(again.applied.is_empty(), "{again:?}");
+    assert!(again.lines().is_empty(), "{:?}", again.lines());
+    assert_eq!(again.version, SCHEMA_VERSION);
+    let reader = store.reader().unwrap();
+    assert_eq!(
+        (
+            reader.inbox_items("old-run").unwrap(),
+            reader.inbox_items("old-fail").unwrap()
+        ),
+        items
+    );
+    assert_eq!(
+        audit_entries(&reader)
+            .iter()
+            .filter(|e| e["action"] == "store.migrated")
+            .count(),
+        migrated
+    );
+}
+
+/// Row 37: a forged schema-7 row (an `open` item carrying `resolved_by`
+/// and `resolved_at`, which no 3.3 command wrote) fails the 7 → 8 step
+/// closed: the open is refused naming the backup, the database stays at
+/// version 7 with every row as it was, the pre-migration copy is kept, and
+/// a later open retries the step (and fails the same way).
+#[test]
+fn a_forged_resolution_fails_0008_closed() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = database_at_7(dir.path());
+    row_37(&path);
+    Connection::open(&path)
+        .unwrap()
+        .execute(
+            "UPDATE inbox_items SET resolved_by = '{\"kind\":\"system\",\"component\":\"engine\"}', resolved_at = '2026-11-20T10:00:05.000Z' WHERE id = 'old-review'",
+            [],
+        )
+        .unwrap();
+    let before = item_cells(&Connection::open(&path).unwrap(), ITEM_COLUMNS_0007);
+
+    let refused = match open_project(dir.path()) {
+        Ok((_, report)) => panic!("the forged row must fail 0008 closed: {report:?}"),
+        Err(e) => e,
+    };
+
+    let words = refused.to_string();
+    match &refused {
+        StoreError::MigrationFailed {
+            from, to, backup, ..
+        } => {
+            assert_eq!((*from, *to), (BEFORE_RESOLUTION, BEFORE_RESOLUTION + 1));
+            let backup = backup.as_ref().expect("the step names its backup");
+            assert!(backup.is_file(), "the pre-migration copy is kept");
+            assert!(
+                words.contains(&backup.display().to_string()),
+                "the error names the backup: {words}"
+            );
+            let copy =
+                Connection::open_with_flags(backup, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+            assert_eq!(user_version(&copy), BEFORE_RESOLUTION);
+            assert_eq!(item_cells(&copy, ITEM_COLUMNS_0007), before);
+        }
+        other => panic!("a migration failure, got {other:?}"),
+    }
+    let c = Connection::open(&path).unwrap();
+    assert_eq!(user_version(&c), BEFORE_RESOLUTION, "the step rolled back");
+    assert_eq!(item_cells(&c, ITEM_COLUMNS_0007), before);
+    drop(c);
+
+    assert!(
+        matches!(
+            open_project(dir.path()),
+            Err(StoreError::MigrationFailed { from: 7, .. })
+        ),
+        "a later open retries the step"
+    );
+}
+
+/// Row 37a (owner condition 5): a schema-7 database holding items of every
+/// kind 3.3's writer accepts (AD-28's seven), on two runs (one running, one
+/// failed), tainted and clean, with and without a payload, upgrades with no
+/// item lost: the same number of items, the same ids and every 0007 column
+/// equal value for value, each still `open`. The pre-migration copy the
+/// step reports exists, opens at `user_version` 7 and holds the same items;
+/// after the store is reopened it is still there, unchanged.
+#[test]
+fn migration_0008_loses_no_item_and_keeps_the_pre_migration_copy() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = database_at_7(dir.path());
+    {
+        let c = Connection::open(&path).unwrap();
+        for (r, (run, status)) in [("run-a", "running"), ("run-b", "failed")]
+            .into_iter()
+            .enumerate()
+        {
+            c.execute(
+                "INSERT INTO runs (id, workflow, origin, status, created_at, updated_at) VALUES (?1, 'wf', 'manual', ?2, '2026-11-20T10:00:00.000Z', '2026-11-20T10:00:09.000Z')",
+                params![run, status],
+            )
+            .unwrap();
+            for (seq, key) in ["a", "b", "c"].into_iter().enumerate() {
+                c.execute(
+                    &format!("INSERT INTO step_runs ({STEP_COLUMNS_0007}) VALUES (?1, ?2, ?3, ?4, 1, 'succeeded', 'out', ?5, '2026-11-20T10:00:09.000Z', NULL, NULL)"),
+                    params![format!("{run}-{key}"), run, key, seq as i64, (seq + r) as i64 % 2],
+                )
+                .unwrap();
+            }
+            for (i, kind) in InboxKind::ALL.into_iter().enumerate() {
+                let step = format!("{run}-{}", ["a", "b", "c"][i % 3]);
+                let payload = (i % 2 == 0).then(|| format!("{run}-a"));
+                c.execute(
+                    "INSERT INTO inbox_items (id, kind, status, run_id, step_run_id, payload, taint, title, body, created_at)
+                     VALUES (?1, ?2, 'open', ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                    params![
+                        format!("{run}-item-{}", kind.as_str()),
+                        kind.as_str(),
+                        run,
+                        step,
+                        payload,
+                        ((i + r) % 2) as i64,
+                        format!("{} item {i}", kind.title()),
+                        format!("The engine's words for item {i} of {run}."),
+                        format!("2026-11-20T10:00:0{i}.{r}00Z"),
+                    ],
+                )
+                .unwrap();
+            }
+        }
+    }
+    let before = item_cells(&Connection::open(&path).unwrap(), ITEM_COLUMNS_0007);
+    assert_eq!(before.len(), 14, "seven kinds on each of two runs");
+
+    let (store, report) = open_project(dir.path()).unwrap();
+
+    let step = report
+        .applied
+        .iter()
+        .find(|m| m.from == BEFORE_RESOLUTION)
+        .expect("the 7 to 8 step is reported");
+    let backup = step.backup.clone().expect("a pre-migration copy");
+    let c = Connection::open(&path).unwrap();
+    assert_eq!(user_version(&c), BEFORE_RESOLUTION + 1);
+    let after = item_cells(&c, ITEM_COLUMNS_0007);
+    assert_eq!(after.len(), before.len(), "no item lost");
+    assert_eq!(after, before, "the same ids, every 0007 column equal");
+    drop(c);
+    let reader = store.reader().unwrap();
+    for run in ["run-a", "run-b"] {
+        for item in reader.inbox_items(run).unwrap() {
+            assert_eq!(item.status, "open", "{}", item.id);
+            assert_eq!(item.decision, None, "{}", item.id);
+            let want = (item.kind == InboxKind::Review).then_some(2);
+            assert_eq!(item.max_returns, want, "{}", item.id);
+        }
+    }
+    assert_eq!(reader.open_items().unwrap().len(), 14);
+
+    let copy_holds_the_items = |what: &str| {
+        assert!(backup.is_file(), "{what}: the copy exists");
+        let copy = Connection::open_with_flags(&backup, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        assert_eq!(user_version(&copy), BEFORE_RESOLUTION, "{what}");
+        assert_eq!(item_cells(&copy, ITEM_COLUMNS_0007), before, "{what}");
+    };
+    copy_holds_the_items("after the upgrade");
+    drop(reader);
+    drop(store);
+    let (store, again) = open_project(dir.path()).unwrap();
+    assert!(again.applied.is_empty());
+    copy_holds_the_items("after a reopen");
+    assert_eq!(
+        item_cells(&Connection::open(&path).unwrap(), ITEM_COLUMNS_0007),
+        before
+    );
+    drop(store);
 }

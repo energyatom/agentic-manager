@@ -1,5 +1,6 @@
 //! The server's state (AD-13): the port, the allowed origins, the injected
-//! clock, the open project's store path, the event log, the CLI token and
+//! clock, the open project's store path (and, since story 3.4, its writer,
+//! for the Inbox's resolve), the event log, the CLI token and
 //! the in-memory sign-in table (launch codes, sessions, the pairing code).
 //! Nothing here is ever written to disk, a URL or a log, except the launch
 //! code in the opened URL's fragment and the CLI token in its own file
@@ -14,6 +15,7 @@ use axum::http::{HeaderMap, Uri, header};
 use jiff::{SignedDuration, Timestamp};
 
 use crate::events::EventLog;
+use crate::inbox::PinCheck;
 use crate::pairing::{Pairing, PairingCode, PairingLocked};
 use crate::secret::{CliToken, ct_eq, random_hex};
 use crate::{EVENT_WINDOW, LAUNCH_CODE_TTL};
@@ -48,6 +50,12 @@ pub(crate) struct Auth {
 struct Shared {
     clock: Arc<dyn Clock>,
     project_db: Option<PathBuf>,
+    /// Story 3.4: the open project's writer, released at shutdown
+    /// ([`AppState::release_project_writer`]).
+    project_writer: Mutex<Option<am_store::Writer>>,
+    /// Story 3.4, review R1: the check that the project's config is still
+    /// the snapshot a run pinned (am-app's), released with the writer.
+    pin_check: Mutex<Option<Arc<dyn PinCheck>>>,
     events: EventLog,
     cli_token: CliToken,
     auth: Mutex<Auth>,
@@ -70,6 +78,8 @@ pub struct AppStateBuilder {
     clock: Option<Arc<dyn Clock>>,
     event_window: usize,
     project_db: Option<PathBuf>,
+    project_writer: Option<am_store::Writer>,
+    pin_check: Option<Arc<dyn PinCheck>>,
     extra_origins: Vec<String>,
 }
 
@@ -91,6 +101,23 @@ impl AppStateBuilder {
         self
     }
 
+    /// The open project's writer (story 3.4): the one handle through which
+    /// the Inbox's resolve route records a person's decision and applies it
+    /// as `System(engine)`. Every other route reads through `project_db`.
+    pub fn project_writer(mut self, writer: am_store::Writer) -> Self {
+        self.project_writer = Some(writer);
+        self
+    }
+
+    /// The check the Inbox's resolve runs before an approve or a return
+    /// (story 3.4, review R1): the hash of the snapshot the project's files
+    /// give now, compared with the run's pin. Without one, approve and
+    /// return are refused (fail closed); reject and dismiss need none.
+    pub fn pin_check(mut self, check: Arc<dyn PinCheck>) -> Self {
+        self.pin_check = Some(check);
+        self
+    }
+
     /// Allow another origin (the Tauri origin in desktop builds).
     pub fn allow_origin(mut self, origin: &str) -> Self {
         self.extra_origins.push(origin.to_string());
@@ -104,6 +131,8 @@ impl AppStateBuilder {
             shared: Arc::new(Shared {
                 clock: self.clock.unwrap_or_else(|| Arc::new(SystemClock)),
                 project_db: self.project_db,
+                project_writer: Mutex::new(self.project_writer),
+                pin_check: Mutex::new(self.pin_check),
                 events: EventLog::new(self.event_window),
                 cli_token: CliToken::generate(),
                 auth: Mutex::new(Auth::default()),
@@ -124,6 +153,8 @@ impl AppState {
             clock: None,
             event_window: EVENT_WINDOW,
             project_db: None,
+            project_writer: None,
+            pin_check: None,
             extra_origins: Vec::new(),
         }
     }
@@ -185,6 +216,40 @@ impl AppState {
 
     pub(crate) fn project_db(&self) -> Option<PathBuf> {
         self.shared.project_db.clone()
+    }
+
+    pub(crate) fn project_writer(&self) -> Option<am_store::Writer> {
+        self.shared
+            .project_writer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    pub(crate) fn pin_check(&self) -> Option<Arc<dyn PinCheck>> {
+        self.shared
+            .pin_check
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Drops the server's handles on the open project's writer and its pin
+    /// check (story 3.4), so that once `agentic serve` stops, dropping the
+    /// open project releases the store's lock even while a clone of this
+    /// state lives on (the pairing-code reader's). A resolve after it
+    /// answers `no-project`.
+    pub fn release_project_writer(&self) {
+        self.shared
+            .project_writer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        self.shared
+            .pin_check
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
     }
 
     pub(crate) fn auth(&self) -> MutexGuard<'_, Auth> {

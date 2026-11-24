@@ -13,7 +13,8 @@
 //! binary (owner decision 9, 2026-11-22). Story 2.12 moves Accounts to this
 //! Mac ([`user`]) and makes [`key_use`] the one check before any key read.
 //! Story 3.2 adds [`serving`]: `agentic serve`'s owner-only check at start
-//! and its per-launch CLI token file.
+//! and its per-launch CLI token file. Story 3.4 adds `agentic gate`
+//! ([`gate`]): the owner decides open Inbox items on a terminal.
 #![forbid(unsafe_code)]
 
 // The composition root depends on every adapter (Design Paradigm table); the
@@ -28,6 +29,7 @@ use am_services as _;
 pub mod accounts;
 pub mod cli;
 pub mod egress;
+pub mod gate;
 pub mod identity;
 pub mod key_use;
 pub mod run;

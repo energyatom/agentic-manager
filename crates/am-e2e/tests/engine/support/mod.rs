@@ -102,10 +102,11 @@ pub fn looping(key: &str, provider: Arc<dyn LlmProvider>, to: &str, max: u32) ->
 }
 
 /// [`step`] as a human gate (`gate: review`): it makes no model call, so
-/// its provider must never be called.
+/// its provider must never be called. Story 3.4: with the default
+/// `max_returns` of 2.
 pub fn gate(key: &str, provider: Arc<dyn LlmProvider>) -> StepPlan {
     StepPlan {
-        hand_off: HandOff::Gate,
+        hand_off: HandOff::Gate { max_returns: 2 },
         ..step(key, provider)
     }
 }

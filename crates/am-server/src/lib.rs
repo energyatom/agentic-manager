@@ -18,7 +18,12 @@
 //! - every error is the one envelope, `am_api::ApiError`; no CORS headers
 //!   are ever sent;
 //! - run status from the open project's store, read-only, and the event
-//!   stream ([`EventLog`], [`watch_runs`]) with `seq` and `since=`.
+//!   stream ([`EventLog`], [`watch_runs`]) with `seq` and `since=`;
+//! - story 3.4: the Inbox (`/api/v1/inbox`, reads in CLI class; a resolve
+//!   in UI class), which records a person's decision through the store's
+//!   one Human-only command and applies it as `System(engine)`; it runs no
+//!   model step. Each Inbox change is one `inbox.updated` event carrying
+//!   only the item's id and status.
 //!
 //! Session ids, CSRF values, launch and pairing codes and the CLI token are
 //! held in memory only, compared in constant time, and never logged.
@@ -28,6 +33,7 @@ mod envelope;
 mod events;
 mod fixture;
 mod guard;
+mod inbox;
 mod pairing;
 mod routes;
 mod runs;
@@ -42,6 +48,7 @@ use tokio::net::TcpListener;
 
 pub use events::{EventLog, watch_runs};
 pub use fixture::*;
+pub use inbox::PinCheck;
 pub use pairing::{PairingCode, PairingLocked, pairing_terminal, print_pairing_code};
 pub use routes::{RouteClass, RouteSpec, route_table, router};
 pub use secret::CliToken;

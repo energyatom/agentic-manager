@@ -167,6 +167,73 @@ pub(crate) fn no_project() -> Response {
     )
 }
 
+pub(crate) fn item_resolved() -> Response {
+    error(
+        StatusCode::CONFLICT,
+        "item-resolved",
+        "This Inbox item was resolved already; an item is resolved once.",
+        Some("Read the item to see who resolved it, and when."),
+    )
+}
+
+pub(crate) fn not_waiting() -> Response {
+    error(
+        StatusCode::CONFLICT,
+        "not-waiting",
+        "This item's step is not waiting for a person, so there is nothing to resolve.",
+        Some("Run `agentic status` to see the run's steps."),
+    )
+}
+
+pub(crate) fn decision_not_allowed(message: &str) -> Response {
+    error(
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "decision-not-allowed",
+        message,
+        Some(
+            "A Review is approved, returned or rejected; a Question is answered; a Failure is dismissed.",
+        ),
+    )
+}
+
+pub(crate) fn note_required() -> Response {
+    error(
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "note-required",
+        "A return needs its note, and an answer its text: one line of 1 to 2000 characters.",
+        Some("Send `note` with the decision."),
+    )
+}
+
+pub(crate) fn confirm_required() -> Response {
+    error(
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "confirm-required",
+        "This Review's output came from untrusted content, so approving it needs the item's id typed back.",
+        Some("Send `confirmItemId` equal to the item's id."),
+    )
+}
+
+pub(crate) fn config_changed(message: &str) -> Response {
+    error(
+        StatusCode::CONFLICT,
+        "config-changed",
+        message,
+        Some(
+            "Put the project's files back as they were when the run started, or reject the item; reject and dismiss still work.",
+        ),
+    )
+}
+
+pub(crate) fn not_continuable(message: &str) -> Response {
+    error(
+        StatusCode::CONFLICT,
+        "not-continuable",
+        message,
+        Some("Run `agentic status` to see the run; resume arrives with story 3.9."),
+    )
+}
+
 pub(crate) fn upgrade_required() -> Response {
     error(
         StatusCode::UPGRADE_REQUIRED,

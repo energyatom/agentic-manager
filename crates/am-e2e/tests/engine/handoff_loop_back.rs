@@ -94,6 +94,7 @@ async fn step_three_loops_back_to_step_one_with_its_reasons_as_a_trusted_input()
         vec![StepInput {
             kind: "loop_back".into(),
             from_step_run: Some(check1.id.clone()),
+            from_item: None,
             label: "loop-back:check@1".into(),
             taint: Taint::Clean,
         }]
@@ -105,6 +106,7 @@ async fn step_three_loops_back_to_step_one_with_its_reasons_as_a_trusted_input()
         vec![StepInput {
             kind: "step_output".into(),
             from_step_run: Some(draft2.id.clone()),
+            from_item: None,
             label: "step:draft@2".into(),
             taint: Taint::Clean,
         }]

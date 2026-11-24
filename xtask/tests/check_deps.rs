@@ -603,3 +603,310 @@ fn a_shebang_line_hides_no_call() {
         &["from_step_output", "authored"],
     );
 }
+
+// ------------------------------------------------------------------ story 3.4
+//
+// Epic 3 story 4 (AD-15, AD-28; matrix row 21): the one Human-only resolve
+// of an Inbox item, `Writer::resolve_inbox_item`, and the Human actor's
+// constructor, `HumanActor::new`, are named in shipped code only by the two
+// command handlers, `crates/am-server/src/inbox.rs` and
+// `crates/am-app/src/gate.rs`, plus their definitions (am-store's method,
+// am-domain's type). No engine, tool, MCP or other path can reach them
+// without failing `check-deps`. Written before the rule exists.
+
+/// am-domain's `HumanActor` and its constructor, with a doc example and a
+/// unit test that name it (neither is shipped code).
+const HUMAN_ACTOR: &str = "pub struct HumanActor {\n    person: String,\n    hat: String,\n}\nimpl HumanActor {\n    /// ```\n    /// let h = am_domain::HumanActor::new(\"owner\", \"Reviewer\");\n    /// ```\n    pub fn new(person: impl Into<String>, hat: impl Into<String>) -> HumanActor {\n        HumanActor { person: person.into(), hat: hat.into() }\n    }\n}\nimpl From<HumanActor> for Actor {\n    fn from(h: HumanActor) -> Actor {\n        Actor::Human { person: h.person, hat: h.hat }\n    }\n}\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn into_an_actor() {\n        let _a: super::Actor = super::HumanActor::new(\"owner\", \"Reviewer\").into();\n    }\n}\n";
+
+/// am-store's resolve, defined with a `HumanActor`, and a unit test that
+/// calls it.
+const RESOLVE: &str = "impl Writer {\n    pub fn resolve_inbox_item(&self, by: HumanActor, item_id: &str, decision: Decision, note: Option<String>) -> Result<(), StoreError> {\n        self.job(Actor::from(by), item_id, decision, note)\n    }\n}\n#[cfg(test)]\nmod tests {\n    fn resolves(w: &Writer) {\n        let _ = w.resolve_inbox_item(am_domain::HumanActor::new(\"owner\", \"Reviewer\"), \"i\", Decision::Approve, None);\n    }\n}\n";
+
+/// A command handler's call of the resolve.
+const HANDLER: &str = "pub fn decide(w: &Writer, id: &str, decision: Decision, note: Option<String>) -> Result<(), StoreError> {\n    w.resolve_inbox_item(HumanActor::new(\"owner\", REVIEWER_HAT), id, decision, note)\n}\n";
+
+/// A tree holding the two definitions and `files`.
+fn resolve_tree(files: &[(&str, &str)]) -> tempfile::TempDir {
+    use common::write;
+    let tmp = tempfile::tempdir().unwrap();
+    write(tmp.path(), "crates/am-domain/src/actor.rs", HUMAN_ACTOR);
+    write(tmp.path(), "crates/am-store/src/lib.rs", RESOLVE);
+    for (file, text) in files {
+        write(tmp.path(), file, text);
+    }
+    tmp
+}
+
+/// Row 21: the definitions, the two handlers, tests, comments and
+/// literals pass; a call of `resolve_inbox_item` or `HumanActor::new`
+/// anywhere else in shipped code (am-engine, am-tools, am-mcp, another file
+/// of am-app or am-server, a second site in am-store) fails `check-deps`,
+/// naming the file, the line, the name and the rule (AD-15).
+#[test]
+fn the_inbox_resolve_is_named_only_by_its_two_handlers() {
+    let tmp = resolve_tree(&[
+        ("crates/am-server/src/inbox.rs", HANDLER),
+        ("crates/am-app/src/gate.rs", HANDLER),
+        (
+            "crates/am-e2e/tests/trust/inbox_resolve_human_only.rs",
+            HANDLER,
+        ),
+        ("crates/am-store/tests/inbox_resolve.rs", HANDLER),
+        (
+            "crates/am-engine/src/gate.rs",
+            "// The engine never calls resolve_inbox_item or HumanActor::new (AD-15).\nconst WHY: &str = \"resolve_inbox_item is the Human's; HumanActor::new is the CLI's\";\npub fn apply(w: &Writer, item: &str) -> Result<(), StoreError> {\n    w.exec(engine(), WriteCommand::ApplyResolution { item_id: item.into(), past_max: None })\n}\n",
+        ),
+    ]);
+    let out = deps_at(tmp.path());
+    assert!(
+        out.status.success(),
+        "the definitions, the two handlers, tests, comments and literals pass: {}",
+        stderr(&out)
+    );
+
+    for (what, file, source, name) in [
+        (
+            "the engine",
+            "crates/am-engine/src/gate.rs",
+            "pub fn apply(w: &Writer, item: &str) -> Result<(), StoreError> {\n    w.resolve_inbox_item(HumanActor::new(\"owner\", \"Reviewer\"), item, Decision::Approve, None)\n}\n",
+            "resolve_inbox_item",
+        ),
+        (
+            "a tool",
+            "crates/am-tools/src/lib.rs",
+            "pub fn reviewer() -> Actor {\n    am_domain::HumanActor::new(\"owner\", \"Reviewer\").into()\n}\n",
+            "HumanActor::new",
+        ),
+        (
+            "an MCP client",
+            "crates/am-mcp/src/lib.rs",
+            "pub fn approve(w: &Writer, by: HumanActor, item: &str) {\n    let _ = w.resolve_inbox_item(by, item, Decision::Approve, None);\n}\n",
+            "resolve_inbox_item",
+        ),
+        (
+            "another file of am-app",
+            "crates/am-app/src/run.rs",
+            "fn reviewer() -> HumanActor {\n    HumanActor::new(\"owner\", REVIEWER_HAT)\n}\n",
+            "HumanActor::new",
+        ),
+        (
+            "another file of am-server",
+            "crates/am-server/src/runs.rs",
+            "pub fn approve(w: &Writer, by: HumanActor, id: &str) {\n    let _ = w.resolve_inbox_item(by, id, Decision::Approve, None);\n}\n",
+            "resolve_inbox_item",
+        ),
+        (
+            "am-store beside the definition",
+            "crates/am-store/src/inbox.rs",
+            "pub fn approve_everything(w: &Writer, id: &str) {\n    let _ = w.resolve_inbox_item(am_domain::HumanActor::new(\"owner\", \"Reviewer\"), id, Decision::Approve, None);\n}\n",
+            "resolve_inbox_item",
+        ),
+    ] {
+        let tmp = resolve_tree(&[(file, source)]);
+        let out = deps_at(tmp.path());
+        let err = stderr(&out);
+        assert!(!out.status.success(), "{what}: must fail: {err}");
+        let line = source
+            .lines()
+            .position(|l| l.contains(name))
+            .map(|i| i + 1)
+            .unwrap();
+        assert!(
+            err.contains(&format!("{file}:{line}")),
+            "{what}: names {file}:{line}: {err}"
+        );
+        assert!(err.contains(name), "{what}: names `{name}`: {err}");
+        assert!(err.contains("AD-15"), "{what}: states the rule: {err}");
+        for allowed in [
+            "crates/am-domain/src/actor.rs",
+            "crates/am-store/src/lib.rs",
+        ] {
+            assert!(
+                !err.contains(allowed),
+                "{what}: a definition is not a finding: {err}"
+            );
+        }
+    }
+}
+
+// ------------------------------------------------------- review round 1
+//
+// Story 3.4 review round 1 (the coordinator's triage, 2026-11-24), R12: the
+// rule matches whole files by token, not lines. The token `HumanActor` (and
+// `resolve_inbox_item`) may stand in shipped `src/` only in am-domain (the
+// definition and its re-export), am-store's `src/lib.rs` (the resolve),
+// `crates/am-server/src/inbox.rs` and `crates/am-app/src/gate.rs`; a
+// `#[cfg(test)]` item is exempt only in am-store. Written before the fix.
+
+/// A command handler's file as shipped: its import, then its call.
+const HANDLER_FILE: &str = "use am_domain::{Decision, HumanActor, REVIEWER_HAT};\npub fn decide(w: &Writer, id: &str, decision: Decision, note: Option<String>) -> Result<(), StoreError> {\n    w.resolve_inbox_item(HumanActor::new(\"owner\", REVIEWER_HAT), id, decision, note)\n}\n";
+
+/// [`resolve_tree`] with am-domain's re-export and am-store's import, the
+/// two handlers (each with its import), and a `#[cfg(test)]` use in
+/// another file of am-store.
+fn token_tree(files: &[(&str, &str)]) -> tempfile::TempDir {
+    let mut all: Vec<(&str, &str)> = vec![
+        (
+            "crates/am-domain/src/lib.rs",
+            "pub mod actor;\npub use actor::{Actor, HumanActor};\n",
+        ),
+        ("crates/am-server/src/inbox.rs", HANDLER_FILE),
+        ("crates/am-app/src/gate.rs", HANDLER_FILE),
+        (
+            "crates/am-store/src/migrations.rs",
+            "pub fn migrate() {}\n#[cfg(test)]\nmod tests {\n    use am_domain::HumanActor;\n    fn t(w: &crate::Writer) {\n        let _ = w.resolve_inbox_item(HumanActor::new(\"owner\", \"Reviewer\"), \"i\", Decision::Approve, None);\n    }\n}\n",
+        ),
+    ];
+    all.extend_from_slice(files);
+    let tmp = resolve_tree(&all);
+    common::write(
+        tmp.path(),
+        "crates/am-store/src/lib.rs",
+        &format!("use am_domain::{{Actor, Decision, HumanActor}};\n{RESOLVE}"),
+    );
+    tmp
+}
+
+/// R12: the allowed sites pass (am-domain's definition and re-export,
+/// am-store's resolve and a `#[cfg(test)]` use in another am-store file,
+/// the two handlers, tests). In a disallowed crate's shipped source, each
+/// way of naming `HumanActor` fails `check-deps`, naming the file, the
+/// line, `HumanActor` and AD-15: a constructor split over lines, a `use …
+/// as` alias, a `type` alias, `<HumanActor>::new`, and a `#[cfg(test)]` use
+/// outside am-store.
+#[test]
+fn the_human_actor_token_is_matched_in_whole_files() {
+    let tmp = token_tree(&[]);
+    let out = deps_at(tmp.path());
+    assert!(
+        out.status.success(),
+        "the allowed sites pass: {}",
+        stderr(&out)
+    );
+
+    for (what, file, source) in [
+        (
+            "a constructor split over lines",
+            "crates/am-tools/src/lib.rs",
+            "pub fn reviewer() -> Actor {\n    am_domain::HumanActor\n        ::new(\"owner\", \"Reviewer\")\n        .into()\n}\n",
+        ),
+        (
+            "a use alias",
+            "crates/am-tools/src/lib.rs",
+            "use am_domain::HumanActor as H;\npub fn reviewer() -> Actor {\n    H::new(\"owner\", \"Reviewer\").into()\n}\n",
+        ),
+        (
+            "a type alias",
+            "crates/am-mcp/src/lib.rs",
+            "type H = am_domain::HumanActor;\npub fn reviewer() -> Actor {\n    H::new(\"owner\", \"Reviewer\").into()\n}\n",
+        ),
+        (
+            "a qualified path",
+            "crates/am-engine/src/gate.rs",
+            "pub fn reviewer() -> Actor {\n    <am_domain::HumanActor>::new(\"owner\", \"Reviewer\").into()\n}\n",
+        ),
+        (
+            "a #[cfg(test)] use outside am-store",
+            "crates/am-engine/src/run.rs",
+            "pub fn drive() {}\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn t() {\n        let _a: Actor = am_domain::HumanActor::new(\"owner\", \"Reviewer\").into();\n    }\n}\n",
+        ),
+    ] {
+        let tmp = token_tree(&[(file, source)]);
+        let out = deps_at(tmp.path());
+        let err = stderr(&out);
+        assert!(!out.status.success(), "{what}: must fail: {err}");
+        let line = source
+            .lines()
+            .position(|l| l.contains("HumanActor"))
+            .map(|i| i + 1)
+            .unwrap();
+        assert!(
+            err.contains(&format!("{file}:{line}")),
+            "{what}: names {file}:{line}: {err}"
+        );
+        assert!(err.contains("HumanActor"), "{what}: names the token: {err}");
+        assert!(err.contains("AD-15"), "{what}: states the rule: {err}");
+        for allowed in [
+            "crates/am-domain/src/actor.rs",
+            "crates/am-domain/src/lib.rs",
+            "crates/am-store/src/lib.rs",
+            "crates/am-store/src/migrations.rs",
+            "crates/am-server/src/inbox.rs",
+            "crates/am-app/src/gate.rs",
+        ] {
+            assert!(
+                !err.contains(allowed),
+                "{what}: an allowed site is not a finding ({allowed}): {err}"
+            );
+        }
+    }
+}
+
+// ------------------------------------------------------- review round 2
+//
+// Story 3.4 review round 2 (the coordinator's triage, 2026-11-24), S5: in
+// am-domain only `actor.rs` (the definition) and `lib.rs`'s re-export line
+// may name `HumanActor`; in any allowed file an `as` alias or a `pub use`
+// of either token fails the check. Written before the fix.
+
+/// S5: the real allowed sites (each handler with its plain import) pass;
+/// each of these fails `check-deps`, naming the file, the line, the token
+/// and AD-15: a `pub use … as` re-export in another am-domain file, a `pub
+/// use … as` in `crates/am-app/src/gate.rs`, a `use … as` alias in
+/// `crates/am-server/src/inbox.rs`, and a mention of `HumanActor` in an
+/// am-domain file that is not `actor.rs`.
+#[test]
+fn an_alias_or_a_re_export_of_human_actor_fails_even_in_an_allowed_file() {
+    let tmp = token_tree(&[]);
+    let out = deps_at(tmp.path());
+    assert!(
+        out.status.success(),
+        "the allowed sites pass: {}",
+        stderr(&out)
+    );
+
+    let gate_with_reexport = format!("{HANDLER_FILE}pub use am_domain::HumanActor as Owner;\n");
+    let inbox_with_alias = "use am_domain::HumanActor as H;\nuse am_domain::{Decision, REVIEWER_HAT};\npub fn decide(w: &Writer, id: &str, decision: Decision, note: Option<String>) -> Result<(), StoreError> {\n    w.resolve_inbox_item(H::new(\"owner\", REVIEWER_HAT), id, decision, note)\n}\n";
+    for (what, file, source, marker) in [
+        (
+            "a re-export in another am-domain file",
+            "crates/am-domain/src/inbox.rs",
+            "pub enum InboxKind { Review }\npub use crate::actor::HumanActor as Owner;\n",
+            "as Owner",
+        ),
+        (
+            "a re-export in the CLI handler",
+            "crates/am-app/src/gate.rs",
+            gate_with_reexport.as_str(),
+            "as Owner",
+        ),
+        (
+            "an alias in the API handler",
+            "crates/am-server/src/inbox.rs",
+            inbox_with_alias,
+            "as H",
+        ),
+        (
+            "a mention in an am-domain file that is not actor.rs",
+            "crates/am-domain/src/content.rs",
+            "pub struct Instruction(String);\npub fn signed_by(_who: &crate::HumanActor) {}\n",
+            "HumanActor",
+        ),
+    ] {
+        let tmp = token_tree(&[(file, source)]);
+        let out = deps_at(tmp.path());
+        let err = stderr(&out);
+        assert!(!out.status.success(), "{what}: must fail: {err}");
+        let line = source
+            .lines()
+            .position(|l| l.contains(marker))
+            .map(|i| i + 1)
+            .unwrap();
+        assert!(
+            err.contains(&format!("{file}:{line}")),
+            "{what}: names {file}:{line}: {err}"
+        );
+        assert!(err.contains("HumanActor"), "{what}: names the token: {err}");
+        assert!(err.contains("AD-15"), "{what}: states the rule: {err}");
+    }
+}

@@ -37,7 +37,7 @@ pub(crate) fn step_dto(run_id: &str, s: StepRow) -> StepDto {
 
 /// Runs `read` on a fresh read-only connection to the open project's
 /// store, off the async threads.
-async fn read<T, F>(state: &AppState, read: F) -> Result<T, fn() -> Response>
+pub(crate) async fn read<T, F>(state: &AppState, read: F) -> Result<T, fn() -> Response>
 where
     T: Send + 'static,
     F: FnOnce(&Reader) -> Result<T, am_store::StoreError> + Send + 'static,

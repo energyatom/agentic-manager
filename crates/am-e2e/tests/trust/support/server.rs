@@ -644,6 +644,23 @@ impl Ws {
         out
     }
 
+    /// Sends one text frame, masked as a client's must be (story 3.4: a
+    /// client frame resolves nothing).
+    pub async fn send_text(&mut self, text: &str) {
+        let payload = text.as_bytes();
+        let mut frame = vec![0x81];
+        if payload.len() < 126 {
+            frame.push(0x80 | payload.len() as u8);
+        } else {
+            frame.push(0x80 | 126);
+            frame.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+        }
+        let key = [0x12, 0x34, 0x56, 0x78];
+        frame.extend_from_slice(&key);
+        frame.extend(payload.iter().enumerate().map(|(i, b)| b ^ key[i % 4]));
+        let _ = self.stream.write_all(&frame).await;
+    }
+
     /// Sends a close frame and drops the connection.
     pub async fn close(mut self) {
         let _ = self.stream.write_all(&[0x88, 0x80, 0, 0, 0, 0]).await;

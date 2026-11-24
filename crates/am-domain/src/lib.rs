@@ -21,6 +21,7 @@ pub mod net;
 pub mod runtime;
 pub mod secrets;
 pub mod terminal;
+pub mod text;
 pub mod tool_manifest;
 pub mod workspace;
 
@@ -39,7 +40,7 @@ pub trait CancelSignal: Send + Sync {
     fn cancelled(&self) -> BoxFuture<()>;
 }
 
-pub use actor::Actor;
+pub use actor::{Actor, HumanActor, REVIEWER_HAT};
 pub use audit::{AuditEvent, AuditSink};
 pub use clock::Clock;
 pub use config_history::{
@@ -50,7 +51,7 @@ pub use content::{
     FileKind, FilePart, Instruction, Taint, TrustedInput, UntrustedContent, UntrustedData,
 };
 pub use host::{HostPattern, HostPatternError};
-pub use inbox::{InboxKind, StepStatus};
+pub use inbox::{Decision, InboxKind, StepStatus};
 pub use llm::{
     ChatOutcome, ChatRequest, EventSink, LlmProvider, Message, ModelCapabilities, Part,
     ProviderError, Role, StopReason, StreamEvent, ToolCall, ToolSpec, Usage,

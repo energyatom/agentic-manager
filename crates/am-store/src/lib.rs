@@ -37,6 +37,17 @@
 //! journal rows; and the one Inbox item entity (`inbox_items`, AD-28's
 //! seven kinds) is created only by an `Actor::System` command, together
 //! with the step change it belongs to, and never changed after.
+//!
+//! Epic 3 story 4 (AD-8, AD-10, AD-15, AD-28, AD-36, AD-43): only a person
+//! resolves an Inbox item, through [`Writer::resolve_inbox_item`], whose
+//! actor is a [`HumanActor`] by type; no [`WriteCommand`] resolves. The
+//! resolve records the decision on the item and takes AD-8's one Human edge
+//! (`waiting_human → running`) in one transaction. The engine then applies
+//! the committed decision with [`WriteCommand::ApplyResolution`] (only
+//! `Actor::System`), decided from committed rows; the writer refuses any
+//! other transition of a gate attempt whose Review a person resolved. A
+//! return's note is stored once, on the item; the producer's new attempt
+//! refers to it with a `gate_note` input (`step_inputs.from_item`).
 #![forbid(unsafe_code)]
 
 use std::collections::BTreeMap;
@@ -44,7 +55,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, mpsc};
 use std::thread;
 
-use am_domain::{Actor, InboxKind, NewIntent, StepStatus, Taint, Usage};
+use am_domain::{Actor, Decision, HumanActor, InboxKind, NewIntent, StepStatus, Taint, Usage};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use serde_json::{Value, json};
 
@@ -326,6 +337,41 @@ pub enum WriteCommand {
         tool_call_id: String,
         status: String,
     },
+    /// Story 3.4, review R5 (AD-10 (b), AD-28): a `queued` step attempt that
+    /// must not start (its gate note's item was not resolved by a person)
+    /// stays `queued`; its Failure item is created on it (the engine's
+    /// words) and the run finishes `failed`, in one transaction. Only an
+    /// `Actor::System` creates the item. Audited `inbox.created` and
+    /// `run.finished`.
+    FailBeforeStart {
+        step_run_id: String,
+        item: NewInboxItem,
+    },
+    /// Story 3.4 (AD-8, AD-15, AD-28, AD-36): the engine's follow-up to a
+    /// decision a person committed on a gate's Review item, decided from
+    /// committed rows, in one transaction; only an `Actor::System` sends
+    /// it. The item must be resolved and its gate attempt `running` (so it
+    /// is applied once):
+    ///
+    /// - approve: the gate attempt `running → succeeded`;
+    /// - reject: the gate attempt `running → failed`, the run `failed` (no
+    ///   Failure item: the Review records the decision);
+    /// - return: the number of this run's Review items on attempts of the
+    ///   gate's step resolved `return` (this one included), against the
+    ///   item's `max_returns`. Within it, the gate attempt is `looped_back`
+    ///   and attempt n+1 of every step from the payload's step through the
+    ///   gate is queued, the producer's new attempt with its one `gate_note`
+    ///   input (from the item, labelled `gate-note:<gate>@<attempt>`, taint
+    ///   0). Past it, `past_max` must carry the Failure item: the gate
+    ///   attempt fails, the item is created on it and the run fails. A
+    ///   `past_max` that disagrees with the journal, either way, is refused.
+    ///
+    /// Audited `step.finished`, `step.looped_back`, `inbox.created` and
+    /// `run.finished` as they apply; never the note.
+    ApplyResolution {
+        item_id: String,
+        past_max: Option<NewInboxItem>,
+    },
     /// The run's final status; stamps its `finished_at`. Refused while a
     /// step of the run waits for a person (story 3.3).
     FinishRun {
@@ -414,7 +460,9 @@ impl WriteCommand {
             | WriteCommand::StartAttempt { .. }
             | WriteCommand::SettleAndLoopBack { .. }
             | WriteCommand::PauseStep { .. }
-            | WriteCommand::FailWithItem { .. } => return None,
+            | WriteCommand::FailWithItem { .. }
+            | WriteCommand::FailBeforeStart { .. }
+            | WriteCommand::ApplyResolution { .. } => return None,
             WriteCommand::RecordToolCall {
                 tool_call_id,
                 step_run_id,
@@ -552,13 +600,17 @@ impl WriteCommand {
 
 /// One input of a step attempt (AD-43's `step_inputs`; story 3.3): the
 /// command's and the read's. `kind` is `step_output` (a `next` input),
-/// `loop_back` (a loop-back's reasons) or `untrusted` (a plan input);
-/// `from_step_run` is the producing attempt (`None` for a plan input). The
-/// text stays where it was written (AD-43: never stored twice).
+/// `loop_back` (a loop-back's reasons), `untrusted` (a plan input) or,
+/// since story 3.4, `gate_note` (a person's return note at a gate);
+/// `from_step_run` is the producing attempt (`None` for a plan input and a
+/// gate note), `from_item` the Inbox item a `gate_note` refers to (`None`
+/// otherwise). The text stays where it was written (AD-43: never stored
+/// twice): a note stays on its item.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StepInput {
     pub kind: String,
     pub from_step_run: Option<String>,
+    pub from_item: Option<String>,
     pub label: String,
     pub taint: Taint,
 }
@@ -574,6 +626,9 @@ pub struct NewInboxItem {
     pub taint: Taint,
     pub title: String,
     pub body: String,
+    /// A Review's: how many times its gate may be returned (0 to 5), from
+    /// the run's plan (story 3.4); `None` on every other kind.
+    pub max_returns: Option<u32>,
 }
 
 /// The settlement of a call that ends with a failure
@@ -600,7 +655,23 @@ pub struct TriggerRow {
 
 type Reply = mpsc::Sender<Result<(), StoreError>>;
 
-type Job = (Actor, WriteCommand, Reply);
+/// What crosses the writer channel: a typed command, or the resolve of an
+/// Inbox item, which only [`Writer::resolve_inbox_item`] sends (story 3.4:
+/// no `WriteCommand` resolves).
+pub(crate) enum Command {
+    Write(WriteCommand),
+    Resolve(Resolve),
+}
+
+/// A person's decision on an Inbox item, as [`Writer::resolve_inbox_item`]
+/// sends it (crate-private: no other caller can build one).
+pub(crate) struct Resolve {
+    pub(crate) item_id: String,
+    pub(crate) decision: Decision,
+    pub(crate) note: Option<String>,
+}
+
+type Job = (Actor, Command, Reply);
 
 /// Handle to the single writer. Cloning shares the same writer thread.
 #[derive(Clone)]
@@ -638,15 +709,8 @@ impl Writer {
     /// # }
     /// ```
     ///
-    /// Nothing resolves an Inbox item yet: there is no command that changes
-    /// an item after it is created (story 3.4 adds the Human-only one):
-    ///
-    /// ```compile_fail
-    /// # fn f(w: am_store::Writer) -> Result<(), am_store::StoreError> {
-    /// let owner = am_domain::Actor::Human { person: "owner".into(), hat: "Reviewer".into() };
-    /// w.exec(owner, am_store::WriteCommand::ResolveInboxItem { item_id: "i".into() })
-    /// # }
-    /// ```
+    /// No command resolves an Inbox item: only
+    /// [`Writer::resolve_inbox_item`] does, with a [`HumanActor`].
     ///
     /// A command without an Actor does not compile:
     ///
@@ -664,6 +728,81 @@ impl Writer {
     /// # }
     /// ```
     pub fn exec(&self, actor: Actor, cmd: WriteCommand) -> Result<(), StoreError> {
+        self.send(actor, Command::Write(cmd))
+    }
+
+    /// Story 3.4 (AD-8, AD-15, AD-24, AD-25, AD-28): a person's decision on
+    /// the Inbox item `item_id`, the one way an item is resolved. In one
+    /// transaction: the item becomes `resolved` with `decision`, the note
+    /// (a return's or a Question's answer: one line of 1 to 2000
+    /// characters, no control character but tab; refused on approve,
+    /// reject and dismiss), `resolved_by` (the actor as JSON) and
+    /// `resolved_at`; a Review's or a Question's step takes AD-8's one Human
+    /// edge, `waiting_human → running`, and nothing else changes; one audit
+    /// entry `inbox.resolved` (the kind, the decision, the step run, the
+    /// taint and the note's sha256, never its text). Refused with nothing
+    /// written: an item resolved already (naming who and when), a decision
+    /// that does not fit the item's kind, a kind this version does not
+    /// resolve, a note against its rules. The engine applies the decision
+    /// afterwards ([`WriteCommand::ApplyResolution`]).
+    ///
+    /// Its actor is a person by type:
+    ///
+    /// ```no_run
+    /// # fn f(w: am_store::Writer) -> Result<(), am_store::StoreError> {
+    /// w.resolve_inbox_item(am_domain::HumanActor::new("owner", "Reviewer"), "i", am_domain::Decision::Approve, None)?;
+    /// // A person becomes an `Actor`, one way only.
+    /// let _owner: am_domain::Actor = am_domain::HumanActor::new("owner", "Reviewer").into();
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// so the engine (or a seat, a tool, an import, the Assistant) does not
+    /// compile there:
+    ///
+    /// ```compile_fail
+    /// # fn f(w: am_store::Writer) -> Result<(), am_store::StoreError> {
+    /// w.resolve_inbox_item(am_domain::Actor::System { component: "engine".into() }, "i", am_domain::Decision::Approve, None)
+    /// # }
+    /// ```
+    ///
+    /// no `Actor` becomes a `HumanActor`:
+    ///
+    /// ```compile_fail
+    /// # fn f(actor: am_domain::Actor) {
+    /// let _h: am_domain::HumanActor = actor.into();
+    /// # }
+    /// ```
+    ///
+    /// and no `WriteCommand` resolves, so [`Writer::exec`] cannot, with any
+    /// actor (kept from story 3.3):
+    ///
+    /// ```compile_fail
+    /// # fn f(w: am_store::Writer) -> Result<(), am_store::StoreError> {
+    /// let owner = am_domain::Actor::Human { person: "owner".into(), hat: "Reviewer".into() };
+    /// w.exec(owner, am_store::WriteCommand::ResolveInboxItem { item_id: "i".into() })
+    /// # }
+    /// ```
+    pub fn resolve_inbox_item(
+        &self,
+        by: HumanActor,
+        item_id: &str,
+        decision: Decision,
+        note: Option<String>,
+    ) -> Result<(), StoreError> {
+        self.send(
+            Actor::from(by),
+            Command::Resolve(Resolve {
+                item_id: item_id.to_string(),
+                decision,
+                note,
+            }),
+        )
+    }
+
+    /// Sends one job to the writer thread; returns after it committed (or
+    /// was refused).
+    fn send(&self, actor: Actor, cmd: Command) -> Result<(), StoreError> {
         let (rtx, rrx) = mpsc::channel();
         self.inner
             .tx
@@ -724,7 +863,10 @@ impl Store {
             .spawn(move || {
                 let mut conn = conn;
                 while let Ok((actor, cmd, reply)) = rx.recv() {
-                    let r = apply(&mut conn, &actor, &cmd);
+                    let r = match &cmd {
+                        Command::Write(cmd) => apply(&mut conn, &actor, cmd),
+                        Command::Resolve(resolve) => apply_resolve(&mut conn, &actor, resolve),
+                    };
                     let _ = reply.send(r);
                 }
                 // The connection closes first, then the project lock goes.
@@ -823,6 +965,17 @@ fn apply(conn: &mut Connection, actor: &Actor, cmd: &WriteCommand) -> Result<(),
     Ok(())
 }
 
+/// A person's resolve (story 3.4), in its own transaction with its audit
+/// entry; refused, with nothing written, unless `actor` is `Actor::Human`.
+fn apply_resolve(conn: &mut Connection, actor: &Actor, r: &Resolve) -> Result<(), StoreError> {
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let now = now_ts();
+    let (action, target, args) = resolve_item(&tx, actor, r, &now)?;
+    audit::append(&tx, actor, &action, &target, "ok", args.as_ref(), &now)?;
+    tx.commit()?;
+    Ok(())
+}
+
 /// The one command executor (story 2.12, AD-6): checks the command, runs it
 /// and appends its audit entries in the caller's transaction. The project
 /// store's writer thread and the user store's guard ([`user::UserStore`])
@@ -863,13 +1016,36 @@ pub(crate) fn execute(
     // AD-28: only the app itself creates an Inbox item, before anything.
     if matches!(
         cmd,
-        WriteCommand::PauseStep { .. } | WriteCommand::FailWithItem { .. }
+        WriteCommand::PauseStep { .. }
+            | WriteCommand::FailWithItem { .. }
+            | WriteCommand::FailBeforeStart { .. }
     ) && !matches!(actor, Actor::System { .. })
     {
         return Err(StoreError::Invalid(format!(
             "refused: only the app's engine creates an Inbox item (AD-28); {} cannot, and nothing was written",
             actor.describe()
         )));
+    }
+    // Story 3.4 (AD-15): only the app itself applies a decision a person
+    // committed; nobody else moves a resolved gate on.
+    if matches!(cmd, WriteCommand::ApplyResolution { .. }) && !matches!(actor, Actor::System { .. })
+    {
+        return Err(StoreError::Invalid(format!(
+            "refused: only the app's engine applies a decision a person made on an Inbox item (AD-15); {} cannot, and nothing was written",
+            actor.describe()
+        )));
+    }
+    // Story 3.4: a gate attempt whose Review a person resolved moves on only
+    // by the engine's apply of that decision, never by another transition.
+    match cmd {
+        WriteCommand::FinishStep { step_run_id, .. }
+        | WriteCommand::SettleAndFinishStep { step_run_id, .. }
+        | WriteCommand::SettleAndLoopBack { step_run_id, .. }
+        | WriteCommand::PauseStep { step_run_id, .. }
+        | WriteCommand::FailWithItem { step_run_id, .. } => {
+            no_decision_on(tx, step_run_id)?;
+        }
+        _ => {}
     }
     let now = now_ts();
     let mut config_entry = None;
@@ -1017,7 +1193,7 @@ pub(crate) fn execute(
             require(&step, &[StepStatus::Running], "loops back")?;
             call_of_step(tx, call_id, step_run_id)?;
             settle(tx, call_id, *usage, *cost_micro_usd)?;
-            let queued = loop_back(tx, &step, output, to, &now)?;
+            let queued = loop_back(tx, &step, Some(output), to, Back::LoopBack, &now)?;
             let (input, output_tokens) = (
                 usage.map(|u| u.input_tokens as i64),
                 usage.map(|u| u.output_tokens as i64),
@@ -1162,6 +1338,30 @@ pub(crate) fn execute(
                     "refused: tool call {tool_call_id} is not an issued call"
                 )));
             }
+        }
+        WriteCommand::ApplyResolution { item_id, past_max } => {
+            built = Some(apply_resolution(tx, item_id, past_max.as_ref(), &now)?);
+        }
+        WriteCommand::FailBeforeStart { step_run_id, item } => {
+            let step = step_of(tx, step_run_id)?;
+            require(&step, &[StepStatus::Queued], "fails before it starts")?;
+            run_open_for(tx, &step)?;
+            if item.kind != InboxKind::Failure {
+                return Err(StoreError::Invalid(format!(
+                    "refused: a step that does not start raises a Failure item, not a {}; nothing was changed",
+                    item.kind.title()
+                )));
+            }
+            let created = create_item(tx, &step, item, &now)?;
+            finish_run(tx, &step.run_id, "failed", &now)?;
+            built = Some(vec![
+                created,
+                (
+                    "run.finished".into(),
+                    step.run_id.clone(),
+                    Some(json!({"status": "failed"})),
+                ),
+            ]);
         }
         WriteCommand::FinishRun { run_id, status } => {
             finish_run(tx, run_id, status, &now)?;
@@ -1376,8 +1576,9 @@ fn raise_taint(
     Ok(())
 }
 
-/// The kinds of input story 3.3 journals (AD-43; story 3.17 adds the rest).
-const INPUT_KINDS: [&str; 3] = ["step_output", "loop_back", "untrusted"];
+/// The kinds of input stories 3.3 and 3.4 journal (AD-43; story 3.17 adds
+/// the rest).
+const INPUT_KINDS: [&str; 4] = ["step_output", "loop_back", "untrusted", "gate_note"];
 
 /// Journals `inputs` of the attempt `step` and returns the attempt's taint
 /// (the highest of its own, `taint` and each input's) and how many rows
@@ -1397,6 +1598,22 @@ fn journal_inputs(
                 "refused: `{}` is not a kind of step input ({})",
                 input.kind,
                 INPUT_KINDS.join(", ")
+            )));
+        }
+        // Story 3.4: only a gate note comes from an Inbox item, and it is
+        // checked on its own (AD-10 (b): a person's return, never tainted).
+        if input.kind == "gate_note" {
+            gate_note_input(tx, step, input)?;
+            tx.execute(
+                "INSERT INTO step_inputs (step_run_id, kind, from_step_run, from_item, label, taint, created_at) VALUES (?1, 'gate_note', NULL, ?2, ?3, 0, ?4)",
+                params![step.id, input.from_item, input.label, now],
+            )?;
+            continue;
+        }
+        if input.from_item.is_some() {
+            return Err(StoreError::Invalid(format!(
+                "refused: a `{}` input comes from no Inbox item (only a `gate_note` does); nothing was changed",
+                input.kind
             )));
         }
         // The kind decides the producer and the taint (review R6): a plan
@@ -1426,6 +1643,62 @@ fn journal_inputs(
         )?;
     }
     Ok((attempt, inputs.len()))
+}
+
+/// Story 3.4 (AD-10 (b), AD-43): a `gate_note` input of the attempt `step`
+/// names, by `from_item`, a Review item of the same run that a person
+/// (`Actor::Human`, as committed in `resolved_by`) resolved `return`; it
+/// has no producing step run and no taint. Anything else is refused.
+fn gate_note_input(
+    tx: &rusqlite::Transaction,
+    step: &StepState,
+    input: &StepInput,
+) -> Result<(), StoreError> {
+    let refuse = |why: &str| {
+        Err(StoreError::Invalid(format!(
+            "refused: a `gate_note` input {why}; a gate note is a person's return note at a gate, read from its Review item (AD-10 (b)); nothing was changed"
+        )))
+    };
+    if input.from_step_run.is_some() {
+        return refuse("comes from no step run");
+    }
+    if input.taint.is_tainted() {
+        return refuse("is never tainted (the note is a person's own words)");
+    }
+    let Some(item_id) = &input.from_item else {
+        return refuse("names the Inbox item that carries the note");
+    };
+    let Some(item) = item_of(tx, item_id)? else {
+        return refuse(&format!(
+            "names the Inbox item {item_id}, which does not exist"
+        ));
+    };
+    if item.run_id != step.run_id {
+        return refuse(&format!(
+            "names the Inbox item {item_id}, which is an item of another run"
+        ));
+    }
+    if item.kind != InboxKind::Review {
+        return refuse(&format!(
+            "names the Inbox item {item_id}, which is not a Review"
+        ));
+    }
+    if item.status != "resolved" || item.decision != Some(Decision::Return) {
+        return refuse(&format!(
+            "names the Inbox item {item_id}, which was not resolved `return`"
+        ));
+    }
+    let human = item
+        .resolved_by
+        .as_deref()
+        .and_then(|by| serde_json::from_str::<Actor>(by).ok())
+        .is_some_and(|by| matches!(by, Actor::Human { .. }));
+    if !human {
+        return refuse(&format!(
+            "names the Inbox item {item_id}, which no person resolved"
+        ));
+    }
+    Ok(())
 }
 
 /// The committed taint of `step_run_id`, which must be a step run of
@@ -1495,10 +1768,54 @@ fn run_open_for(tx: &rusqlite::Transaction, step: &StepState) -> Result<(), Stor
             |r| r.get(0),
         )
         .optional()?;
-    match waiting {
-        Some(key) => Err(StoreError::Invalid(format!(
+    if let Some(key) = waiting {
+        return Err(StoreError::Invalid(format!(
             "refused: step `{key}` of run {} waits for a person (waiting_human), so no other step of the run starts or waits until its Inbox item is resolved; nothing was changed",
             step.run_id
+        )));
+    }
+    match unapplied_decision(tx, &step.run_id, Some(&step.id))? {
+        Some((key, item)) => Err(StoreError::Invalid(format!(
+            "refused: a person resolved Inbox item {item} of step `{key}` of run {}, and the engine has not applied that decision yet, so no other step of the run starts or waits; nothing was changed",
+            step.run_id
+        ))),
+        None => Ok(()),
+    }
+}
+
+/// Story 3.4: a gate attempt of `run_id` (other than `except`) that is
+/// `running` because a person resolved its Review, before the engine
+/// applied the decision; its step key and the item's id.
+fn unapplied_decision(
+    tx: &rusqlite::Transaction,
+    run_id: &str,
+    except: Option<&str>,
+) -> Result<Option<(String, String)>, StoreError> {
+    Ok(tx
+        .query_row(
+            "SELECT s.step_key, i.id FROM inbox_items i JOIN step_runs s ON s.id = i.step_run_id
+             WHERE i.run_id = ?1 AND i.kind = 'review' AND i.status = 'resolved' AND s.status = 'running' AND s.id IS NOT ?2 LIMIT 1",
+            params![run_id, except],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?)
+}
+
+/// Story 3.4 (AD-15): the step attempt `step_run_id` has no Review item a
+/// person resolved: such a gate attempt moves on only by the engine's
+/// apply of that decision ([`WriteCommand::ApplyResolution`]).
+fn no_decision_on(tx: &rusqlite::Transaction, step_run_id: &str) -> Result<(), StoreError> {
+    let decided: Option<(String, Option<String>)> = tx
+        .query_row(
+            "SELECT id, decision FROM inbox_items WHERE step_run_id = ?1 AND kind = 'review' AND status = 'resolved' LIMIT 1",
+            params![step_run_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    match decided {
+        Some((item, decision)) => Err(StoreError::Invalid(format!(
+            "refused: a person resolved the Review item {item} of step run {step_run_id} `{}`, and only the engine's apply of that decision moves the gate on (AD-15); nothing was changed",
+            decision.unwrap_or_default()
         ))),
         None => Ok(()),
     }
@@ -1514,9 +1831,15 @@ fn no_step_waits(tx: &rusqlite::Transaction, run_id: &str) -> Result<(), StoreEr
             |r| r.get(0),
         )
         .optional()?;
-    match waiting {
-        Some(key) => Err(StoreError::Invalid(format!(
+    if let Some(key) = waiting {
+        return Err(StoreError::Invalid(format!(
             "refused: step `{key}` of run {run_id} is waiting_human, so the run does not finish until a person resolves its Inbox item; nothing was changed"
+        )));
+    }
+    // Story 3.4: nor before the engine applied a decision a person made.
+    match unapplied_decision(tx, run_id, None)? {
+        Some((key, item)) => Err(StoreError::Invalid(format!(
+            "refused: a person resolved Inbox item {item} of step `{key}` of run {run_id}, and the run does not finish before the engine applies that decision; nothing was changed"
         ))),
         None => Ok(()),
     }
@@ -1553,6 +1876,15 @@ fn start_attempt(
     ))
 }
 
+/// What the target's new attempt of a loop-back receives: the producer's
+/// reasons (story 3.3), or a person's return note at a gate (story 3.4),
+/// referred to on its Review item.
+#[derive(Clone, Copy)]
+enum Back<'a> {
+    LoopBack,
+    GateNote { item: &'a str },
+}
+
 /// Ends the producing attempt `looped_back` with `output` and queues
 /// attempt n+1 of every step from `to` through the producer; returns how
 /// many attempts were queued. The target's new attempt gets its `loop_back`
@@ -1562,8 +1894,9 @@ fn start_attempt(
 fn loop_back(
     tx: &rusqlite::Transaction,
     producer: &StepState,
-    output: &str,
+    output: Option<&str>,
     to: &str,
+    back: Back<'_>,
     now: &str,
 ) -> Result<usize, StoreError> {
     let target: Option<i64> = tx
@@ -1617,16 +1950,35 @@ fn loop_back(
             params![id, producer.run_id, key, seq, attempt + 1, now],
         )?;
         if key == to {
-            tx.execute(
-                "INSERT INTO step_inputs (step_run_id, kind, from_step_run, label, taint, created_at) VALUES (?1, 'loop_back', ?2, ?3, ?4, ?5)",
-                params![
-                    id,
-                    producer.id,
-                    format!("loop-back:{}@{}", producer.step_key, producer.attempt),
-                    flag(producer.taint),
-                    now
-                ],
-            )?;
+            match back {
+                Back::LoopBack => tx.execute(
+                    "INSERT INTO step_inputs (step_run_id, kind, from_step_run, label, taint, created_at) VALUES (?1, 'loop_back', ?2, ?3, ?4, ?5)",
+                    params![
+                        id,
+                        producer.id,
+                        format!("loop-back:{}@{}", producer.step_key, producer.attempt),
+                        flag(producer.taint),
+                        now
+                    ],
+                )?,
+                // Story 3.4 (AD-10 (b), AD-43): the note stays on its item;
+                // the input refers to it, untainted, through the same
+                // checks as any `gate_note` input (review R3).
+                Back::GateNote { item } => {
+                    let input = StepInput {
+                        kind: "gate_note".into(),
+                        from_step_run: None,
+                        from_item: Some(item.to_string()),
+                        label: format!("gate-note:{}@{}", producer.step_key, producer.attempt),
+                        taint: Taint::Clean,
+                    };
+                    gate_note_input(tx, &step_of(tx, &id)?, &input)?;
+                    tx.execute(
+                        "INSERT INTO step_inputs (step_run_id, kind, from_step_run, from_item, label, taint, created_at) VALUES (?1, 'gate_note', NULL, ?2, ?3, 0, ?4)",
+                        params![id, item, input.label, now],
+                    )?
+                }
+            };
         }
     }
     Ok(rows.len())
@@ -1660,8 +2012,30 @@ fn create_item(
             )));
         }
     }
+    // Story 3.4: a Review carries its gate's `max_returns` (0 to 5), so a
+    // decision can be applied from the journal alone; no other kind has one.
+    match (item.kind, item.max_returns) {
+        (InboxKind::Review, Some(m)) if m <= 5 => {}
+        (InboxKind::Review, Some(m)) => {
+            return Err(StoreError::Invalid(format!(
+                "refused: a Review item's max_returns is 0 to 5, not {m}; nothing was changed"
+            )));
+        }
+        (InboxKind::Review, None) => {
+            return Err(StoreError::Invalid(
+                "refused: a Review item carries its gate's max_returns; nothing was changed".into(),
+            ));
+        }
+        (_, Some(_)) => {
+            return Err(StoreError::Invalid(format!(
+                "refused: only a Review item carries max_returns, not a {}; nothing was changed",
+                item.kind.title()
+            )));
+        }
+        (_, None) => {}
+    }
     tx.execute(
-        "INSERT INTO inbox_items (id, kind, status, run_id, step_run_id, payload, taint, title, body, created_at) VALUES (?1, ?2, 'open', ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        "INSERT INTO inbox_items (id, kind, status, run_id, step_run_id, payload, taint, title, body, created_at, max_returns) VALUES (?1, ?2, 'open', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         params![
             item.id,
             item.kind.as_str(),
@@ -1671,7 +2045,8 @@ fn create_item(
             flag(taint),
             item.title,
             item.body,
-            now
+            now,
+            item.max_returns
         ],
     )?;
     Ok((
@@ -1683,6 +2058,333 @@ fn create_item(
             "taint": flag(taint),
         })),
     ))
+}
+
+/// The longest note a person may give (characters, not bytes; story 3.4).
+pub const NOTE_MAX_CHARS: usize = 2000;
+
+/// Story 3.4 (row 25; review R7): a return's note and a Question's answer
+/// are one line of 1 to 2000 characters with no control character but tab
+/// and no format, separator or tag character; approve, reject and dismiss
+/// carry none.
+fn check_note(decision: Decision, note: Option<&str>) -> Result<(), StoreError> {
+    let refuse = |why: String| {
+        Err(StoreError::Invalid(format!(
+            "refused: {why}; nothing was written"
+        )))
+    };
+    if !decision.takes_note() {
+        return match note {
+            None => Ok(()),
+            Some(_) => refuse(format!(
+                "a decision `{}` carries no note (only a return's note and a Question's answer are stored)",
+                decision.as_str()
+            )),
+        };
+    }
+    let what = if decision == Decision::Answer {
+        "an answer"
+    } else {
+        "a return"
+    };
+    let Some(note) = note else {
+        return refuse(format!("{what} needs its text"));
+    };
+    if note.trim().is_empty() {
+        return refuse(format!("{what} needs its text, and this one is empty"));
+    }
+    let chars = note.chars().count();
+    if chars > NOTE_MAX_CHARS {
+        return refuse(format!(
+            "{what}'s text is {chars} characters, and it may be at most {NOTE_MAX_CHARS}"
+        ));
+    }
+    // R7: no line break, no control character but tab, and no format,
+    // separator or tag character a terminal or a prompt would not show as
+    // itself (one table, `am_domain::text`).
+    if note
+        .chars()
+        .any(|c| c == '\n' || am_domain::text::is_hidden(c))
+    {
+        return refuse(format!(
+            "{what}'s text is one line with no control, invisible, format or separator character but tab"
+        ));
+    }
+    Ok(())
+}
+
+/// The story an Inbox kind's decisions arrive with, for a kind this version
+/// does not resolve (story 3.4, Question 3).
+fn resolved_from(kind: InboxKind) -> Option<&'static str> {
+    match kind {
+        InboxKind::Approval => Some("4.8"),
+        InboxKind::Draft => Some("3.6"),
+        InboxKind::BudgetAsk => Some("4.3"),
+        InboxKind::Proposal => Some("4.10"),
+        InboxKind::Review | InboxKind::Question | InboxKind::Failure => None,
+    }
+}
+
+/// Who resolved an item, in the words of History and audit: the committed
+/// `resolved_by` as its actor's words ("You (Reviewer)").
+fn resolver_words(resolved_by: Option<&str>) -> String {
+    match resolved_by.map(serde_json::from_str::<Actor>) {
+        Some(Ok(actor)) => actor.describe(),
+        Some(Err(_)) => "an unknown resolver".into(),
+        None => "nobody".into(),
+    }
+}
+
+/// Story 3.4 (AD-8, AD-15, AD-25, AD-28): a person's decision on an Inbox
+/// item, in the caller's transaction; its `inbox.resolved` entry. See
+/// [`Writer::resolve_inbox_item`].
+fn resolve_item(
+    tx: &rusqlite::Transaction,
+    actor: &Actor,
+    r: &Resolve,
+    now: &str,
+) -> Result<Entry, StoreError> {
+    // The parameter's type already makes it a person; the writer checks
+    // again (defence in depth).
+    if !matches!(actor, Actor::Human { .. }) {
+        return Err(StoreError::Invalid(format!(
+            "refused: only a person resolves an Inbox item (AD-15, AD-28); {} cannot, and nothing was written",
+            actor.describe()
+        )));
+    }
+    let Some(item) = item_of(tx, &r.item_id)? else {
+        return Err(StoreError::Invalid(format!(
+            "refused: there is no Inbox item {}; nothing was written",
+            r.item_id
+        )));
+    };
+    if item.status == "resolved" {
+        return Err(StoreError::Invalid(format!(
+            "refused: Inbox item {} was resolved already: `{}` by {} at {}; an item is resolved once; nothing was changed",
+            item.id,
+            item.decision.map(Decision::as_str).unwrap_or("?"),
+            resolver_words(item.resolved_by.as_deref()),
+            item.resolved_at.as_deref().unwrap_or("?")
+        )));
+    }
+    if let Some(story) = resolved_from(item.kind) {
+        return Err(StoreError::Invalid(format!(
+            "refused: a {} item is resolved from story {story} on, not in this version; Inbox item {} stays open and nothing was written",
+            item.kind.title(),
+            item.id
+        )));
+    }
+    let allowed = Decision::allowed_for(item.kind);
+    if !allowed.contains(&r.decision) {
+        let names: Vec<&str> = allowed.iter().map(|d| d.as_str()).collect();
+        return Err(StoreError::Invalid(format!(
+            "refused: a {} item takes {}, not `{}`; nothing was written",
+            item.kind.title(),
+            names.join(", "),
+            r.decision.as_str()
+        )));
+    }
+    check_note(r.decision, r.note.as_deref())?;
+    // AD-8's one Human edge: a Review's or a Question's step leaves
+    // `waiting_human` for `running`, and nothing else moves.
+    if matches!(item.kind, InboxKind::Review | InboxKind::Question) {
+        let moved = tx.execute(
+            "UPDATE step_runs SET status = 'running', updated_at = ?2 WHERE id = ?1 AND status = 'waiting_human'",
+            params![item.step_run_id, now],
+        )?;
+        if moved != 1 {
+            let step = step_of(tx, &item.step_run_id)?;
+            return Err(StoreError::Invalid(format!(
+                "refused: step `{}` attempt {} of Inbox item {} is {}, not waiting_human, so the item has nothing to resolve (AD-8); nothing was changed",
+                step.step_key,
+                step.attempt,
+                item.id,
+                step.status.as_str()
+            )));
+        }
+    }
+    let by = serde_json::to_string(actor).map_err(|e| StoreError::Invalid(e.to_string()))?;
+    let note = if r.decision.takes_note() {
+        r.note.as_deref()
+    } else {
+        None
+    };
+    let n = tx.execute(
+        "UPDATE inbox_items SET status = 'resolved', decision = ?2, note = ?3, resolved_by = ?4, resolved_at = ?5 WHERE id = ?1 AND status = 'open'",
+        params![item.id, r.decision.as_str(), note, by, now],
+    )?;
+    if n != 1 {
+        return Err(StoreError::Invalid(format!(
+            "refused: Inbox item {} is no longer open; nothing was changed",
+            item.id
+        )));
+    }
+    Ok((
+        "inbox.resolved".into(),
+        item.id.clone(),
+        Some(json!({
+            "decision": r.decision.as_str(),
+            "kind": item.kind.as_str(),
+            "note_sha256": note.map(audit::sha256_hex),
+            "step_run_id": item.step_run_id,
+            "taint": flag(item.taint),
+        })),
+    ))
+}
+
+/// Story 3.4 (AD-8, AD-15, AD-28, AD-36): the engine's apply of a
+/// decision a person committed on a gate's Review item, decided from
+/// committed rows; its audit entries. See [`WriteCommand::ApplyResolution`].
+fn apply_resolution(
+    tx: &rusqlite::Transaction,
+    item_id: &str,
+    past_max: Option<&NewInboxItem>,
+    now: &str,
+) -> Result<Vec<Entry>, StoreError> {
+    let refuse = |why: String| {
+        Err(StoreError::Invalid(format!(
+            "refused: {why}; nothing was changed"
+        )))
+    };
+    let Some(item) = item_of(tx, item_id)? else {
+        return refuse(format!("there is no Inbox item {item_id}"));
+    };
+    let decision = match (item.status.as_str(), item.decision) {
+        ("resolved", Some(d)) => d,
+        _ => {
+            return refuse(format!(
+                "Inbox item {item_id} is open: no person has decided on it, so there is nothing to apply (AD-15)"
+            ));
+        }
+    };
+    if item.kind != InboxKind::Review {
+        return refuse(format!(
+            "the decision on {} item {item_id} has nothing for the engine to apply in this version",
+            item.kind.title()
+        ));
+    }
+    // R3 (AD-15): only a decision a person committed is applied; the
+    // resolver is read from the row as committed.
+    if !matches!(item.resolver(), Some(Actor::Human { .. })) {
+        return refuse(format!(
+            "Inbox item {item_id} was not resolved by a person ({}), and the engine applies only a person's decision (AD-15)",
+            resolver_words(item.resolved_by.as_deref())
+        ));
+    }
+    let gate = step_of(tx, &item.step_run_id)?;
+    if gate.status != StepStatus::Running {
+        return refuse(format!(
+            "the decision `{}` on Inbox item {item_id} was applied already: step `{}` attempt {} is {}",
+            decision.as_str(),
+            gate.step_key,
+            gate.attempt,
+            gate.status.as_str()
+        ));
+    }
+    let finished = |status: &str| -> Entry {
+        (
+            "step.finished".into(),
+            gate.id.clone(),
+            Some(json!({
+                "decision": decision.as_str(),
+                "item": item_id,
+                "output_sha256": Value::Null,
+                "status": status,
+            })),
+        )
+    };
+    let run_finished = || -> Entry {
+        (
+            "run.finished".into(),
+            gate.run_id.clone(),
+            Some(json!({"status": "failed"})),
+        )
+    };
+    match decision {
+        Decision::Approve | Decision::Reject if past_max.is_some() => refuse(format!(
+            "the decision `{}` on Inbox item {item_id} raises no Failure item",
+            decision.as_str()
+        )),
+        Decision::Approve => {
+            finish_step(tx, &gate.id, "succeeded", &None, now)?;
+            Ok(vec![finished("succeeded")])
+        }
+        Decision::Reject => {
+            finish_step(tx, &gate.id, "failed", &None, now)?;
+            finish_run(tx, &gate.run_id, "failed", now)?;
+            Ok(vec![finished("failed"), run_finished()])
+        }
+        Decision::Return => {
+            let Some(max) = item.max_returns else {
+                return refuse(format!(
+                    "the Review item {item_id} carries no max_returns, so its return cannot be counted"
+                ));
+            };
+            // AD-36: the count is the journal's, this return included.
+            let returns: i64 = tx.query_row(
+                "SELECT count(*) FROM inbox_items i JOIN step_runs s ON s.id = i.step_run_id
+                 WHERE i.run_id = ?1 AND i.kind = 'review' AND i.status = 'resolved' AND i.decision = 'return' AND s.step_key = ?2",
+                params![gate.run_id, gate.step_key],
+                |r| r.get(0),
+            )?;
+            let past = returns > i64::from(max);
+            match (past, past_max) {
+                (false, Some(_)) => refuse(format!(
+                    "return {returns} at step `{}` is within its max_returns of {max}, so the gate loops back and raises no Failure item",
+                    gate.step_key
+                )),
+                (true, None) => refuse(format!(
+                    "return {returns} at step `{}` is past its max_returns of {max}, so the gate fails with a Failure item, and an apply without one is refused",
+                    gate.step_key
+                )),
+                (false, None) => {
+                    let Some(payload) = &item.payload else {
+                        return refuse(format!(
+                            "the Review item {item_id} carries no step's output, so there is no step to return to"
+                        ));
+                    };
+                    producer_in_run(tx, payload, &gate.run_id)?;
+                    let producer = step_of(tx, payload)?;
+                    let queued = loop_back(
+                        tx,
+                        &gate,
+                        None,
+                        &producer.step_key,
+                        Back::GateNote { item: item_id },
+                        now,
+                    )?;
+                    Ok(vec![(
+                        "step.looped_back".into(),
+                        gate.id.clone(),
+                        Some(json!({
+                            "decision": decision.as_str(),
+                            "item": item_id,
+                            "max_returns": max,
+                            "queued": queued,
+                            "returns": returns,
+                            "to": producer.step_key,
+                        })),
+                    )])
+                }
+                (true, Some(failure)) => {
+                    if failure.kind != InboxKind::Failure {
+                        return refuse(format!(
+                            "a gate past its max_returns raises a Failure item, not a {}",
+                            failure.kind.title()
+                        ));
+                    }
+                    finish_step(tx, &gate.id, "failed", &None, now)?;
+                    let created = create_item(tx, &gate, failure, now)?;
+                    finish_run(tx, &gate.run_id, "failed", now)?;
+                    Ok(vec![finished("failed"), created, run_finished()])
+                }
+            }
+        }
+        Decision::Answer | Decision::Dismiss => refuse(format!(
+            "a Review item is not decided `{}`",
+            decision.as_str()
+        )),
+    }
 }
 
 /// Finishes the run, never while a step of it waits for a person (review
@@ -1822,12 +2524,12 @@ pub struct CallRow {
     pub output_tokens: Option<i64>,
 }
 
-/// One Inbox item (AD-28; story 3.3).
+/// One Inbox item (AD-28; stories 3.3 and 3.4).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InboxItemRow {
     pub id: String,
     pub kind: InboxKind,
-    /// `open` (story 3.4 resolves).
+    /// `open` or `resolved` (story 3.4).
     pub status: String,
     pub run_id: String,
     pub step_run_id: String,
@@ -1837,7 +2539,112 @@ pub struct InboxItemRow {
     pub body: String,
     pub created_at: String,
     pub resolved_at: Option<String>,
+    /// The resolver as the JSON of its `Actor` (a person's).
     pub resolved_by: Option<String>,
+    /// What the person decided, once resolved.
+    pub decision: Option<Decision>,
+    /// A return's note or a Question's answer, stored here once.
+    pub note: Option<String>,
+    /// A Review's: how many returns its gate takes (story 3.4).
+    pub max_returns: Option<u32>,
+}
+
+impl InboxItemRow {
+    /// Who resolved the item, as committed in `resolved_by` (story 3.4);
+    /// `None` while it is open, or when the column holds no actor.
+    pub fn resolver(&self) -> Option<Actor> {
+        self.resolved_by
+            .as_deref()
+            .and_then(|by| serde_json::from_str::<Actor>(by).ok())
+    }
+}
+
+/// The columns of an [`InboxItemRow`], in [`raw_item`]'s order.
+const ITEM_COLUMNS: &str = "id, kind, status, run_id, step_run_id, payload, taint, title, body, created_at, resolved_at, resolved_by, decision, note, max_returns";
+
+/// An item row as SQLite holds it, before its kind and decision are read.
+struct RawItem {
+    row: InboxItemRow,
+    kind: String,
+    decision: Option<String>,
+}
+
+fn raw_item(r: &rusqlite::Row) -> rusqlite::Result<RawItem> {
+    let max_returns: Option<i64> = r.get(14)?;
+    Ok(RawItem {
+        row: InboxItemRow {
+            id: r.get(0)?,
+            kind: InboxKind::Review,
+            status: r.get(2)?,
+            run_id: r.get(3)?,
+            step_run_id: r.get(4)?,
+            payload: r.get(5)?,
+            taint: taint_of(r.get(6)?),
+            title: r.get(7)?,
+            body: r.get(8)?,
+            created_at: r.get(9)?,
+            resolved_at: r.get(10)?,
+            resolved_by: r.get(11)?,
+            decision: None,
+            note: r.get(13)?,
+            max_returns: max_returns.and_then(|m| u32::try_from(m).ok()),
+        },
+        kind: r.get(1)?,
+        decision: r.get(12)?,
+    })
+}
+
+impl RawItem {
+    fn parse(self) -> Result<InboxItemRow, StoreError> {
+        let RawItem {
+            mut row,
+            kind,
+            decision,
+        } = self;
+        row.kind = InboxKind::parse(&kind).ok_or_else(|| {
+            StoreError::Invalid(format!(
+                "Inbox item {} has the unknown kind `{kind}`",
+                row.id
+            ))
+        })?;
+        row.decision = match decision {
+            None => None,
+            Some(d) => Some(Decision::parse(&d).ok_or_else(|| {
+                StoreError::Invalid(format!(
+                    "Inbox item {} has the unknown decision `{d}`",
+                    row.id
+                ))
+            })?),
+        };
+        Ok(row)
+    }
+}
+
+/// The Inbox items `filter` selects (with `id` as its one parameter),
+/// in `order`.
+fn items_where(
+    conn: &Connection,
+    filter: &str,
+    id: Option<&str>,
+    order: &str,
+) -> Result<Vec<InboxItemRow>, StoreError> {
+    let mut st = conn.prepare(&format!(
+        "SELECT {ITEM_COLUMNS} FROM inbox_items WHERE {filter} ORDER BY {order}"
+    ))?;
+    let rows: Vec<RawItem> = match id {
+        Some(id) => st
+            .query_map(params![id], raw_item)?
+            .collect::<Result<_, _>>()?,
+        None => st.query_map([], raw_item)?.collect::<Result<_, _>>()?,
+    };
+    rows.into_iter().map(RawItem::parse).collect()
+}
+
+/// One Inbox item by id, as committed.
+fn item_of(conn: &Connection, id: &str) -> Result<Option<InboxItemRow>, StoreError> {
+    Ok(items_where(conn, "id = ?1", Some(id), "rowid")?
+        .into_iter()
+        .next())
 }
 
 /// One tool call of a step attempt (AD-8; story 3.3).
@@ -1972,14 +2779,15 @@ impl Reader {
     /// written (story 3.3, AD-43).
     pub fn step_inputs(&self, step_run_id: &str) -> Result<Vec<StepInput>, StoreError> {
         let mut st = self.conn.prepare(
-            "SELECT kind, from_step_run, label, taint FROM step_inputs WHERE step_run_id = ?1 ORDER BY id",
+            "SELECT kind, from_step_run, from_item, label, taint FROM step_inputs WHERE step_run_id = ?1 ORDER BY id",
         )?;
         let rows = st.query_map(params![step_run_id], |r| {
             Ok(StepInput {
                 kind: r.get(0)?,
                 from_step_run: r.get(1)?,
-                label: r.get(2)?,
-                taint: taint_of(r.get(3)?),
+                from_item: r.get(2)?,
+                label: r.get(3)?,
+                taint: taint_of(r.get(4)?),
             })
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
@@ -2004,41 +2812,30 @@ impl Reader {
 
     /// The Inbox items of a run, oldest first (story 3.3, AD-28).
     pub fn inbox_items(&self, run_id: &str) -> Result<Vec<InboxItemRow>, StoreError> {
-        let mut st = self.conn.prepare(
-            "SELECT id, kind, status, run_id, step_run_id, payload, taint, title, body, created_at, resolved_at, resolved_by
-             FROM inbox_items WHERE run_id = ?1 ORDER BY created_at, rowid",
+        items_where(&self.conn, "run_id = ?1", Some(run_id), "created_at, rowid")
+    }
+
+    /// One Inbox item by id (story 3.4); `None` when there is none.
+    pub fn inbox_item(&self, id: &str) -> Result<Option<InboxItemRow>, StoreError> {
+        item_of(&self.conn, id)
+    }
+
+    /// Every open Inbox item of every run, oldest first (story 3.4).
+    pub fn open_items(&self) -> Result<Vec<InboxItemRow>, StoreError> {
+        items_where(&self.conn, "status = 'open'", None, "created_at, rowid")
+    }
+
+    /// How many of `run_id`'s Review items on attempts of the step
+    /// `step_key` a person resolved `return` (story 3.4, AD-36: a gate's
+    /// returns so far, from the journal).
+    pub fn returns_at(&self, run_id: &str, step_key: &str) -> Result<u32, StoreError> {
+        let n: i64 = self.conn.query_row(
+            "SELECT count(*) FROM inbox_items i JOIN step_runs s ON s.id = i.step_run_id
+             WHERE i.run_id = ?1 AND i.kind = 'review' AND i.status = 'resolved' AND i.decision = 'return' AND s.step_key = ?2",
+            params![run_id, step_key],
+            |r| r.get(0),
         )?;
-        let rows = st.query_map(params![run_id], |r| {
-            Ok((
-                r.get::<_, String>(1)?,
-                InboxItemRow {
-                    id: r.get(0)?,
-                    kind: InboxKind::Review,
-                    status: r.get(2)?,
-                    run_id: r.get(3)?,
-                    step_run_id: r.get(4)?,
-                    payload: r.get(5)?,
-                    taint: taint_of(r.get(6)?),
-                    title: r.get(7)?,
-                    body: r.get(8)?,
-                    created_at: r.get(9)?,
-                    resolved_at: r.get(10)?,
-                    resolved_by: r.get(11)?,
-                },
-            ))
-        })?;
-        let mut items = Vec::new();
-        for row in rows {
-            let (kind, mut item) = row?;
-            item.kind = InboxKind::parse(&kind).ok_or_else(|| {
-                StoreError::Invalid(format!(
-                    "Inbox item {} has the unknown kind `{kind}`",
-                    item.id
-                ))
-            })?;
-            items.push(item);
-        }
-        Ok(items)
+        Ok(u32::try_from(n).unwrap_or(u32::MAX))
     }
 
     pub fn ledger_for_run(&self, run_id: &str) -> Result<Vec<LedgerRow>, StoreError> {
@@ -2362,6 +3159,96 @@ mod tests {
             rw.execute("UPDATE audit_log SET outcome = 'z'", [])
                 .is_err()
         );
+    }
+
+    /// Story 3.4, row 20 (AD-15, AD-28): the crate-private resolve, sent
+    /// through the writer with an actor that is not a person (the engine,
+    /// a seat, the Assistant, an import), is refused in the writer and
+    /// nothing is written: the item stays open, its gate waits, no audit
+    /// entry is added. The same job from a person commits.
+    #[test]
+    fn the_writer_refuses_a_resolve_by_anyone_but_a_person() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("state.db")).unwrap();
+        let w = store.writer();
+        w.exec(
+            sys(),
+            WriteCommand::CreateRun {
+                run_id: "r1".into(),
+                workflow: "wf".into(),
+                origin: "manual".into(),
+                steps: vec!["draft".into(), "approve".into()],
+                config_hash: None,
+            },
+        )
+        .unwrap();
+        let r = store.reader().unwrap();
+        let gate = r.steps("r1").unwrap()[1].id.clone();
+        w.exec(
+            sys(),
+            WriteCommand::PauseStep {
+                step_run_id: gate.clone(),
+                inputs: vec![],
+                taint: Taint::Clean,
+                item: NewInboxItem {
+                    id: "i1".into(),
+                    kind: InboxKind::Review,
+                    payload: None,
+                    taint: Taint::Clean,
+                    title: "Review".into(),
+                    body: "Step `approve` waits for your review.".into(),
+                    max_returns: Some(2),
+                },
+            },
+        )
+        .unwrap();
+        let resolve = || {
+            Command::Resolve(Resolve {
+                item_id: "i1".into(),
+                decision: Decision::Approve,
+                note: None,
+            })
+        };
+        let entries = |r: &Reader| {
+            let mut out = Vec::new();
+            r.export_audit_jsonl(&mut out).unwrap();
+            out.split(|b| *b == b'\n').filter(|l| !l.is_empty()).count()
+        };
+        let before = entries(&r);
+        let run = uuid::Uuid::now_v7();
+        for actor in [
+            sys(),
+            Actor::Seat {
+                seat: "seat-a".into(),
+                run,
+                step: "approve".into(),
+            },
+            Actor::Assistant { proposal: run },
+            Actor::Import {
+                source: "an import".into(),
+            },
+        ] {
+            let refused = w.send(actor.clone(), resolve());
+            assert!(
+                matches!(&refused, Err(StoreError::Invalid(words)) if words.contains("only a person")),
+                "{actor:?}: {refused:?}"
+            );
+            let item = r.inbox_item("i1").unwrap().unwrap();
+            assert_eq!(
+                (item.status.as_str(), item.decision, item.resolved_by),
+                ("open", None, None),
+                "{actor:?}"
+            );
+            assert_eq!(r.steps("r1").unwrap()[1].status, "waiting_human");
+            assert_eq!(entries(&r), before, "{actor:?}: nothing audited");
+        }
+        let person = Actor::Human {
+            person: "owner".into(),
+            hat: am_domain::REVIEWER_HAT.into(),
+        };
+        w.send(person, resolve()).unwrap();
+        assert_eq!(r.inbox_item("i1").unwrap().unwrap().status, "resolved");
+        assert_eq!(r.steps("r1").unwrap()[1].status, "running");
     }
 
     #[test]

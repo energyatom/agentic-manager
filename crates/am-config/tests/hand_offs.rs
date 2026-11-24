@@ -359,7 +359,8 @@ fn a_limit_out_of_range_is_refused() {
 /// The story's fixture `fixtures/projects/hand-offs` is a valid project (as
 /// `agentic validate --template` checks it): `relay` loops back from
 /// `check` to `draft`, `gated` holds a gate after its first step and
-/// `capped` sets its step's caps.
+/// `capped` sets its step's caps. Story 3.4 adds `returned`, whose gate
+/// takes `max_returns: 1`.
 #[test]
 fn the_fixture_validates() {
     let root = fixture("hand-offs");
@@ -369,7 +370,7 @@ fn the_fixture_validates() {
     let wf = snap.workflows();
     assert_eq!(
         wf.keys().map(String::as_str).collect::<Vec<_>>(),
-        vec!["capped", "gated", "relay"]
+        vec!["capped", "gated", "relay", "returned"]
     );
     let relay: Vec<&am_config::Step> = wf["relay"].steps.iter().collect();
     assert_eq!(
@@ -388,6 +389,16 @@ fn the_fixture_validates() {
     assert_eq!(gated[1].id, "approve");
     assert_eq!(gated[1].gate, Some(Gate::Review));
     assert_eq!(gated[1].seat.as_deref(), Some("owner"));
+    // Story 3.4: `gated` takes the default `max_returns`; `returned` allows
+    // one return.
+    assert_eq!(gated[1].max_returns, 2);
+    let returned = &wf["returned"].steps;
+    assert_eq!(
+        returned.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
+        vec!["draft", "approve", "publish"]
+    );
+    assert_eq!(returned[1].gate, Some(Gate::Review));
+    assert_eq!(returned[1].max_returns, 1);
     assert!(
         snap.seats()["owner"].model.is_none(),
         "the gate's seat has no model"
@@ -400,4 +411,66 @@ fn the_fixture_validates() {
             wall_clock: Duration::from_secs(30),
         }
     );
+}
+
+// ------------------------------------------------------------------ story 3.4
+//
+// Epic 3 story 4 (AD-36; Decision 1; matrix row 42): a gate step takes
+// `max_returns`, the number of times the owner may return its work before
+// the gate fails with a Failure item: a whole number 0 to 5, default 2,
+// only beside `gate:`. Raising it raises a cap (epic 4 story 17 classifies
+// it). Written before the key exists (today it is an unknown key).
+
+/// A gate step `approve` after `draft`, with `extra` (its YAML lines) added.
+fn gated_with(extra: &str) -> String {
+    format!(
+        "{DRAFT}  - id: approve\n    seat: owner\n    instruction: Approve it.\n    gate: review\n{extra}"
+    )
+}
+
+/// No finding calls `max_returns` an unknown key.
+fn assert_known(found: &[am_config::Finding]) {
+    for f in found {
+        assert!(
+            !f.message.contains("unknown key 'max_returns'"),
+            "the key is known: {f:#?}"
+        );
+    }
+}
+
+/// Decision 1: `max_returns` parses on a gate step, 0 to 5, and a gate
+/// without the key takes 2.
+#[test]
+fn max_returns_parses_on_a_gate_with_its_default() {
+    let dir = flow(&gated_with(""));
+    let found = load(dir.path()).unwrap().findings;
+    assert!(errors(&found).is_empty(), "{found:#?}");
+    let approve = step_of(dir.path(), "approve");
+    assert_eq!(approve.gate, Some(Gate::Review));
+    assert_eq!(approve.max_returns, 2, "the default");
+
+    for n in 0..=5u32 {
+        let dir = flow(&gated_with(&format!("    max_returns: {n}\n")));
+        let found = load(dir.path()).unwrap().findings;
+        assert_known(&found);
+        assert!(errors(&found).is_empty(), "max_returns {n}: {found:#?}");
+        assert_eq!(step_of(dir.path(), "approve").max_returns, n);
+    }
+}
+
+/// Row 42: `max_returns` on a step without `gate:`, outside 0..=5 or not a
+/// whole number is a finding at the key's line, with its fix; the project
+/// gives no snapshot, so `agentic validate` names it and `agentic run`
+/// starts nothing.
+#[test]
+fn max_returns_without_a_gate_or_out_of_range_is_refused() {
+    let without_gate = format!("{DRAFT}{EDIT}    max_returns: 1\n");
+    assert_refused(&without_gate, "max_returns: 1", &["max_returns", "gate"]);
+    assert_known(&load(flow(&without_gate).path()).unwrap().findings);
+
+    for value in ["6", "-1", "99", "two", "1.5", "[1]"] {
+        let text = gated_with(&format!("    max_returns: {value}\n"));
+        assert_refused(&text, &format!("max_returns: {value}"), &["'max_returns'"]);
+        assert_known(&load(flow(&text).path()).unwrap().findings);
+    }
 }

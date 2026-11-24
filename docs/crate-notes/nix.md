@@ -27,6 +27,10 @@ wrappers are used.
 - `SetArg::TCSAFLUSH` when changing and when restoring: it also discards
   input typed and not yet read, so the rest of a key after `^C` never reaches
   the shell. `TCSANOW` is the fallback for the restore.
+- `tcflush(fd, FlushArg::TCIFLUSH)` (story 3.4, R9; same `term` feature):
+  `OwnerTerminal::discard_typed_ahead` drops input typed and not yet read
+  before each `agentic gate` prompt, so lines typed or pasted ahead never
+  answer it. On a stdin that is not a terminal it fails, and is ignored.
 - With `ISIG` off a typed `^C` is the byte `0x03`, which the reader takes as
   cancel. Signals sent to the process (SIGINT, SIGTERM, SIGHUP, SIGQUIT)
   are not nix's business: they come through `tokio::signal` (nix's
