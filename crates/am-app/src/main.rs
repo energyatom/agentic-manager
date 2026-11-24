@@ -96,6 +96,13 @@ async fn main() {
             let code = status(&argv[1..]);
             std::process::exit(code);
         }
+        Some("gate") => {
+            // The code is returned after the command dropped the open
+            // project (the marker, then the store's lock): no
+            // `process::exit` in between.
+            let code = gate(&argv[1..]).await;
+            std::process::exit(code);
+        }
         Some("__spike-run") => spike_run(&args).await,
         Some("spike") => match argv.get(1).map(String::as_str) {
             Some("c3") => c3(&args).await,
@@ -109,7 +116,7 @@ async fn main() {
         Some("--version") => println!("agentic {}", env!("CARGO_PKG_VERSION")),
         _ => {
             eprintln!(
-                "usage: agentic serve [--project <path>] | agentic validate [<project>] | agentic audit export|verify | agentic accounts add|remove|list|test|migrate | agentic run <workflow> | agentic status | agentic spike c3|c7|local-context"
+                "usage: agentic serve [--project <path>] | agentic validate [<project>] | agentic audit export|verify | agentic accounts add|remove|list|test|migrate | agentic run <workflow> | agentic status | agentic gate [<item id>] | agentic spike c3|c7|local-context"
             );
             std::process::exit(2);
         }
@@ -185,6 +192,30 @@ async fn run(args: &[String]) -> i32 {
         providers: am_app::cli::unwired_providers(),
     };
     am_app::cli::run(args, ctx, &mut std::io::stdout(), &mut std::io::stderr()).await
+}
+
+/// `agentic gate [<item id>]` (epic 3 story 4, AD-15): the command with the
+/// owner's side ([`owner_side`]), from which it reads every decision, and
+/// the factory that wires no provider yet (so approve and return are
+/// refused before anything is written; reject and dismiss work). Nothing
+/// here can swap in a fake terminal or provider, and no option decides.
+async fn gate(args: &[String]) -> i32 {
+    use am_app::cli::{GateContext, OwnerSide};
+    let OwnerSide {
+        places,
+        identity,
+        terminal,
+    } = match owner_side() {
+        Ok(owner) => owner,
+        Err(code) => return code,
+    };
+    let ctx = GateContext {
+        places,
+        identity,
+        terminal,
+        providers: am_app::cli::unwired_providers(),
+    };
+    am_app::cli::gate(args, ctx, &mut std::io::stdout(), &mut std::io::stderr()).await
 }
 
 /// `agentic status` (epic 3 story 1): reads the project's runs without its
@@ -309,8 +340,18 @@ async fn serve(args: &Args) -> i32 {
         _ => None,
     };
     let mut builder = am_server::AppState::builder(port);
-    if let Some(o) = &opened {
-        builder = builder.project_db(o.layout.state_db());
+    if let (Some(o), Some(p)) = (&opened, &project) {
+        // Story 3.4: the Inbox's resolve records a person's decision and
+        // applies it through the project's one writer, and runs `agentic
+        // gate`'s check 5 before an approve or a return (review R1).
+        builder = builder
+            .project_db(o.layout.state_db())
+            .project_writer(o.store.writer())
+            .pin_check(am_app::serving::pin_check(
+                &places,
+                &PathBuf::from(p),
+                &o.store,
+            ));
     }
     let state = builder.build();
     // The per-launch CLI token (AD-13, AD-15): owner-only, beside the port
@@ -380,6 +421,10 @@ async fn serve(args: &Args) -> i32 {
     // Run status changes (also from `agentic run` in another process)
     // become events, once a second.
     let watcher = am_server::watch_runs(&state, Duration::from_secs(1));
+    // Story 3.4: the state holds the project's writer (and the pin check,
+    // which holds one too) for the Inbox's resolve; both are released
+    // below, before the project is dropped.
+    let held = state.clone();
     let code = match am_server::serve(listener, state, stop).await {
         Ok(()) => 0,
         Err(e) => {
@@ -388,7 +433,10 @@ async fn serve(args: &Args) -> i32 {
         }
     };
     watcher.abort();
-    // The client holds a handle on the store's writer: dropped first.
+    // The client and the server's state hold handles on the store's
+    // writer: dropped first.
+    held.release_project_writer();
+    drop(held);
     drop(egress);
     am_app::serving::clear_cli_token(&places, pid);
     if let Some(o) = &opened {

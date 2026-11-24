@@ -1020,6 +1020,13 @@ enum Typed {
     LineAfter(String, Box<dyn FnOnce() + Send>),
     Interrupt,
     TimeOut,
+    /// A line typed with Return before the next prompt was shown (story
+    /// 3.4, R9): read like a line unless the command discards what was
+    /// typed ahead first.
+    Ahead(String),
+    /// Text typed with no Return, then the end of input (Ctrl-D twice;
+    /// story 3.4, R11): the read is `Closed`, and the text is no answer.
+    Unfinished,
 }
 
 struct TerminalState {
@@ -1033,6 +1040,8 @@ struct TerminalState {
     checks: usize,
     /// The `interrupted()` calls (1-based) that report a Ctrl-C.
     interrupt_checks: Vec<usize>,
+    /// How many times `discard_typed_ahead()` was called.
+    discards: usize,
 }
 
 /// A scripted `Terminal` (story 2.1): what is typed at each prompt is
@@ -1064,6 +1073,7 @@ impl FakeTerminal {
                 shown: String::new(),
                 checks: 0,
                 interrupt_checks: Vec::new(),
+                discards: 0,
             })),
         }
     }
@@ -1112,6 +1122,29 @@ impl FakeTerminal {
         self.state().script.push_back(Typed::TimeOut);
     }
 
+    /// The owner types `text` and Return before the next prompt is shown
+    /// (story 3.4, R9): the next read returns it, unless the command
+    /// discarded what was typed ahead first (`discard_typed_ahead` drops
+    /// every such line at the front of the script).
+    pub fn type_ahead(&self, text: &str) {
+        self.state()
+            .script
+            .push_back(Typed::Ahead(text.to_string()));
+    }
+
+    /// The owner types `text` with no Return, then ends the input (Ctrl-D
+    /// twice; story 3.4, R11): the read is `Err(TerminalError::Closed)`.
+    pub fn unfinished(&self, text: &str) {
+        // What was typed is never read: only a line ended by Return is.
+        let _ = text;
+        self.state().script.push_back(Typed::Unfinished);
+    }
+
+    /// How many times the command discarded what was typed ahead.
+    pub fn discards(&self) -> usize {
+        self.state().discards
+    }
+
     /// Whether the terminal echoes now.
     pub fn echo(&self) -> bool {
         self.state().echo
@@ -1149,7 +1182,9 @@ impl FakeTerminal {
             typed
         };
         match typed {
-            Some(Typed::Line(text)) => Ok(text),
+            Some(Typed::Line(text) | Typed::Ahead(text)) => Ok(text),
+            // Only a line ended by Return is a line (the port's contract).
+            Some(Typed::Unfinished) => Err(TerminalError::Closed),
             Some(Typed::LineAfter(text, meanwhile)) => {
                 // Outside the lock: what happens meanwhile may look at the
                 // terminal too.
@@ -1178,6 +1213,16 @@ impl Terminal for FakeTerminal {
 
     fn read_secret(&mut self) -> Result<SecretString, TerminalError> {
         self.next(false, None).map(SecretString::new)
+    }
+
+    /// Drops every line typed ahead at the front of the script (a pending
+    /// Ctrl-C, or what the owner types at the prompt, stays).
+    fn discard_typed_ahead(&mut self) {
+        let mut st = self.state();
+        st.discards += 1;
+        while matches!(st.script.front(), Some(Typed::Ahead(_))) {
+            st.script.pop_front();
+        }
     }
 
     /// A scripted Ctrl-C that is next in the script was pressed between

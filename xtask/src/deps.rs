@@ -15,11 +15,22 @@
 //!   instruction, is named only where config or the owner's own words
 //!   become one: [`INSTRUCTION_SITES`], the `#[cfg(test)]` items of
 //!   [`INSTRUCTION_TEST_SITES`], and am-domain's definition line.
+//!
+//! Story 3.4 (AD-15, AD-28; review R12): the one Human-only resolve of an
+//! Inbox item, `Writer::resolve_inbox_item`, and the Human actor's type,
+//! `HumanActor`, are matched as tokens over whole files (so a split line, a
+//! `use … as` or `type` alias or `<HumanActor>::new` is still seen): they
+//! stand in shipped code only in am-domain (the definition and its
+//! re-export), am-store's `src/lib.rs` (the resolve), the two command
+//! handlers ([`RESOLVE_SITES`]) and `#[cfg(test)]` items of am-store.
+//! Review S5: in am-domain only `actor.rs` and `lib.rs`'s plain re-export,
+//! and in every file an `as` alias or a `pub use` of either fails.
 
 use crate::Failure;
 use crate::forbid::{strip_comments_and_strings, unterminated_finding};
 use crate::seam_guard::names;
 use crate::shipped::{in_ranges, sources, test_ranges};
+use crate::walk::is_word;
 use serde_json::Value;
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -48,6 +59,27 @@ pub const INSTRUCTION_SITES: [&str; 4] = [
 /// The shipped files whose `#[cfg(test)]` items (only) may call it: the
 /// engine driver's own unit tests build plans with it.
 pub const INSTRUCTION_TEST_SITES: [&str; 1] = ["crates/am-engine/src/run.rs"];
+
+/// The Human-only resolve of an Inbox item and the Human actor's type
+/// (AD-15, story 3.4), matched as tokens.
+const RESOLVE_TOKENS: [&str; 2] = ["resolve_inbox_item", "HumanActor"];
+
+/// The two command handlers that may name them: the API's resolve route
+/// and `agentic gate`.
+pub const RESOLVE_SITES: [&str; 2] = ["crates/am-server/src/inbox.rs", "crates/am-app/src/gate.rs"];
+
+/// Where the type is defined (review S5: only there in am-domain).
+const HUMAN_HOME: &str = "crates/am-domain/src/actor.rs";
+
+/// Where the type is re-exported, by a plain `pub use`.
+const HUMAN_REEXPORT: &str = "crates/am-domain/src/lib.rs";
+
+/// The file that defines the resolve.
+const RESOLVE_HOME: &str = "crates/am-store/src/lib.rs";
+
+/// The crate whose `#[cfg(test)]` items may name both (its own tests of
+/// the resolve).
+const RESOLVE_TEST_CRATE: &str = "crates/am-store/src/";
 
 /// Every finding of the call-site rules on the shipped source under
 /// `root`.
@@ -90,6 +122,98 @@ fn call_site_findings(root: &Path) -> Vec<String> {
                 ));
             }
         }
+        findings.extend(resolve_findings(&source.name, &code, &tests));
+    }
+    findings
+}
+
+/// The byte offsets of `token` in `code`, as a whole token.
+fn token_offsets(code: &str, token: &str) -> Vec<usize> {
+    code.match_indices(token)
+        .filter(|(at, _)| {
+            let before = code[..*at].chars().next_back();
+            let after = code[at + token.len()..].chars().next();
+            !before.is_some_and(is_word) && !after.is_some_and(is_word)
+        })
+        .map(|(at, _)| at)
+        .collect()
+}
+
+/// The 1-based line of the byte offset `at` in `code`.
+fn line_at(code: &str, at: usize) -> usize {
+    code[..at].matches('\n').count() + 1
+}
+
+/// The byte spans of the `pub use …;` statements of `code` (also
+/// `pub(crate) use` and the like), from `pub` to the `;`.
+fn pub_use_spans(code: &str) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    for start in token_offsets(code, "pub") {
+        let mut rest = code[start + 3..].trim_start();
+        if let Some(scoped) = rest.strip_prefix('(') {
+            let Some(close) = scoped.find(')') else {
+                continue;
+            };
+            rest = scoped[close + 1..].trim_start();
+        }
+        let is_use = rest.starts_with("use") && !rest[3..].chars().next().is_some_and(is_word);
+        if !is_use {
+            continue;
+        }
+        let from = code.len() - rest.len();
+        let end = code[from..].find(';').map_or(code.len(), |e| from + e + 1);
+        spans.push((start, end));
+    }
+    spans
+}
+
+/// Story 3.4 (AD-15; reviews R12, S5): the Human-only resolve
+/// (`resolve_inbox_item`) and the Human actor's type (`HumanActor`),
+/// matched as tokens over the whole of one shipped file's code.
+///
+/// - They stand only in am-domain's `actor.rs` (the definition) and
+///   `lib.rs` (its plain re-export), am-store's `lib.rs` (the resolve),
+///   the two command handlers ([`RESOLVE_SITES`]), and `#[cfg(test)]`
+///   items of am-store.
+/// - In every file, the allowed ones included, an `as` alias of either, or
+///   a `pub use` of either, fails, but am-domain `lib.rs`'s plain
+///   re-export: another name, or another crate's re-export, would carry
+///   them past this rule.
+fn resolve_findings(name: &str, code: &str, tests: &[(usize, usize)]) -> Vec<String> {
+    let pub_uses = pub_use_spans(code);
+    let mut renamed: BTreeSet<usize> = BTreeSet::new();
+    let mut misplaced: BTreeSet<usize> = BTreeSet::new();
+    for token in RESOLVE_TOKENS {
+        for at in token_offsets(code, token) {
+            let line = line_at(code, at);
+            let after = code[at + token.len()..].trim_start();
+            let aliased =
+                after.starts_with("as") && !after[2..].chars().next().is_some_and(is_word);
+            let in_pub_use = pub_uses.iter().any(|(from, to)| (*from..*to).contains(&at));
+            if aliased || (in_pub_use && name != HUMAN_REEXPORT) {
+                renamed.insert(line);
+                continue;
+            }
+            let allowed = name == HUMAN_HOME
+                || (name == HUMAN_REEXPORT && in_pub_use)
+                || name == RESOLVE_HOME
+                || RESOLVE_SITES.contains(&name)
+                || (name.starts_with(RESOLVE_TEST_CRATE) && in_ranges(tests, line));
+            if !allowed {
+                misplaced.insert(line);
+            }
+        }
+    }
+    let mut findings = Vec::new();
+    for line in renamed {
+        findings.push(format!(
+            "{name}:{line}: renames or re-exports HumanActor or resolve_inbox_item (`as` or `pub use`); they are named only as themselves, so this rule sees every use of them (AD-15: only a person resolves an Inbox item)"
+        ));
+    }
+    for line in misplaced {
+        findings.push(format!(
+            "{name}:{line}: names HumanActor or resolve_inbox_item; they (and HumanActor::new, which builds the one resolver) stand in shipped code only in am-domain's definition and re-export, am-store's lib.rs and the two command handlers, the API's Inbox route and `agentic gate` (AD-15: no engine, tool, MCP or other code path resolves an item)"
+        ));
     }
     findings
 }
@@ -225,7 +349,7 @@ pub fn run(metadata: Option<&Path>, root: &Path) -> Result<String, Failure> {
     let calls = call_site_findings(root);
     match check(&doc) {
         Ok(summary) if calls.is_empty() => Ok(format!(
-            "{summary}; only am-engine builds a TrustedInput, and Instruction::authored is called only at its listed sites (AD-10)"
+            "{summary}; only am-engine builds a TrustedInput, and Instruction::authored is called only at its listed sites (AD-10); only the two command handlers name the Inbox resolve and HumanActor outside am-domain and am-store (AD-15)"
         )),
         Ok(_) => Err(Failure::Findings(calls)),
         Err(Failure::Findings(mut findings)) => {

@@ -18,6 +18,8 @@ use std::path::Path;
 /// `agentic accounts add|remove|list|test|migrate` (stories 2.1 and 2.13, AD-15's interim CLI
 /// Account edit); see [`crate::accounts`].
 pub use crate::accounts::{AccountsContext, accounts};
+/// `agentic gate [<item id>]` (epic 3 story 4); see [`crate::gate`].
+pub use crate::gate::{GateContext, gate};
 /// `agentic run <workflow>` and `agentic status` (epic 3 story 1); see
 /// [`crate::run`].
 pub use crate::run::{Providers, RunContext, run, status, unwired_providers};

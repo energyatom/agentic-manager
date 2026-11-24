@@ -226,6 +226,7 @@ async fn a_waiting_gate_survives_a_restart_without_a_duplicate() {
             inputs: vec![StepInput {
                 kind: "step_output".into(),
                 from_step_run: Some(draft.id.clone()),
+                from_item: None,
                 label: "step:draft@1".into(),
                 taint: Taint::Clean,
             }],
@@ -237,6 +238,7 @@ async fn a_waiting_gate_survives_a_restart_without_a_duplicate() {
                 taint: Taint::Clean,
                 title: "Review the version".into(),
                 body: "A second pause for the same gate attempt.".into(),
+                max_returns: Some(2),
             },
         };
         // Refused or a no-change: either way nothing changes.

@@ -14,6 +14,10 @@ workspace = true
 am-domain.workspace = true
 am-api.workspace = true
 am-store.workspace = true
+# Story 3.4 (AD-4: allowed by the matrix): after a resolve over the API, the
+# server applies the decision as `System(engine)` through
+# `am_engine::gate::apply_resolution`; it runs no model step.
+am-engine.workspace = true
 axum.workspace = true
 tokio.workspace = true
 getrandom.workspace = true

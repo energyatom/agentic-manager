@@ -145,6 +145,7 @@ async fn the_previous_output_arrives_as_one_trusted_input() {
         vec![StepInput {
             kind: "step_output".into(),
             from_step_run: Some(draft.id.clone()),
+            from_item: None,
             label: "step:draft@1".into(),
             taint: Taint::Clean,
         }]
@@ -154,6 +155,7 @@ async fn the_previous_output_arrives_as_one_trusted_input() {
         vec![StepInput {
             kind: "step_output".into(),
             from_step_run: Some(edit.id.clone()),
+            from_item: None,
             label: "step:edit@1".into(),
             taint: Taint::Clean,
         }]

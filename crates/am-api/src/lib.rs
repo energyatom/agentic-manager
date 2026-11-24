@@ -2,8 +2,10 @@
 //! event stream speak. JSON is camelCase on the wire. Story 3.2 adds the one
 //! error envelope ([`ApiError`]), run status ([`RunDto`], [`StepDto`],
 //! [`RunDetailDto`]), the event ([`EventDto`]) and the two sign-in exchange
-//! bodies ([`SessionBody`], [`PairBody`]). ts-rs generation comes with the
-//! UI epics.
+//! bodies ([`SessionBody`], [`PairBody`]). Story 3.4 adds the Inbox
+//! ([`InboxItemDto`], [`InboxItemDetailDto`], [`ResolveBody`],
+//! [`ResolutionDto`]) and its event ([`EVENT_INBOX_UPDATED`],
+//! [`InboxUpdatedDto`]). ts-rs generation comes with the UI epics.
 #![forbid(unsafe_code)]
 
 use serde::{Deserialize, Serialize};
@@ -93,6 +95,87 @@ pub const EVENT_RESYNC: &str = "resync";
 pub const EVENT_RUN_UPDATED: &str = "run.updated";
 /// A step's status or times changed.
 pub const EVENT_STEP_UPDATED: &str = "step.updated";
+
+/// Story 3.4 (AD-28): an Inbox item changed (made `open`, or `resolved`).
+/// Its data is [`InboxUpdatedDto`]: the item's id and status, nothing else
+/// (never its payload, title, body, decision, note or run; owner condition
+/// 4).
+pub const EVENT_INBOX_UPDATED: &str = "inbox.updated";
+
+/// The data of an [`EVENT_INBOX_UPDATED`] event: exactly the item's id and
+/// status.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct InboxUpdatedDto {
+    pub id: String,
+    pub status: String,
+}
+
+/// One Inbox item (`GET /api/v1/inbox`, the open items; story 3.4, AD-28):
+/// its kind (`review`, `question`, `failure`, ...), status (`open` or
+/// `resolved`), run and step run, taint, the engine's words, a Review's
+/// `maxReturns`, and once resolved the decision, who resolved it in words
+/// ("You (Reviewer)") and when. Never a note.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InboxItemDto {
+    pub id: String,
+    pub kind: String,
+    pub status: String,
+    pub run_id: String,
+    pub step_run_id: String,
+    pub taint: bool,
+    pub title: String,
+    pub body: String,
+    pub created_at: String,
+    #[serde(default)]
+    pub max_returns: Option<u32>,
+    #[serde(default)]
+    pub decision: Option<String>,
+    #[serde(default)]
+    pub resolved_by: Option<String>,
+    #[serde(default)]
+    pub resolved_at: Option<String>,
+}
+
+/// `GET /api/v1/inbox/{id}`: the item, its payload's text (the producing
+/// attempt's output; model text, rendered only through the sanitising
+/// renderer) and, once resolved, the note a return or an answer carried.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InboxItemDetailDto {
+    pub item: InboxItemDto,
+    #[serde(default)]
+    pub payload: Option<String>,
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+/// `POST /api/v1/inbox/{id}/resolve`: the decision (`approve`, `return`,
+/// `reject`, `answer`, `dismiss`), the note a return or an answer needs,
+/// and for approving a tainted Review the item's id typed back
+/// (`confirmItemId`, owner condition 2).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ResolveBody {
+    pub decision: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirm_item_id: Option<String>,
+}
+
+/// A resolve's answer: the resolved item and its run as they are after the
+/// server applied the decision. `applied` is `false` when the decision was
+/// recorded and the engine's apply of it failed (story 3.4, review R2): the
+/// decision stands, and the run waits for story 3.9's resume.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolutionDto {
+    pub item: InboxItemDto,
+    pub run: RunDto,
+    pub applied: bool,
+}
 
 /// `POST /api/v1/session`: the launch code from the URL fragment. `Debug`
 /// never shows the code.

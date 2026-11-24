@@ -33,8 +33,15 @@ pub trait Terminal: Send {
     /// Writes `text` to the terminal itself (a prompt), as it is.
     fn show(&mut self, text: &str);
     /// Reads one line with echo on, without its line ending; `TimedOut` when
-    /// `timeout` is given and passes first.
+    /// `timeout` is given and passes first. Only a line ended by Return is
+    /// a line: a partial line followed by the end of input is `Closed`
+    /// (story 3.4, R11), so it never answers a prompt.
     fn read_line(&mut self, timeout: Option<Duration>) -> Result<String, TerminalError>;
+    /// Drops whatever was typed ahead and not read yet (story 3.4, R9): a
+    /// command that asks something calls it just before it shows the
+    /// prompt, so lines typed or pasted earlier never answer it. A pending
+    /// interrupt is kept.
+    fn discard_typed_ahead(&mut self);
     /// Reads one line with echo off. Echo is on again when this returns,
     /// whatever it returns (a line, an interrupt, the end of input, an
     /// error), and when the implementation is dropped mid-read.

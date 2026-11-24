@@ -19,6 +19,10 @@
 //!   Enter reader reads the terminal only while serve is its foreground
 //!   job, asked of the system's `ps` before each read, so `agentic serve &`
 //!   is never stopped by job control and keeps answering.
+//! - [`pin_check`] (story 3.4, review R1): the check the server's Inbox
+//!   runs before an approve or a return, `agentic gate`'s check 5
+//!   ([`current_snapshot`]): the snapshot the project's files give now, or
+//!   why no run may go on on them.
 
 use std::io::{BufRead, Read};
 use std::path::{Path, PathBuf};
@@ -28,6 +32,58 @@ use am_domain::RuntimeLayout;
 use am_server::CliToken;
 
 use crate::runtime::{Places, Refusal, ensure_private_dir, replace_file};
+
+/// Story 3.4 (AD-16, Question 2; review R1): the config snapshot a run
+/// would go on on, as `agentic gate`'s check 5 and the server's pin check
+/// both read it: no file the app wrote changed outside it (Reload, AD-16),
+/// no config migration waits, no config error. `project` names the folder
+/// in the words; `not_done` ends a refusal.
+pub(crate) fn current_snapshot(
+    places: &Places,
+    root: &Path,
+    project: &Path,
+    history: &dyn am_domain::ConfigHistory,
+    not_done: &str,
+) -> Result<am_config::ConfigSnapshot, String> {
+    crate::run::no_outside_change_in(root, history, not_done)?;
+    crate::run::snapshot_of(places, root, project, not_done)
+}
+
+/// What `agentic serve` hands the server (story 3.4, review R1): the
+/// hash of the snapshot the project at `root` gives now, read as
+/// [`current_snapshot`] reads it, or why no run may go on on it (fails
+/// closed).
+pub fn pin_check(
+    places: &Places,
+    root: &Path,
+    store: &am_store::Store,
+) -> std::sync::Arc<dyn am_server::PinCheck> {
+    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    std::sync::Arc::new(ProjectPin {
+        places: places.clone(),
+        root,
+        history: am_store::StoreConfigHistory::new(store).map_err(|e| e.to_string()),
+    })
+}
+
+/// The server's pin check over one open project.
+struct ProjectPin {
+    places: Places,
+    root: PathBuf,
+    history: Result<am_store::StoreConfigHistory, String>,
+}
+
+impl am_server::PinCheck for ProjectPin {
+    fn current_snapshot(&self) -> Result<String, String> {
+        const KEPT: &str = "Nothing was written, and the item stays open";
+        let history = self
+            .history
+            .as_ref()
+            .map_err(|e| format!("the project's History cannot be read: {e}. {KEPT}"))?;
+        current_snapshot(&self.places, &self.root, &self.root, history, KEPT)
+            .map(|snapshot| snapshot.hash().to_string())
+    }
+}
 
 /// Refuses the start when a folder the server keeps state in, or anything
 /// inside it at any depth, is not owner-only.

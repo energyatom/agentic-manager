@@ -55,7 +55,9 @@
 //!
 //! `status` lists the project's runs, newest first, with every attempt of
 //! their steps (story 3.3: `attempt <n>` and the attempt's state) and
-//! their open Inbox items (kind and id). It
+//! their Inbox items (kind, id and status; story 3.4: a resolved one's
+//! decision and who resolved it, never a note; a run left ready after a
+//! decision says so). It
 //! reads without the project's lock ([`crate::runtime::find_runtime`], a
 //! read-only connection), so it works while a run or `serve` holds the
 //! project, and it has no terminal rule.
@@ -150,7 +152,7 @@ impl LlmProvider for NoModelAtGate {
 }
 
 /// The words after the command: the positional ones and `--project`.
-fn parse(args: &[String]) -> Result<(Vec<String>, PathBuf), String> {
+pub(crate) fn parse(args: &[String]) -> Result<(Vec<String>, PathBuf), String> {
     let mut positional = Vec::new();
     let mut project: Option<String> = None;
     let mut words = args.iter();
@@ -174,7 +176,7 @@ fn parse(args: &[String]) -> Result<(Vec<String>, PathBuf), String> {
     ))
 }
 
-fn usage(err: &mut dyn Write, usage: &str, why: &str) -> i32 {
+pub(crate) fn usage(err: &mut dyn Write, usage: &str, why: &str) -> i32 {
     let _ = writeln!(err, "{usage}");
     let _ = writeln!(err, "agentic: {why}");
     EXIT_USAGE
@@ -185,7 +187,7 @@ fn usage(err: &mut dyn Write, usage: &str, why: &str) -> i32 {
 /// The open-time prompt of `agentic run`: it asks nothing. The open
 /// consults it only for `--confirm-move` and `--take-over`, which this
 /// command never passes.
-struct NoQuestion;
+pub(crate) struct NoQuestion;
 
 impl Prompt for NoQuestion {
     fn interactive(&self) -> bool {
@@ -243,16 +245,30 @@ fn no_pinned_owner_child(snapshot: &ConfigSnapshot) -> Result<(), String> {
 /// AD-16), in the words of story 2.1's Account edit. Only files with a
 /// History entry are judged (`am_config::outside_changes`): a file the app
 /// never wrote passes, whatever was edited in it by hand.
-fn no_outside_change(root: &Path, store: &am_store::Store) -> Result<(), String> {
+pub(crate) fn no_outside_change(
+    root: &Path,
+    store: &am_store::Store,
+    not_done: &str,
+) -> Result<(), String> {
     let history =
-        am_store::StoreConfigHistory::new(store).map_err(|e| format!("{e}. {NOT_STARTED}"))?;
+        am_store::StoreConfigHistory::new(store).map_err(|e| format!("{e}. {not_done}"))?;
+    no_outside_change_in(root, &history, not_done)
+}
+
+/// [`no_outside_change`] against `history` (story 3.4: the server's pin
+/// check holds its own).
+pub(crate) fn no_outside_change_in(
+    root: &Path,
+    history: &dyn am_domain::ConfigHistory,
+    not_done: &str,
+) -> Result<(), String> {
     let changed =
-        am_config::outside_changes(root, &history).map_err(|e| format!("{e}. {NOT_STARTED}"))?;
+        am_config::outside_changes(root, history).map_err(|e| format!("{e}. {not_done}"))?;
     if changed.is_empty() {
         return Ok(());
     }
     Err(format!(
-        "{} changed on disk outside the app since the app last wrote it, so no run is built from that change. {NOT_STARTED}. Put the file back as the app last wrote it (undo your change), then run this command again; Reload, which takes such a change in, arrives with the app's UI",
+        "{} changed on disk outside the app since the app last wrote it, so no run is built from that change. {not_done}. Put the file back as the app last wrote it (undo your change), then run this command again; Reload, which takes such a change in, arrives with the app's UI",
         changed.join(", ")
     ))
 }
@@ -272,10 +288,11 @@ fn not_honoured(step: &am_config::Step) -> Vec<&str> {
 /// seat's model and the step's output limit, on the provider the factory
 /// gives for that model. A workflow with a step that declares a run-graph
 /// key or an `output_schema` gives no plan (see [`not_honoured`]).
-fn plan_of(
+pub(crate) fn plan_of(
     snapshot: &ConfigSnapshot,
     workflow: &str,
     providers: &Providers,
+    not_done: &str,
 ) -> Result<RunPlan, String> {
     let Some(wf) = snapshot.workflows().get(workflow) else {
         let known: Vec<&str> = snapshot.workflows().keys().map(String::as_str).collect();
@@ -285,7 +302,7 @@ fn plan_of(
             format!("its workflows are: {}", known.join(", "))
         };
         return Err(format!(
-            "this project has no workflow `{workflow}`; {known}. {NOT_STARTED}"
+            "this project has no workflow `{workflow}`; {known}. {not_done}"
         ));
     };
     // Before any provider is asked for: a step this version would run as
@@ -295,7 +312,7 @@ fn plan_of(
         if !keys.is_empty() {
             let keys: Vec<String> = keys.iter().map(|k| format!("`{k}`")).collect();
             return Err(format!(
-                "step `{}` of the workflow `{workflow}` declares {}, which this version of `agentic run` cannot honour yet: it runs each step as one plain model turn and would skip it without saying so. {NOT_STARTED}",
+                "step `{}` of the workflow `{workflow}` declares {}, which this version of `agentic run` cannot honour yet: it runs each step as one plain model turn and would skip it without saying so. {not_done}",
                 step.id,
                 keys.join(", ")
             ));
@@ -305,13 +322,13 @@ fn plan_of(
     for step in &wf.steps {
         let Some(seat_id) = step.seat.as_deref() else {
             return Err(format!(
-                "step `{}` of the workflow `{workflow}` has no `seat:` of its own, and this version of `agentic run` runs a step only on its one seat. {NOT_STARTED}",
+                "step `{}` of the workflow `{workflow}` has no `seat:` of its own, and this version of `agentic run` runs a step only on its one seat. {not_done}",
                 step.id
             ));
         };
         let Some(seat) = snapshot.seats().get(seat_id) else {
             return Err(format!(
-                "step `{}` of the workflow `{workflow}` names the seat `{seat_id}`, which this project does not have. {NOT_STARTED}",
+                "step `{}` of the workflow `{workflow}` names the seat `{seat_id}`, which this project does not have. {not_done}",
                 step.id
             ));
         };
@@ -335,7 +352,9 @@ fn plan_of(
                 system,
                 instruction: Instruction::authored(step.instruction.clone()),
                 inputs: Vec::new(),
-                hand_off: HandOff::Gate,
+                hand_off: HandOff::Gate {
+                    max_returns: step.max_returns,
+                },
                 limits,
                 model: String::new(),
                 max_output_tokens: step.max_tokens.unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS),
@@ -345,11 +364,11 @@ fn plan_of(
         }
         let Some(model) = &seat.model else {
             return Err(format!(
-                "step `{}` of the workflow `{workflow}` runs on the seat `{seat_id}`, which has no model; set `model:` (its `account` and `model`) in seats/{seat_id}.md. {NOT_STARTED}",
+                "step `{}` of the workflow `{workflow}` runs on the seat `{seat_id}`, which has no model; set `model:` (its `account` and `model`) in seats/{seat_id}.md. {not_done}",
                 step.id
             ));
         };
-        let provider = providers(model).map_err(|why| format!("{why}. {NOT_STARTED}"))?;
+        let provider = providers(model).map_err(|why| format!("{why}. {not_done}"))?;
         let hand_off = match &step.loop_back {
             Some(l) => HandOff::LoopBack {
                 to: l.to.clone(),
@@ -379,21 +398,26 @@ fn plan_of(
 }
 
 /// The project's config snapshot (check 5), or why no run starts on it.
-fn snapshot_of(places: &Places, root: &Path, project: &Path) -> Result<ConfigSnapshot, String> {
-    let offers = am_config::migration_offers(root).map_err(|e| format!("{e}. {NOT_STARTED}"))?;
+pub(crate) fn snapshot_of(
+    places: &Places,
+    root: &Path,
+    project: &Path,
+    not_done: &str,
+) -> Result<ConfigSnapshot, String> {
+    let offers = am_config::migration_offers(root).map_err(|e| format!("{e}. {not_done}"))?;
     if !offers.is_empty() {
         let files: Vec<String> = offers
             .iter()
             .map(|o| format!("{} from schema_version {} to {}", o.file, o.from, o.to))
             .collect();
         return Err(format!(
-            "the project waits for a config migration ({}), and nothing runs on config you have not accepted. {NOT_STARTED}; `agentic validate {}` names each file and its fix",
+            "the project waits for a config migration ({}), and nothing runs on config you have not accepted. {not_done}; `agentic validate {}` names each file and its fix",
             files.join(", "),
             project.display()
         ));
     }
     let loaded = am_config::load_in(root, crate::cli::project_load_options(Some(places), root))
-        .map_err(|e| format!("{e}. {NOT_STARTED}"))?;
+        .map_err(|e| format!("{e}. {not_done}"))?;
     match loaded.snapshot {
         Some(snapshot) => Ok(snapshot),
         None => {
@@ -407,7 +431,7 @@ fn snapshot_of(places: &Places, root: &Path, project: &Path) -> Result<ConfigSna
                 .map(|f| format!(" (the first: {}:{}: {})", f.file, f.line, f.message))
                 .unwrap_or_default();
             Err(format!(
-                "the project's config has {}{first}, so no run can be built from it. {NOT_STARTED}; run `agentic validate {}` to see each error with its fix",
+                "the project's config has {}{first}, so no run can be built from it. {not_done}; run `agentic validate {}` to see each error with its fix",
                 if errors.len() == 1 {
                     "1 error".to_string()
                 } else {
@@ -474,12 +498,12 @@ async fn start(
     let root = project
         .canonicalize()
         .unwrap_or_else(|_| project.to_path_buf());
-    no_outside_change(&root, &opened.store)?;
-    let snapshot = snapshot_of(&ctx.places, &root, project)?;
+    no_outside_change(&root, &opened.store, NOT_STARTED)?;
+    let snapshot = snapshot_of(&ctx.places, &root, project, NOT_STARTED)?;
     // The owner's files may have changed since check 3 (the open can wait
     // on a migration): what the pinned snapshot holds decides.
     no_pinned_owner_child(&snapshot)?;
-    let plan = plan_of(&snapshot, workflow, &ctx.providers)?;
+    let plan = plan_of(&snapshot, workflow, &ctx.providers, NOT_STARTED)?;
     run_plan(
         &opened.store,
         owner(),
@@ -503,6 +527,11 @@ fn report(done: Result<RunOutcome, Stop>, out: &mut dyn Write, err: &mut dyn Wri
                 // `running`, and only a person resolves the item.
                 if let Some(item) = &outcome.item {
                     let _ = writeln!(out, "Review item {item} waits for you in the Inbox");
+                    // Story 3.4: where the owner decides it today.
+                    let _ = writeln!(
+                        out,
+                        "Decide it on this terminal with `agentic gate {item}` (add `--project <folder>` outside the project's folder)"
+                    );
                 }
                 return EXIT_OK;
             }
@@ -649,22 +678,45 @@ fn step_line(step: &StepRow) -> String {
     )
 }
 
-/// An open Inbox item of a run (story 3.3): its kind and id, never its
-/// words.
+/// An Inbox item of a run (stories 3.3 and 3.4): its kind, id and status,
+/// and once resolved its decision and who resolved it ("You (Reviewer)");
+/// never its words or a note.
 fn item_line(item: &InboxItemRow) -> String {
-    format!(
+    let mut line = format!(
         "    {} item {}  {}",
         item.kind.title(),
         item.id,
         item.status
-    )
+    );
+    if let Some(decision) = item.decision {
+        let who = item
+            .resolver()
+            .map(|by| by.describe())
+            .unwrap_or_else(|| "an unknown resolver".into());
+        line.push_str(&format!("  {}  by {who}", decision.as_str()));
+    }
+    line
 }
 
-/// A run, its step attempts and its open Inbox items.
+/// Story 3.4 (Question 1): a run a person's decision was recorded and
+/// applied for, which nothing has continued since (an API resolve, or an
+/// `agentic gate` that stopped): still `running`, no step running or
+/// waiting, a Review resolved.
+fn ready_to_continue(run: &RunRow, steps: &[StepRow], items: &[InboxItemRow]) -> bool {
+    run.status == "running"
+        && !steps
+            .iter()
+            .any(|s| s.status == "running" || s.status == WAITING)
+        && items
+            .iter()
+            .any(|i| i.kind == am_domain::InboxKind::Review && i.status == "resolved")
+}
+
+/// A run, its step attempts and its Inbox items.
 type RunLines = (RunRow, Vec<StepRow>, Vec<InboxItemRow>);
 
 /// The runs of the project at `project`, newest first, each with its steps
-/// and its open Inbox items.
+/// and its Inbox items.
 fn read_runs(places: &Places, project: &Path) -> Result<Vec<RunLines>, String> {
     let layout = crate::runtime::find_runtime(places, project).map_err(|e| e.to_string())?;
     let db = layout.state_db();
@@ -688,12 +740,7 @@ fn read_runs(places: &Places, project: &Path) -> Result<Vec<RunLines>, String> {
     let mut all = Vec::new();
     for run in reader.runs().map_err(|e| e.to_string())? {
         let steps = reader.steps(&run.id).map_err(|e| e.to_string())?;
-        let items = reader
-            .inbox_items(&run.id)
-            .map_err(|e| e.to_string())?
-            .into_iter()
-            .filter(|i| i.status == "open")
-            .collect();
+        let items = reader.inbox_items(&run.id).map_err(|e| e.to_string())?;
         all.push((run, steps, items));
     }
     Ok(all)
@@ -703,7 +750,8 @@ fn read_runs(places: &Places, project: &Path) -> Result<Vec<RunLines>, String> {
 /// `status`. Prints each run, newest first (id, workflow, status, the first
 /// 12 characters of its snapshot hash, duration), and under it each step
 /// attempt (key, `attempt <n>`, status, duration, or `waiting` for a step
-/// that waits for a person) and each open Inbox item (kind and id). Reads only, without the project's lock and with
+/// that waits for a person) and each Inbox item (kind, id, status, and a
+/// resolved one's decision and resolver). Reads only, without the project's lock and with
 /// any stdin. Returns 0 (also with no runs), 2 for bad usage, 1 when the
 /// project has no runtime folder or database on this Mac, or one this
 /// version has not migrated yet, each in words on `err`.
@@ -735,6 +783,12 @@ pub fn status(args: &[String], places: &Places, out: &mut dyn Write, err: &mut d
         }
         for item in items {
             let _ = writeln!(out, "{}", item_line(item));
+        }
+        if ready_to_continue(run, steps, items) {
+            let _ = writeln!(
+                out,
+                "    ready to continue (resume arrives with story 3.9; `agentic gate` continues only a run it resolves)"
+            );
         }
     }
     EXIT_OK

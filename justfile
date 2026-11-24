@@ -30,9 +30,10 @@ test:
     cargo nextest run
 
 # nextest runs no doctests; am-store's include the `compile_fail` proof that
-# `Writer::exec` needs an Actor (AD-24, story 1.6) and that no command
-# resolves an Inbox item yet (story 3.3); am-domain's, that nothing converts
-# into or out of a TrustedInput (AD-10, story 3.3).
+# `Writer::exec` needs an Actor (AD-24, story 1.6) and that only a
+# `HumanActor` resolves an Inbox item, never a `WriteCommand` (stories 3.3,
+# 3.4); am-domain's, that nothing converts into or out of a TrustedInput
+# (AD-10, story 3.3).
 doctest:
     cargo test --doc -p am-store -p am-domain
 

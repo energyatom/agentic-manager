@@ -39,3 +39,40 @@ impl Actor {
         }
     }
 }
+
+/// The hat the owner wears when they resolve an Inbox item (AD-24's product
+/// word, story 3.4): every resolution reads "You (Reviewer)". It is not a
+/// role template.
+pub const REVIEWER_HAT: &str = "Reviewer";
+
+/// A person, and only a person (AD-15, AD-28; story 3.4): the one actor
+/// that resolves an Inbox item. Its fields are private, it is built only
+/// from a person and a hat with [`HumanActor::new`], and it becomes an
+/// [`Actor`] one way only (`From<HumanActor> for Actor`): there is no
+/// `From<Actor>`, no `Default` and no `Deserialize`, so no seat, tool,
+/// engine, import or Assistant value can pass for one. Only the two command
+/// handlers build one (`cargo xtask check-deps`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HumanActor {
+    person: String,
+    hat: String,
+}
+
+impl HumanActor {
+    /// The person `person` wearing `hat` (the owner as [`REVIEWER_HAT`]).
+    pub fn new(person: impl Into<String>, hat: impl Into<String>) -> HumanActor {
+        HumanActor {
+            person: person.into(),
+            hat: hat.into(),
+        }
+    }
+}
+
+impl From<HumanActor> for Actor {
+    fn from(h: HumanActor) -> Actor {
+        Actor::Human {
+            person: h.person,
+            hat: h.hat,
+        }
+    }
+}
