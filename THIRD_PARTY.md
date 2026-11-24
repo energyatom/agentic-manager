@@ -30,7 +30,19 @@ None. (Native libraries compiled into the binary are listed below.)
   (Apache-2.0 OR ISC OR MIT-0), mlkem-native and mldsa-native
   (Apache-2.0 OR ISC OR MIT), the Jitter Entropy RNG (BSD-3-Clause, which
   Amazon elects over GPL-2.0) and public-domain (CC0) Keccak and AES reference
-  code.
+  code. Those CC0 and BSD-3-Clause parts are parts of a native library under
+  AD-3 and need no cargo-deny crate-licence exception (owner, 2026-11-24).
+
+Each release ships this file and AWS-LC's licence notices, the BSD-3-Clause
+notice included, inside every artefact that carries the binary: the app
+bundle (so the updater's payload carries them too) and any `agentic` archive a
+release publishes. AWS-LC's notices are that `LICENSE` file and the upstream
+licence files it points to but does not package (Jitter Entropy's BSD-3-Clause
+text, s2n-bignum's licence), taken from AWS-LC's source at the linked version;
+the release job fails when an artefact lacks them (architecture AD-3). Epic
+11's release checklist includes a licence review of every component a release
+carries, this list included, and the notices their licences require ship in
+the same artefacts.
 
 The desktop app (`am-desktop`, epic 11) also compiles one small native file:
 `objc2-exception-helper` 0.1.1's Objective-C `try_catch.m`, through Tauri
