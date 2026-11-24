@@ -166,13 +166,23 @@ WHEN EXISTS (
 )
 BEGIN SELECT RAISE(ABORT, 'an attempt is never replaced'); END;
 
--- Nor does an attempt go back to `queued` (review T1, manager's decision):
--- no path from 3.1 to 3.5 does, so a round trip through `queued` cannot
--- reopen its writes. (Story 3.9 relaxes this in its own migration should
--- resume ever requeue an attempt.)
+-- Nor does an attempt go back to `queued` (review T1; the owner's
+-- decision, 2026-11-24), so a round trip through `queued` cannot reopen its
+-- writes. AD-8's one edge back is a fan-in whose join is met
+-- (`waiting_branches → queued`, story 3.14), and only for an attempt that
+-- never started: no seat, no table, no `started_at`. Its one edge into
+-- `waiting_branches` is from `queued`. (Story 3.9 relaxes this in its own
+-- migration should resume ever requeue an attempt.)
 CREATE TRIGGER step_runs_never_requeued BEFORE UPDATE OF status ON step_runs
-WHEN NEW.status = 'queued' AND OLD.status IS NOT 'queued'
+WHEN NEW.status = 'queued' AND OLD.status IS NOT 'queued' AND OLD.status IS NOT 'waiting_branches'
 BEGIN SELECT RAISE(ABORT, 'an attempt never goes back to queued'); END;
+CREATE TRIGGER step_runs_requeued_only_unstarted BEFORE UPDATE OF status ON step_runs
+WHEN NEW.status = 'queued' AND OLD.status = 'waiting_branches'
+ AND (OLD.seat IS NOT NULL OR OLD.writes_table IS NOT NULL OR OLD.started_at IS NOT NULL)
+BEGIN SELECT RAISE(ABORT, 'only an attempt that never started goes back to queued'); END;
+CREATE TRIGGER step_runs_waits_for_branches_from_queued BEFORE UPDATE OF status ON step_runs
+WHEN NEW.status = 'waiting_branches' AND OLD.status IS NOT 'waiting_branches' AND OLD.status IS NOT 'queued'
+BEGIN SELECT RAISE(ABORT, 'an attempt waits for branches only from queued'); END;
 
 CREATE TRIGGER step_runs_writes_set_at_start BEFORE UPDATE OF seat, writes_table ON step_runs
 WHEN NOT (OLD.status = 'queued' AND NEW.status = 'running')

@@ -3171,3 +3171,223 @@ fn no_row_types_debug_holds_data_or_a_table_id() {
         }
     }
 }
+
+// ------------------------------------------------ the owner's round 3 (T1)
+//
+// The owner, 2026-11-24 (PR #38): the no-requeue guard keeps AD-8's one
+// same-row edge back, `waiting_branches → queued` (a fan-in whose join is
+// met, story 3.14), and nothing else: every other move to `queued` is
+// refused; a move into `waiting_branches` comes only from `queued`; and
+// `waiting_branches → queued` is refused for a row with a seat, a table or
+// a `started_at`. Raw SQL reaches the guards (`step_runs.status` has no
+// CHECK). Written before the fix.
+
+/// Every status a step attempt leaves `queued` for, but `waiting_branches`.
+const NOT_QUEUED: [&str; 7] = [
+    "running",
+    "waiting_human",
+    "waiting_review",
+    "succeeded",
+    "failed",
+    "cancelled",
+    "looped_back",
+];
+
+/// A fresh queued attempt of a new run's one step `s`: its id.
+fn fresh_attempt(r: &Rig) -> String {
+    let run = r.new_run(&["s"]);
+    r.latest(&run, "s").id
+}
+
+/// Moves `id`'s status to `status` by hand (the test's setup; it must go
+/// through).
+fn set_status(c: &Connection, id: &str, status: &str) {
+    let changed = c
+        .execute(
+            "UPDATE step_runs SET status = ?2 WHERE id = ?1",
+            params![id, status],
+        )
+        .unwrap_or_else(|e| panic!("setting up {status}: {e}"));
+    assert_eq!(changed, 1, "setting up {status}");
+}
+
+/// A raw attempt row of a new run's step `s` (attempt 2), already
+/// `waiting_branches`, with the given seat, table and start.
+fn waiting_row(
+    r: &Rig,
+    c: &Connection,
+    seat: Option<&str>,
+    table: Option<&str>,
+    started_at: Option<&str>,
+) -> String {
+    let run = r.new_run(&["s"]);
+    let id = new_id();
+    c.execute(
+        "INSERT INTO step_runs (id, run_id, step_key, seq, attempt, status, output, taint, updated_at, started_at, finished_at, seat, writes_table)
+         VALUES (?1, ?2, 's', 0, 2, 'waiting_branches', NULL, 0, '2026-11-24T10:00:00.000Z', ?3, NULL, ?4, ?5)",
+        params![id, run.id, started_at, seat, table],
+    )
+    .expect("a waiting_branches attempt made by hand");
+    id
+}
+
+/// AD-8's fan-in edges are allowed: a fresh queued attempt moves to
+/// `waiting_branches` (its join not met) and back to `queued` (its join
+/// met), having no seat, no table and no `started_at`; it then starts as
+/// any queued attempt does and journals its writes.
+#[test]
+fn the_fan_in_edges_of_ad_8_are_allowed() {
+    let r = rig();
+    let id = r.latest(&r.run, "collect").id;
+    let c = r.raw();
+
+    set_status(&c, &id, "waiting_branches");
+    let back = c.execute(
+        "UPDATE step_runs SET status = 'queued' WHERE id = ?1",
+        params![id],
+    );
+    assert_eq!(
+        back.as_ref().ok(),
+        Some(&1),
+        "waiting_branches → queued, the join met: {back:?}"
+    );
+    drop(c);
+
+    let a = r.begin(&r.run, "collect", Some(TABLE), None, Taint::Clean);
+    assert_eq!(a.id, id);
+    assert_eq!(r.step(&id).status, "running");
+    assert_eq!(
+        r.reader().attempt_writes(&id).unwrap(),
+        Some(writes(Some(TABLE), None))
+    );
+}
+
+/// No status but `waiting_branches` goes back to `queued`: from each of
+/// `running`, `waiting_human`, `waiting_review`, `succeeded`, `failed`,
+/// `cancelled` and `looped_back`, a raw move to `queued` is aborted with "an
+/// attempt never goes back to queued", and the attempt stays as it was.
+#[test]
+fn no_status_but_waiting_branches_goes_back_to_queued() {
+    let r = rig();
+    let c = r.raw();
+    for status in NOT_QUEUED {
+        let id = fresh_attempt(&r);
+        set_status(&c, &id, status);
+        let before = r.step(&id);
+
+        let words = aborted_with(
+            c.execute(
+                "UPDATE step_runs SET status = 'queued' WHERE id = ?1",
+                params![id],
+            ),
+            status,
+        );
+
+        assert!(
+            words.contains("an attempt never goes back to queued"),
+            "{status}: {words}"
+        );
+        assert_eq!(r.step(&id), before, "{status}: as it was");
+    }
+}
+
+/// An attempt waits for branches only from `queued` (AD-8's one edge in):
+/// from each of `running`, `waiting_human`, `waiting_review`, `succeeded`,
+/// `failed`, `cancelled` and `looped_back`, a raw move to
+/// `waiting_branches` is aborted with "an attempt waits for branches only
+/// from queued", and the attempt stays as it was.
+#[test]
+fn only_a_queued_attempt_waits_for_branches() {
+    let r = rig();
+    let c = r.raw();
+    for status in NOT_QUEUED {
+        let id = fresh_attempt(&r);
+        set_status(&c, &id, status);
+        let before = r.step(&id);
+
+        let words = aborted_with(
+            c.execute(
+                "UPDATE step_runs SET status = 'waiting_branches' WHERE id = ?1",
+                params![id],
+            ),
+            status,
+        );
+
+        assert!(
+            words.contains("an attempt waits for branches only from queued"),
+            "{status}: {words}"
+        );
+        assert_eq!(r.step(&id), before, "{status}: as it was");
+    }
+}
+
+/// `waiting_branches → queued` is only for an attempt that never started:
+/// a waiting row with a seat, with a table, or with a `started_at` (one
+/// case each) is refused the move with "only an attempt that never started
+/// goes back to queued", and stays `waiting_branches`.
+#[test]
+fn a_started_attempt_never_goes_back_from_waiting_branches() {
+    let r = rig();
+    let c = r.raw();
+    for (what, seat, table, started_at) in [
+        ("a seat", Some(SEAT), None, None),
+        ("a table", None, Some(TABLE), None),
+        ("a start", None, None, Some("2026-11-24T10:00:00.000Z")),
+    ] {
+        let id = waiting_row(&r, &c, seat, table, started_at);
+
+        let words = aborted_with(
+            c.execute(
+                "UPDATE step_runs SET status = 'queued' WHERE id = ?1",
+                params![id],
+            ),
+            what,
+        );
+
+        assert!(
+            words.contains("only an attempt that never started goes back to queued"),
+            "{what}: {words}"
+        );
+        assert_eq!(r.step(&id).status, "waiting_branches", "{what}");
+    }
+}
+
+/// The round trip `running → waiting_branches → queued` is refused at its
+/// first step: a started attempt with its writes journaled is refused the
+/// move to `waiting_branches` with "an attempt waits for branches only from
+/// queued"; the move to `queued` is refused too; the attempt, its seat and
+/// its table stay as they were.
+#[test]
+fn the_round_trip_through_waiting_branches_is_refused() {
+    let r = rig();
+    let a = r.begin(&r.run, "collect", Some(TABLE), None, Taint::Clean);
+    let before = r.state();
+    let c = r.raw();
+
+    let words = aborted_with(
+        c.execute(
+            "UPDATE step_runs SET status = 'waiting_branches' WHERE id = ?1",
+            params![a.id],
+        ),
+        "running → waiting_branches",
+    );
+    assert!(
+        words.contains("an attempt waits for branches only from queued"),
+        "{words}"
+    );
+    aborted_with(
+        c.execute(
+            "UPDATE step_runs SET status = 'queued' WHERE id = ?1",
+            params![a.id],
+        ),
+        "running → queued",
+    );
+    drop(c);
+
+    assert_eq!(r.state(), before, "the attempt as it was");
+    assert_eq!(r.step(&a.id).status, "running");
+    assert_eq!(
+        r.reader().attempt_writes(&a.id).unwrap(),
+        Some(writes(Some(TABLE), None))
+    );
+}

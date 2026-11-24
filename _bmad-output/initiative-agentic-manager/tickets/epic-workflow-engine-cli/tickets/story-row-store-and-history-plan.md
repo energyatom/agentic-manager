@@ -740,7 +740,7 @@ An Opus follow-up review read round 1. It confirms R1–R13 and R2b hold, and fi
 These are the tester's tests for review triage round 2. Seven tests are appended to `crates/am-store/tests/rows.rs`, with no `src/` change, and `cargo fmt --all` passes.
 - Commands, on the checkout with `CARGO_TARGET_DIR=/Users/hiteshmamgain/cargo-target/agentic-manager`:
   - `cargo nextest run -p am-store --test rows --no-fail-fast`: 48 run, 41 passed (every earlier test, round 1 included), 7 failed (the new ones);
-  - `cargo clippy -p am-store --tests -D warnings`: clean.
+  - `cargo clippy -p am-store --tests -- -D warnings`: clean.
 - Words pinned (tester's choice): T1(a)'s new guard is `an attempt is never replaced`. The other guards' words are as implemented.
 
 | Row | Test | Red reason |
@@ -845,11 +845,12 @@ The no-requeue guard adds 8 more lines of SQL. The slice's code is about 1,230 l
 
 **Size (owner rule: code and test lines reported separately):** 1,288 lines of code (source and migration, doc comments included) and 3,844 lines of tests.
 
-**Tests:** 48 store tests in `rows.rs`, plus migration tests, xtask tests for rows 48 and 49, doctests, and literal updates. Every test was written and seen red first, with red runs logged for the build and both review rounds. `just check`: 1455 passed, 8 skipped.
+**Tests:** 48 store tests in `rows.rs`, plus migration tests, xtask tests for rows 48 and 49, doctests, and literal updates. Every test was written and seen red first, with red runs logged for the build and both review rounds. `just check`: 1460 passed, 8 skipped (after round 3).
 
 **Review:** a correctness review and an adversarial security review, then a follow-up review, all on Opus. None found a way through the row command.
 - Round 1 fixed R1–R13 and R2b. The worst was a rowid collision that could re-create a tainted row clean.
 - Round 2 fixed T1–T6. T1(b) was closed by the never-back-to-`queued` guard, because the `started_at` clause conflicted with a 3.3 fixture.
+- Round 3 (owner, 2026-11-24) brought that guard in line with AD-8. A move to `queued` is refused except from `waiting_branches`, the fan-in edge story 3.14 builds. A move into `waiting_branches` is refused except from `queued`. `waiting_branches → queued` is refused when the row has a seat, a table or a `started_at`.
 - D1–D4 are accepted, with reasons above.
 
 **For the owner:**
@@ -862,3 +863,49 @@ The no-requeue guard adds 8 more lines of SQL. The slice's code is about 1,230 l
   - a proc-macro could hide a name from check-deps (D3);
   - `Actor::Seat` carries no attempt id, which matters for 3.14 (D2);
   - deleting a tool call stays possible, for AD-25 run deletion (D1).
+
+Round 3 (owner, 2026-11-24): the no-requeue guard must allow AD-8's `waiting_branches → queued` edge (story 3.14). The owner's terms:
+- every other move to `queued` is refused;
+- a move into `waiting_branches` comes only from `queued`;
+- `waiting_branches → queued` is refused for a row with a seat, a table or a `started_at`.
+
+### Red run round 3 (store slice, 2026-11-24)
+
+The tester's response, tests first. Five tests are appended to `crates/am-store/tests/rows.rs`, with no `src/` change, and `cargo fmt --all` passes.
+
+**Words pinned** (tester's choice):
+- `an attempt waits for branches only from queued`: a move into `waiting_branches` from any status but `queued`;
+- `only an attempt that never started goes back to queued`: `waiting_branches → queued` on a row with a seat, a table or a `started_at`;
+- `an attempt never goes back to queued` stays the words for every other move to `queued`.
+
+**Commands** (`CARGO_TARGET_DIR=/Users/hiteshmamgain/cargo-target/agentic-manager`):
+- `cargo nextest run -p am-store --test rows --no-fail-fast`: 53 run, 49 passed, 4 failed;
+- `cargo clippy -p am-store --tests -- -D warnings`: clean.
+
+| Test | Covers | Today |
+|---|---|---|
+| `the_fan_in_edges_of_ad_8_are_allowed` | the allowed edges: `queued → waiting_branches` on a fresh attempt, then `waiting_branches → queued` (no seat, table or `started_at`); the attempt then starts and journals its writes | **red**: the edge back is refused, `Some("an attempt never goes back to queued")` |
+| `no_status_but_waiting_branches_goes_back_to_queued` | a move to `queued` from `running`, `waiting_human`, `waiting_review`, `succeeded`, `failed`, `cancelled` and `looped_back` is refused with "an attempt never goes back to queued", and the row is unchanged | green on arrival: today's guard refuses every move to `queued` |
+| `only_a_queued_attempt_waits_for_branches` | a move into `waiting_branches` from each of those seven statuses is refused with the new words, and the row is unchanged | **red**: "running: must abort, changed 1 row(s)" |
+| `a_started_attempt_never_goes_back_from_waiting_branches` | three `waiting_branches` rows made by hand, one with a seat, one with a table, one with a `started_at`; `→ queued` is refused with the new words | **red** on words: today's guard refuses with "an attempt never goes back to queued" |
+| `the_round_trip_through_waiting_branches_is_refused` | `running → waiting_branches → queued` on a started attempt with writes: refused at the first step with the new words, the second step refused too, and the attempt, its seat and table unchanged | **red**: "running → waiting_branches: must abort, changed 1 row(s)" |
+| `a_status_round_trip_never_reopens_an_attempts_writes` (round 2) | unchanged | green: it still holds |
+
+The `.git/wip` patches are untouched. The ToolGate tests are stashed by the manager.
+
+### Implementation round 3 (store slice, 2026-11-24)
+
+*Implementer, on Opus, against the owner's decision of 2026-11-24 and "Red run round 3". Only migration 0010 changed, in place (+15/−5 lines). No test file or `src/` file changed; no `--workspace` build; nothing was recorded in git.*
+
+**Built:** three guards on `step_runs.status`, in place of round 2's single `step_runs_never_requeued`:
+- **`step_runs_never_requeued`:** a move to `queued` from any status but `queued` and `waiting_branches` aborts, with "an attempt never goes back to queued".
+- **`step_runs_requeued_only_unstarted`:** `waiting_branches → queued` aborts when the row has a `seat`, a `writes_table` or a `started_at`, with "only an attempt that never started goes back to queued".
+- **`step_runs_waits_for_branches_from_queued`:** a move into `waiting_branches` from any status but `queued` (or `waiting_branches`) aborts, with "an attempt waits for branches only from queued".
+
+So AD-8's fan-in edges, `queued → waiting_branches → queued`, pass for an attempt that never started, and round 2's T1(b) test still holds. The `OLD.started_at` clause stays out of `step_runs_writes_set_at_start`.
+
+**Verification:**
+- `--test rows`: 53 of 53 pass.
+- `cargo test --doc -p am-store -p am-domain`: green.
+
+**Final `just check`:** green (exit 0). `Summary [56.182s] 1460 tests run: 1460 passed, 8 skipped`.
