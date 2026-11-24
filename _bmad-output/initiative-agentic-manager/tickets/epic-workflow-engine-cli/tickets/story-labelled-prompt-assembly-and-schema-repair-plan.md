@@ -63,6 +63,7 @@ The ticket's verify: a step whose seat has a goal, a backstory, one attached ski
   - A remote or file `$ref`, or a pattern the linear-time engine refuses, refuses the run in words.
 - **Taint never launders (AD-10):** a repair neither adds nor clears taint. Assembly changes no step's taint. Journaled prompt text is marked at rest with the attempt's taint.
 - **Audit hashes of free text (owner decision 2026-11-24; story 9.10 swaps in a keyed hash):** this story adds no new free-text hash to any audit arg by any other path. A repair call's settle or finish, and the Failure item's step finish, hash model output only through the one existing helper (`audit::sha256_hex`, am-store `audit.rs` L35, as `output_sha256` at `lib.rs` L435, L518, L535, L1207 does), so 9.10 changes one place. Validation words, prompt text and part text are never hashed into audit args; ids, counts and the purpose are used instead. File and config hashes stay bare.
+- **New callers of `Instruction::authored` (owner, 2026-11-24):** any new call site of `Instruction::authored`, and any change to what an existing site passes to it, must go through the same security review as this story (an adversarial security review of what reaches the call). The type-wall check (`cargo xtask check-deps`) bans names, not data flow, so it cannot catch a plain string passed through.
 - **Tests first:** every test in the Tests-first list is written and seen red, with its reason logged, before any `src/` change. FakeLlm, FakeClock and FakeEgress only; no network, no real model.
 
 **Never:**
@@ -166,6 +167,7 @@ The ticket's verify: a step whose seat has a goal, a backstory, one attached ski
 
 ## Plan Change Log
 
+- 2026-11-24, owner: any new caller of `Instruction::authored` must go through the same security review, since the type-wall check cannot catch a plain string passed through (Boundaries, Always).
 - 2026-11-24, manager: Q1–Q3 decided under the owner's standing rules (each option (a), reasons in Questions for the owner); no owner-level question remains. Owner direction (2026-11-24): 3.5 runs on Sonnet. Audit hashes of free text follow the owner's keyed-hash decision (Boundaries; built in 9.10).
 
 ## Design Notes
@@ -694,6 +696,6 @@ Existing tests changed: `check_deps.rs::instruction_authored_is_called_only_at_i
   - A new `impl From<UntrustedData> for Part` yields only `Part::Untrusted`.
   - `file_label`, which attaches a native file, is hardened too.
 - **Residuals:**
-  - The site rule bans names, not data flow, so what a site file passes to `authored` remains a review check.
+  - The site rule bans names, not data flow, so what a site file passes to `authored` remains a review check. Owner rule (2026-11-24): any new caller of `authored`, or a change to what a site passes it, gets the same security review as this story.
   - Plan inputs have no size cap and no worded refusal of duplicate labels (D2, D5) until a story gives them a source.
   - An opening fence tag inside fenced data stays literal (D3).
