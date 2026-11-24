@@ -98,6 +98,11 @@ fn rig() -> Rig {
             inputs: vec![],
             taint: Taint::Clean,
             prompt: vec![],
+            writes: am_store::AttemptWrites {
+                seat: "seat-a".into(),
+                table: None,
+                document: None,
+            },
         },
     )
     .unwrap();
@@ -206,6 +211,11 @@ impl Rig {
                 inputs: vec![],
                 taint: Taint::Clean,
                 prompt: vec![],
+                writes: am_store::AttemptWrites {
+                    seat: "seat-a".into(),
+                    table: None,
+                    document: None,
+                },
             },
         )
         .unwrap();
@@ -486,6 +496,11 @@ fn nothing_leaves_waiting_human() {
             inputs: vec![],
             taint: Taint::Clean,
             prompt: vec![],
+            writes: am_store::AttemptWrites {
+                seat: "seat-a".into(),
+                table: None,
+                document: None,
+            },
         },
     )
     .unwrap();
@@ -521,6 +536,11 @@ fn nothing_leaves_waiting_human() {
                 inputs: vec![],
                 taint: Taint::Clean,
                 prompt: vec![],
+                writes: am_store::AttemptWrites {
+                    seat: "seat-a".into(),
+                    table: None,
+                    document: None,
+                },
             },
         ),
         (
@@ -607,6 +627,11 @@ fn the_writer_refuses_an_edge_ad_8_does_not_have() {
             inputs: vec![],
             taint: Taint::Clean,
             prompt: vec![],
+            writes: am_store::AttemptWrites {
+                seat: "seat-a".into(),
+                table: None,
+                document: None,
+            },
         },
         WriteCommand::FinishStep {
             step_run_id: r.draft.clone(),
@@ -762,6 +787,11 @@ fn an_input_from_an_unfinished_producer_is_refused() {
         inputs: vec![from(producer)],
         taint: Taint::Clean,
         prompt: vec![],
+        writes: am_store::AttemptWrites {
+            seat: "seat-a".into(),
+            table: None,
+            document: None,
+        },
     };
     // A queued producer.
     assert!(
@@ -783,6 +813,11 @@ fn an_input_from_an_unfinished_producer_is_refused() {
                 inputs: vec![],
                 taint: Taint::Clean,
                 prompt: vec![],
+                writes: am_store::AttemptWrites {
+                    seat: "seat-a".into(),
+                    table: None,
+                    document: None,
+                },
             },
         )
         .unwrap();
@@ -821,6 +856,11 @@ fn an_input_from_an_unfinished_producer_is_refused() {
                 }],
                 taint: Taint::Clean,
                 prompt: vec![],
+                writes: am_store::AttemptWrites {
+                    seat: "seat-a".into(),
+                    table: None,
+                    document: None,
+                },
             },
         )
         .unwrap();
@@ -844,6 +884,11 @@ fn a_loop_back_never_crosses_a_waiting_step() {
             inputs: vec![],
             taint: Taint::Clean,
             prompt: vec![],
+            writes: am_store::AttemptWrites {
+                seat: "seat-a".into(),
+                table: None,
+                document: None,
+            },
         },
     )
     .unwrap();
@@ -897,6 +942,11 @@ fn the_reservation_audit_carries_the_taint() {
             inputs: vec![],
             taint: Taint::Clean,
             prompt: vec![],
+            writes: am_store::AttemptWrites {
+                seat: "seat-a".into(),
+                table: None,
+                document: None,
+            },
         },
     )
     .unwrap();
@@ -955,6 +1005,11 @@ fn start(r: &Rig, id: &str) -> Result<(), StoreError> {
             inputs: vec![],
             taint: Taint::Clean,
             prompt: vec![],
+            writes: am_store::AttemptWrites {
+                seat: "seat-a".into(),
+                table: None,
+                document: None,
+            },
         },
     )
 }
@@ -1046,6 +1101,11 @@ fn nothing_starts_or_pauses_on_a_finished_run() {
                 inputs: vec![],
                 taint: Taint::Clean,
                 prompt: vec![],
+                writes: am_store::AttemptWrites {
+                    seat: "seat-a".into(),
+                    table: None,
+                    document: None,
+                },
             },
         ),
         ("PauseStep", r.pause(&new_id())),
@@ -1080,6 +1140,11 @@ fn nothing_starts_or_pauses_while_another_step_waits() {
                 inputs: vec![],
                 taint: Taint::Clean,
                 prompt: vec![],
+                writes: am_store::AttemptWrites {
+                    seat: "seat-a".into(),
+                    table: None,
+                    document: None,
+                },
             },
         ),
         (
@@ -1183,6 +1248,11 @@ fn an_inputs_kind_decides_its_producer_and_taint() {
                 }],
                 taint: Taint::Clean,
                 prompt: vec![],
+                writes: am_store::AttemptWrites {
+                    seat: "seat-a".into(),
+                    table: None,
+                    document: None,
+                },
             },
         )
         .unwrap();
@@ -1233,6 +1303,11 @@ fn an_inputs_kind_decides_its_producer_and_taint() {
                 inputs: vec![input],
                 taint: Taint::Clean,
                 prompt: vec![],
+                writes: am_store::AttemptWrites {
+                    seat: "seat-a".into(),
+                    table: None,
+                    document: None,
+                },
             },
         );
         assert!(refused.is_err(), "{what}");

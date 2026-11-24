@@ -8,7 +8,7 @@
 #![forbid(unsafe_code)]
 
 use am_domain::{Actor, InboxKind, Taint, Usage};
-use am_store::{NewInboxItem, StepInput, Store, WriteCommand, new_id};
+use am_store::{AttemptWrites, NewInboxItem, StepInput, Store, WriteCommand, new_id};
 
 fn engine() -> Actor {
     Actor::System {
@@ -70,6 +70,11 @@ fn tainted_first_step(dir: &std::path::Path, steps: &[&str]) -> (Store, String, 
             inputs: vec![untrusted_input()],
             taint: Taint::Tainted,
             prompt: vec![],
+            writes: AttemptWrites {
+                seat: "seat-draft".into(),
+                table: None,
+                document: None,
+            },
         },
     )
     .unwrap();
@@ -148,6 +153,11 @@ fn no_command_clears_a_step_or_item_taint() {
             inputs: vec![],
             taint: Taint::Clean,
             prompt: vec![],
+            writes: AttemptWrites {
+                seat: "seat-draft".into(),
+                table: None,
+                document: None,
+            },
         },
     );
     assert!(again.is_err(), "a finished attempt does not start again");

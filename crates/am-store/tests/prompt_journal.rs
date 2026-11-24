@@ -241,11 +241,9 @@ fn migration_0009_keeps_every_row_and_the_pre_migration_copy() {
 
     let (store, report) = open_project(dir.path()).unwrap();
 
-    assert_eq!(
-        SCHEMA_VERSION,
-        BEFORE_PROMPT_PARTS + 1,
-        "0009 is this story's"
-    );
+    // Story 3.6 adds 0010 after it: the 8 to 9 step is applied (and later
+    // steps after it), not necessarily the last.
+    const { assert!(SCHEMA_VERSION > BEFORE_PROMPT_PARTS) };
     assert_eq!(report.version, SCHEMA_VERSION);
     let step = report
         .applied
@@ -381,7 +379,14 @@ fn reopening_a_version_9_database_applies_nothing() {
     let path = database_at_8(dir.path());
     rows_at_8(&path);
     let (store, first) = open_project(dir.path()).unwrap();
-    assert_eq!(first.applied.len(), 1, "{first:?}");
+    // Story 3.6: the 8 to 9 step is among the steps applied (0010 follows).
+    assert!(
+        first
+            .applied
+            .iter()
+            .any(|m| (m.from, m.to) == (BEFORE_PROMPT_PARTS, BEFORE_PROMPT_PARTS + 1)),
+        "{first:?}"
+    );
     drop(store);
     let before = tables_of(&path);
 
@@ -552,6 +557,11 @@ impl Rig {
             inputs: vec![],
             taint: Taint::Clean,
             prompt: minimal(),
+            writes: am_store::AttemptWrites {
+                seat: "seat-a".into(),
+                table: None,
+                document: None,
+            },
         })
         .unwrap();
         self.reserve(&self.a, "call-a", 1, CallPurpose::Turn, vec![])
@@ -582,6 +592,11 @@ impl Rig {
             inputs,
             taint,
             prompt,
+            writes: am_store::AttemptWrites {
+                seat: "seat-a".into(),
+                table: None,
+                document: None,
+            },
         })
     }
 

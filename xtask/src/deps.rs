@@ -41,6 +41,19 @@
 //! handlers ([`RESOLVE_SITES`]) and `#[cfg(test)]` items of am-store.
 //! Review S5: in am-domain only `actor.rs` and `lib.rs`'s plain re-export,
 //! and in every file an `as` alias or a `pub use` of either fails.
+//!
+//! Story 3.6, the store slice (AD-21; the owner's condition of the third
+//! re-slice and the manager's row 49, 2026-11-24): names unique in
+//! `crates/`, matched as bare tokens over whole files, so a split line,
+//! spacing, a path call, a function value, a turbofish, `r#` or a `use …
+//! as` alias of the store's `Reader` is still seen (review round 1, R4):
+//!
+//! - the store's row command, `apply_row_write`, stands in shipped code
+//!   only in `crates/am-store/src/` ([`ROW_HOME`]): nothing else calls it
+//!   until the ToolGate slice adds its one caller;
+//! - the readers of row content on the store's `Reader` ([`ROW_READERS`])
+//!   stand there only too; the data-free receipt (`row_receipt`) is not
+//!   one of them.
 
 use crate::Failure;
 use crate::forbid::{strip_comments_and_strings, unterminated_finding};
@@ -115,6 +128,21 @@ const RESOLVE_HOME: &str = "crates/am-store/src/lib.rs";
 /// the resolve).
 const RESOLVE_TEST_CRATE: &str = "crates/am-store/src/";
 
+/// The store's row command (story 3.6, the store slice; AD-21).
+const ROW_COMMAND: &str = "apply_row_write";
+
+/// The store `Reader`'s methods that read row content (story 3.6, row 49),
+/// named uniquely in `crates/` (review round 1, R4).
+const ROW_READERS: [&str; 4] = [
+    "table_rows_of",
+    "table_row_by_id",
+    "row_history_of",
+    "row_written_at",
+];
+
+/// The one place in shipped code that names them: am-store's own source.
+const ROW_HOME: &str = "crates/am-store/src/";
+
 /// Every finding of the call-site rules on the shipped source under
 /// `root`.
 fn call_site_findings(root: &Path) -> Vec<String> {
@@ -171,6 +199,7 @@ fn call_site_findings(root: &Path) -> Vec<String> {
             findings.extend(site_findings(&source.name, &code, &findings));
         }
         findings.extend(resolve_findings(&source.name, &code, &tests));
+        findings.extend(row_findings(&source.name, &code));
         findings.extend(alias_findings(&source.name, &code, &ALIASED_TYPES));
     }
     findings
@@ -340,6 +369,38 @@ fn resolve_findings(name: &str, code: &str, tests: &[(usize, usize)]) -> Vec<Str
     findings
 }
 
+/// Story 3.6, the store slice (AD-21; rows 48 and 49): outside
+/// [`ROW_HOME`], the token `apply_row_write` or a [`ROW_READERS`] name
+/// anywhere in a file's code (comments and literals left out). Each finding
+/// names its line and the exact name.
+fn row_findings(name: &str, code: &str) -> Vec<String> {
+    if name.starts_with(ROW_HOME) {
+        return Vec::new();
+    }
+    let mut findings = Vec::new();
+    let lines: BTreeSet<usize> = token_offsets(code, ROW_COMMAND)
+        .into_iter()
+        .map(|at| line_at(code, at))
+        .collect();
+    for line in lines {
+        findings.push(format!(
+            "{name}:{line}: names {ROW_COMMAND}, the store's row command; until the ToolGate slice adds its one caller, it stands in shipped code only in {ROW_HOME} (the owner's condition for story 3.6: no engine, app, server or tool path writes a row yet; AD-21)"
+        ));
+    }
+    let mut named: BTreeSet<(usize, &str)> = BTreeSet::new();
+    for reader in ROW_READERS {
+        for at in token_offsets(code, reader) {
+            named.insert((line_at(code, at), reader));
+        }
+    }
+    for (line, reader) in named {
+        findings.push(format!(
+            "{name}:{line}: names {reader}, a reader of row content on the store's Reader; no shipped code outside {ROW_HOME} reads a row's data (story 3.6, manager 2026-11-24: no step reads rows before story 3.6c; the data-free row_receipt is allowed; AD-21)"
+        ));
+    }
+    findings
+}
+
 /// What `am-domain` may use besides std (AD-4: no IO, no async runtime).
 const DOMAIN_EXTERNALS: &[&str] = &["serde", "thiserror", "jiff", "uuid"];
 
@@ -471,7 +532,7 @@ pub fn run(metadata: Option<&Path>, root: &Path) -> Result<String, Failure> {
     let calls = call_site_findings(root);
     match check(&doc) {
         Ok(summary) if calls.is_empty() => Ok(format!(
-            "{summary}; only am-engine builds a TrustedInput, and Instruction::authored is called only at its listed sites (AD-10); only the two command handlers name the Inbox resolve and HumanActor outside am-domain and am-store (AD-15)"
+            "{summary}; only am-engine builds a TrustedInput, and Instruction::authored is called only at its listed sites (AD-10); only the two command handlers name the Inbox resolve and HumanActor outside am-domain and am-store (AD-15); no shipped code outside am-store writes or reads a row (AD-21)"
         )),
         Ok(_) => Err(Failure::Findings(calls)),
         Err(Failure::Findings(mut findings)) => {

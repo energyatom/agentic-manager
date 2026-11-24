@@ -48,6 +48,15 @@
 //! other transition of a gate attempt whose Review a person resolved. A
 //! return's note is stored once, on the item; the producer's new attempt
 //! refers to it with a `gate_note` input (`step_inputs.from_item`).
+//!
+//! Epic 3 story 6, the store slice (AD-8, AD-10, AD-21, AD-24, AD-25): rows
+//! live in one generic store with an append-only history of after-images
+//! (migration 0010). An attempt journals what it may write when it starts
+//! ([`AttemptWrites`]: its seat and its one table); the one row command,
+//! [`Writer::apply_row_write`] (not a [`WriteCommand`]), writes a row for
+//! the attempt's own seat, with its after-image, its own taint and the
+//! `table_write` call's finish, in one transaction (see `rows`). A finished
+//! tool call carries its result's kind on its journal row.
 #![forbid(unsafe_code)]
 
 use std::collections::BTreeMap;
@@ -55,6 +64,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, mpsc};
 use std::thread;
 
+use am_domain::rows::RowWrite;
 use am_domain::{Actor, Decision, HumanActor, InboxKind, NewIntent, StepStatus, Taint, Usage};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use serde_json::{Value, json};
@@ -66,6 +76,7 @@ pub mod legacy;
 mod migrations;
 pub mod project;
 mod prompt;
+mod rows;
 pub mod user;
 
 pub use audit::{ChainBreak, ChainOk, ConfigNote, verify_jsonl};
@@ -75,6 +86,7 @@ pub use migrations::{AppliedMigration, OpenReport, PRE_MIGRATION_KEPT, SCHEMA_VE
 use project::ProjectLock;
 pub use project::{LockHolder, lock_holder, lock_is_held, open_runtime, open_runtime_unchanged};
 pub use prompt::{CallPurpose, NewPromptPart, PromptKind, PromptPartRow, PromptSlot};
+pub use rows::{ROW_MAX_BYTES, ROW_MAX_COLUMNS, RowHistoryRecord, RowReceipt, RowRecord};
 
 /// The project store's `application_id` (story 2.12, AD-7): stamped on
 /// every project database, so this Mac's user store
@@ -176,6 +188,12 @@ pub enum StoreError {
     WriterGone,
     #[error("{0}")]
     Invalid(String),
+    /// Story 3.6 (owner Q2): a row write the row's state refuses: an
+    /// update read at a version the row is no longer (or not yet) at, or
+    /// of a row the table does not hold. The words name the row and its
+    /// current version, never a value of the write.
+    #[error("{0}")]
+    RowRefused(String),
     #[error("no pending config intent {0}")]
     NoConfigIntent(String),
 }
@@ -242,11 +260,18 @@ pub enum WriteCommand {
     /// untrusted part with taint clear, and an input part whose label no
     /// input of the attempt holds; an untrusted part raises the attempt's
     /// taint. Audited with the part count, never a part's text.
+    ///
+    /// Story 3.6, the store slice (AD-21): `writes` is what the attempt may
+    /// write, journaled on it in the same transaction and never changed:
+    /// the seat that runs it (the one `Actor::Seat` that writes its rows)
+    /// and the one table it may write (`None`: no row). A document is
+    /// refused in words until story 3.6b.
     StartAttempt {
         step_run_id: String,
         inputs: Vec<StepInput>,
         taint: Taint,
         prompt: Vec<NewPromptPart>,
+        writes: AttemptWrites,
     },
     /// Journal the call and reserve its spend, before the call is made (AD-8, AD-9).
     /// The step must be `running`. `taint` raises the attempt's taint in the
@@ -354,7 +379,9 @@ pub enum WriteCommand {
         status: String,
     },
     /// Story 3.3: an `issued` tool call ended, `succeeded` or `failed`.
-    /// Audited `tool_call.finished`.
+    /// Audited `tool_call.finished`. Story 3.6 (AD-8, AD-10 as amended):
+    /// its result's kind is `untrusted`, labelled `tool:<tool>`, on its
+    /// journal row; only the row command finishes a call with `engine`.
     FinishToolCall {
         tool_call_id: String,
         status: String,
@@ -628,6 +655,20 @@ impl WriteCommand {
 /// gate note), `from_item` the Inbox item a `gate_note` refers to (`None`
 /// otherwise). The text stays where it was written (AD-43: never stored
 /// twice): a note stays on its item.
+///
+/// The store slice of story 3.6 (owner: no read path for a step yet; matrix
+/// row 42): an input names no row. Story 3.6c adds `from_row` and removes
+/// this doctest.
+///
+/// ```compile_fail
+/// let _ = |i: am_store::StepInput| i.from_row;
+/// ```
+///
+/// while the input's other fields are read as before:
+///
+/// ```
+/// let _ = |i: am_store::StepInput| (i.kind, i.from_step_run, i.from_item, i.label, i.taint);
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StepInput {
     pub kind: String,
@@ -635,6 +676,19 @@ pub struct StepInput {
     pub from_item: Option<String>,
     pub label: String,
     pub taint: Taint,
+}
+
+/// What a step attempt may write (story 3.6, the store slice; AD-21,
+/// RULE-8), journaled when it starts and never changed: `seat` is the seat
+/// that runs it (a blank one is journaled as none), `table` the one config
+/// table it may write (`None`: none).
+/// `document` is refused in words until story 3.6b versions documents.
+/// Read back with [`Reader::attempt_writes`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttemptWrites {
+    pub seat: String,
+    pub table: Option<String>,
+    pub document: Option<String>,
 }
 
 /// An Inbox item to create (AD-28; story 3.3). `payload` is the step run
@@ -683,6 +737,9 @@ type Reply = mpsc::Sender<Result<(), StoreError>>;
 pub(crate) enum Command {
     Write(WriteCommand),
     Resolve(Resolve),
+    /// A seat's row write, which only [`Writer::apply_row_write`] sends
+    /// (story 3.6: no `WriteCommand` writes a row).
+    Row(RowWrite),
 }
 
 /// A person's decision on an Inbox item, as [`Writer::resolve_inbox_item`]
@@ -822,6 +879,27 @@ impl Writer {
         )
     }
 
+    /// Story 3.6, the store slice (AD-8, AD-10, AD-21, AD-24, AD-25): a
+    /// seat's insert or update of one row, the one row command; not a
+    /// [`WriteCommand`], so [`Writer::exec`] writes no row. `actor` must be
+    /// the attempt's own `Actor::Seat` (its run, its step, the seat it
+    /// journaled), the attempt `running`, the call at (`step_run_id`,
+    /// `call_seq`) an `issued` `table_write` call with `tool_call_id`, and
+    /// the table the one the attempt journaled. In one transaction: the
+    /// after-image, the row (its taint the highest of the attempt's
+    /// committed taint, the write's and the row's), the call `succeeded`
+    /// with its result kind `engine`, and `row.written` (ids, op, version,
+    /// call sequence, taint, a column count; never the row's data). A key
+    /// that holds its write already writes nothing and returns `Ok`. An
+    /// update read at another version, or of a row the table does not
+    /// hold, is [`StoreError::RowRefused`]; every refusal writes nothing.
+    ///
+    /// Until the ToolGate slice, no shipped code outside am-store calls it
+    /// (`cargo xtask check-deps`, the owner's condition).
+    pub fn apply_row_write(&self, actor: Actor, write: RowWrite) -> Result<(), StoreError> {
+        self.send(actor, Command::Row(write))
+    }
+
     /// Sends one job to the writer thread; returns after it committed (or
     /// was refused).
     fn send(&self, actor: Actor, cmd: Command) -> Result<(), StoreError> {
@@ -845,6 +923,8 @@ fn configure(conn: &Connection) -> Result<(), StoreError> {
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "synchronous", "FULL")?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
+    // Story 3.6, review R3: a REPLACE's delete fires the delete guards.
+    conn.pragma_update(None, "recursive_triggers", "ON")?;
     conn.busy_timeout(std::time::Duration::from_secs(5))?;
     Ok(())
 }
@@ -888,6 +968,7 @@ impl Store {
                     let r = match &cmd {
                         Command::Write(cmd) => apply(&mut conn, &actor, cmd),
                         Command::Resolve(resolve) => apply_resolve(&mut conn, &actor, resolve),
+                        Command::Row(write) => rows::apply_row_write(&mut conn, &actor, write),
                     };
                     let _ = reply.send(r);
                 }
@@ -1106,7 +1187,7 @@ pub(crate) fn execute(
                 |r| r.get(0),
             )?;
             if known {
-                start_attempt(tx, step_run_id, &[], Taint::Clean, &[], &now)?;
+                start_attempt(tx, step_run_id, &[], Taint::Clean, &[], None, &now)?;
             }
             built = Some(vec![(
                 "step.started".into(),
@@ -1119,6 +1200,7 @@ pub(crate) fn execute(
             inputs,
             taint,
             prompt,
+            writes,
         } => {
             built = Some(vec![start_attempt(
                 tx,
@@ -1126,6 +1208,7 @@ pub(crate) fn execute(
                 inputs,
                 *taint,
                 prompt,
+                Some(writes),
                 &now,
             )?]);
         }
@@ -1265,7 +1348,15 @@ pub(crate) fn execute(
             // step starts first (its inputs, taint and `started_at`), then
             // waits, in this one transaction (story 3.3, review P3).
             let journaled = if step.status == StepStatus::Queued {
-                entries.push(start_attempt(tx, step_run_id, inputs, *taint, &[], &now)?);
+                entries.push(start_attempt(
+                    tx,
+                    step_run_id,
+                    inputs,
+                    *taint,
+                    &[],
+                    None,
+                    &now,
+                )?);
                 0
             } else {
                 let (raised, journaled) = journal_inputs(tx, &step, inputs, *taint, &now)?;
@@ -1365,7 +1456,7 @@ pub(crate) fn execute(
                 )));
             }
             let n = tx.execute(
-                "UPDATE tool_calls SET status = ?2, finished_at = ?3 WHERE id = ?1 AND status = 'issued'",
+                "UPDATE tool_calls SET status = ?2, finished_at = ?3, result_kind = 'untrusted', result_label = 'tool:' || tool WHERE id = ?1 AND status = 'issued'",
                 params![tool_call_id, status, now],
             )?;
             if n != 1 {
@@ -1797,6 +1888,12 @@ fn finished_producer(
 /// The run of `step` is open to a step starting or pausing (review R4):
 /// it has not finished, and no other step of it waits for a person.
 fn run_open_for(tx: &rusqlite::Transaction, step: &StepState) -> Result<(), StoreError> {
+    run_open_to(tx, step, "starts or waits")
+}
+
+/// [`run_open_for`] for an action named by `what` (story 3.6: a row write,
+/// "writes a row"); the refusal says no step of the run does it.
+fn run_open_to(tx: &rusqlite::Transaction, step: &StepState, what: &str) -> Result<(), StoreError> {
     let (status, finished): (String, Option<String>) = tx.query_row(
         "SELECT status, finished_at FROM runs WHERE id = ?1",
         params![step.run_id],
@@ -1804,7 +1901,7 @@ fn run_open_for(tx: &rusqlite::Transaction, step: &StepState) -> Result<(), Stor
     )?;
     if finished.is_some() || matches!(status.as_str(), "succeeded" | "failed" | "cancelled") {
         return Err(StoreError::Invalid(format!(
-            "refused: run {} has finished ({status}), so no step of it starts or waits; nothing was changed",
+            "refused: run {} has finished ({status}), so no step of it {what}; nothing was changed",
             step.run_id
         )));
     }
@@ -1817,13 +1914,13 @@ fn run_open_for(tx: &rusqlite::Transaction, step: &StepState) -> Result<(), Stor
         .optional()?;
     if let Some(key) = waiting {
         return Err(StoreError::Invalid(format!(
-            "refused: step `{key}` of run {} waits for a person (waiting_human), so no other step of the run starts or waits until its Inbox item is resolved; nothing was changed",
+            "refused: step `{key}` of run {} waits for a person (waiting_human), so no other step of the run {what} until its Inbox item is resolved; nothing was changed",
             step.run_id
         )));
     }
     match unapplied_decision(tx, &step.run_id, Some(&step.id))? {
         Some((key, item)) => Err(StoreError::Invalid(format!(
-            "refused: a person resolved Inbox item {item} of step `{key}` of run {}, and the engine has not applied that decision yet, so no other step of the run starts or waits; nothing was changed",
+            "refused: a person resolved Inbox item {item} of step `{key}` of run {}, and the engine has not applied that decision yet, so no other step of the run {what}; nothing was changed",
             step.run_id
         ))),
         None => Ok(()),
@@ -1895,14 +1992,20 @@ fn no_step_waits(tx: &rusqlite::Transaction, run_id: &str) -> Result<(), StoreEr
 /// Starts the `queued` attempt `step_run_id` with its inputs and taint;
 /// its `step.started` entry. The attempt's taint is at least that of every
 /// input already journaled for it (a loop-back target's `loop_back` input).
+/// Story 3.6: `writes`, when given, is journaled on the attempt (a gate's
+/// start and `StartStep` journal none).
 fn start_attempt(
     tx: &rusqlite::Transaction,
     step_run_id: &str,
     inputs: &[StepInput],
     taint: Taint,
     prompt: &[NewPromptPart],
+    writes: Option<&AttemptWrites>,
     now: &str,
 ) -> Result<Entry, StoreError> {
+    if let Some(writes) = writes {
+        check_writes(writes)?;
+    }
     let step = step_of(tx, step_run_id)?;
     require(&step, &[StepStatus::Queued], "starts")?;
     run_open_for(tx, &step)?;
@@ -1916,9 +2019,16 @@ fn start_attempt(
     // Story 3.5: the prompt's own checks, after the inputs it names are
     // journaled; an untrusted part raises the attempt's taint.
     let taint = check_attempt_prompt(tx, step_run_id, prompt, taint)?;
+    // The writes are journaled by the one update that takes the attempt
+    // from `queued` to `running` (review R6: a trigger refuses any other);
+    // a blank seat is none (review R7: the spike's workflow runs no seat).
+    let seat = writes
+        .map(|w| w.seat.as_str())
+        .filter(|seat| !seat.trim().is_empty());
+    let table = writes.and_then(|w| w.table.as_deref());
     tx.execute(
-        "UPDATE step_runs SET status = 'running', taint = MAX(taint, ?3), started_at = COALESCE(started_at, ?2), updated_at = ?2 WHERE id = ?1",
-        params![step_run_id, now, flag(taint)],
+        "UPDATE step_runs SET status = 'running', taint = MAX(taint, ?3), started_at = COALESCE(started_at, ?2), updated_at = ?2, seat = ?4, writes_table = ?5 WHERE id = ?1",
+        params![step_run_id, now, flag(taint), seat, table],
     )?;
     insert_parts(tx, step_run_id, 0, prompt, now)?;
     Ok((
@@ -1926,6 +2036,29 @@ fn start_attempt(
         step_run_id.to_string(),
         Some(json!({"inputs": journaled, "prompt_parts": prompt.len(), "taint": flag(taint)})),
     ))
+}
+
+/// Story 3.6 (AD-21): what an attempt may write. A table is a config id
+/// and needs the seat that writes it; a document is 3.6b's.
+fn check_writes(writes: &AttemptWrites) -> Result<(), StoreError> {
+    if writes.document.is_some() {
+        return Err(StoreError::Invalid(
+            "refused: a step attempt writes no document until story 3.6b versions documents; nothing was changed".into(),
+        ));
+    }
+    if let Some(table) = &writes.table {
+        if table.trim().is_empty() || table.contains(char::is_control) {
+            return Err(StoreError::Invalid(
+                "refused: an attempt's table is named by its config id, and this one is empty or holds a control character; nothing was changed".into(),
+            ));
+        }
+        if writes.seat.trim().is_empty() {
+            return Err(StoreError::Invalid(
+                "refused: an attempt that writes a table names the seat that writes it; nothing was changed".into(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Story 3.5 (AD-27, AD-10): the checks on an attempt's own prompt (a
@@ -2732,6 +2865,14 @@ pub mod testing {
 
     pub use crate::fsx::testing::{refuse_clone_of, stream_copies_of_refused};
 
+    /// The pragma `name` on a connection to `path` opened the way the store
+    /// opens its read-write connections (story 3.6, review R3).
+    pub fn configured_pragma(path: &Path, name: &str) -> Result<i64, StoreError> {
+        let conn = Connection::open(path)?;
+        crate::configure(&conn)?;
+        Ok(conn.pragma_query_value(None, name, |r| r.get(0))?)
+    }
+
     /// One row in `triggers` (present since version 1), written directly.
     pub fn insert_fixture_trigger(path: &Path, id: &str) -> Result<(), StoreError> {
         let conn = Connection::open(path)?;
@@ -2930,6 +3071,25 @@ fn item_of(conn: &Connection, id: &str) -> Result<Option<InboxItemRow>, StoreErr
 }
 
 /// One tool call of a step attempt (AD-8; story 3.3).
+///
+/// The store slice of story 3.6 (AD-8; AD-10 as amended, matrix row 44): a
+/// call's journal row carries its result's kind (`engine` for a succeeded
+/// `table_write`, `untrusted` for every other finished call) and label,
+/// and the row write's receipt, the record a result is rebuilt from, holds
+/// ids, the version, the op, the taint and a column count:
+///
+/// ```
+/// let _ = |t: am_store::ToolCallRow| (t.result_kind, t.result_label);
+/// let _ = |r: am_store::RowReceipt| {
+///     (r.table_id, r.row_id, r.version, r.op, r.taint, r.step_run_id, r.call_seq, r.tool_call_id, r.columns)
+/// };
+/// ```
+///
+/// never the row's data:
+///
+/// ```compile_fail
+/// let _ = |r: am_store::RowReceipt| r.data;
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolCallRow {
     pub id: String,
@@ -2938,6 +3098,12 @@ pub struct ToolCallRow {
     pub tool: String,
     /// `issued`, `succeeded`, `failed` or `refused`.
     pub status: String,
+    /// Story 3.6: the result's kind once the call finished (`engine` or
+    /// `untrusted`); `None` while it is issued, for a refused call and for
+    /// calls from before migration 0010.
+    pub result_kind: Option<String>,
+    /// The result's label (`tool:<tool>`), set with its kind.
+    pub result_label: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2967,6 +3133,7 @@ impl Reader {
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
         conn.pragma_update(None, "query_only", "ON")?;
+        conn.pragma_update(None, "recursive_triggers", "ON")?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         Ok(Reader { conn })
     }
@@ -3123,7 +3290,7 @@ impl Reader {
     /// The tool calls of one step attempt, in call order (story 3.3).
     pub fn tool_calls(&self, step_run_id: &str) -> Result<Vec<ToolCallRow>, StoreError> {
         let mut st = self.conn.prepare(
-            "SELECT id, step_run_id, call_seq, tool, status FROM tool_calls WHERE step_run_id = ?1 ORDER BY call_seq",
+            "SELECT id, step_run_id, call_seq, tool, status, result_kind, result_label FROM tool_calls WHERE step_run_id = ?1 ORDER BY call_seq",
         )?;
         let rows = st.query_map(params![step_run_id], |r| {
             Ok(ToolCallRow {
@@ -3132,6 +3299,8 @@ impl Reader {
                 call_seq: r.get(2)?,
                 tool: r.get(3)?,
                 status: r.get(4)?,
+                result_kind: r.get(5)?,
+                result_label: r.get(6)?,
             })
         })?;
         Ok(rows.collect::<Result<_, _>>()?)

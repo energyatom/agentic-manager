@@ -84,3 +84,33 @@ async fn cancel_settles_at_reservation_when_usage_missing() {
     assert_eq!(l.len(), 1);
     assert_eq!(l[0].settled_micro_usd, Some(l[0].reserved_micro_usd));
 }
+
+/// Review triage round 1, R7 (the store slice of story 3.6): the spike's
+/// linear workflow runs no seat, so each attempt journals no writes:
+/// `attempt_writes` gives `None` (a NULL seat, never an empty one).
+#[tokio::test]
+async fn a_spike_attempt_journals_no_seat() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("state.db");
+    let store = am_store::Store::open(&db).unwrap();
+    let w = store.writer();
+    let llm = Arc::new(FakeLlm::new(vec![ScriptedTurn::text("ok")]));
+    let run = create_run(&w, system("test"), &wf(), "manual").unwrap();
+
+    let status = drive_run(&db, &w, llm, &wf(), &run, CancellationToken::new())
+        .await
+        .unwrap();
+
+    assert_eq!(status, "succeeded");
+    let reader = store.reader().unwrap();
+    let steps = reader.steps(&run).unwrap();
+    assert_eq!(steps.len(), 2);
+    for step in steps {
+        assert_eq!(
+            reader.attempt_writes(&step.id).unwrap(),
+            None,
+            "{}: no seat, so no writes",
+            step.step_key
+        );
+    }
+}

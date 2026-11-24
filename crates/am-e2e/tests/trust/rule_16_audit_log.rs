@@ -16,7 +16,8 @@ use std::path::{Path, PathBuf};
 
 use am_domain::{Actor, Decision, HumanActor, InboxKind, REVIEWER_HAT, SecretStore, Taint, Usage};
 use am_store::{
-    NewInboxItem, OpenReport, StepInput, Store, StoreError, TriggerRow, WriteCommand, verify_jsonl,
+    AttemptWrites, NewInboxItem, OpenReport, StepInput, Store, StoreError, TriggerRow,
+    WriteCommand, verify_jsonl,
 };
 use am_testkit::FakeSecretStore;
 use rusqlite::Connection;
@@ -356,6 +357,11 @@ fn a_resolution_is_audited_as_you_reviewer_without_the_note() {
             inputs: vec![],
             taint: Taint::Clean,
             prompt: vec![],
+            writes: AttemptWrites {
+                seat: "first".into(),
+                table: None,
+                document: None,
+            },
         },
     )
     .unwrap();

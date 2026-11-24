@@ -4,6 +4,34 @@
 //! This crate depends only on std, serde, thiserror, jiff and uuid. It has no IO
 //! and no async runtime: ports return [`BoxFuture`] built from std types so that
 //! adapters choose their own runtime.
+//!
+//! Story 3.6 (AD-4, AD-5, AD-21): the row-writer port's types in
+//! `am_domain::rows` are owned (std, `uuid`, am-domain types), so no store,
+//! SQLite or JSON-library type crosses the port; row data crosses as JSON
+//! text.
+//!
+//! ```
+//! use am_domain::Taint;
+//! use am_domain::rows::{RowOp, RowWrite};
+//! let row_id = uuid::Uuid::now_v7();
+//! let insert = RowWrite {
+//!     tool_call_id: String::from("tool-call-1"),
+//!     step_run_id: String::from("step-run-1"),
+//!     call_seq: 1,
+//!     table_id: String::from("entries"),
+//!     op: RowOp::Insert { row_id, data_json: String::from(r#"{"ref":"r-1"}"#) },
+//!     taint: Taint::Clean,
+//! };
+//! let update = RowWrite {
+//!     call_seq: 2,
+//!     op: RowOp::Update { row_id, expected_version: 1_i64, patch_json: String::from("{}") },
+//!     taint: Taint::Tainted,
+//!     ..insert.clone()
+//! };
+//! assert_ne!(insert, update);
+//! fn owned<T: Send + Sync + 'static>(_: &T) {}
+//! owned(&insert);
+//! ```
 #![forbid(unsafe_code)]
 
 pub mod actor;
@@ -18,6 +46,7 @@ pub mod inbox;
 pub mod llm;
 pub mod mcp;
 pub mod net;
+pub mod rows;
 pub mod runtime;
 pub mod secrets;
 pub mod terminal;
