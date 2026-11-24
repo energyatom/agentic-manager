@@ -9,8 +9,44 @@ is CC0-1.0, allowed for that crate at that version only by a
 
 ## Bundled native binaries
 
-None. (SQLite is compiled from source into the binary by `rusqlite`'s
-`bundled` feature; SQLite is in the public domain.)
+None. (Native libraries compiled into the binary are listed below.)
+
+## Native libraries compiled into the binary
+
+- SQLite 3.54.1: compiled from source into the binary by `libsqlite3-sys`
+  0.40.0 through `rusqlite`'s `bundled` feature; SQLite is in the public
+  domain.
+- AWS-LC 5.12.0 (AWS Libcrypto, a fork of BoringSSL): built from source and
+  statically linked by the `aws-lc-sys` 0.47.0 crate, through `aws-lc-rs`
+  1.19.0 (`ISC AND (Apache-2.0 OR ISC)`), which rustls uses for TLS (reqwest
+  in `am-net`) and, from epic 9 story 10, `am-store`'s audit-hash key module
+  (architecture AD-3, AD-32). From that story `.cargo/config.toml` sets
+  `AWS_LC_SYS_USE_SYSTEM=0`, so an AWS-LC installed on the build machine is
+  never linked instead. Licence, as `aws-lc-sys` declares it:
+  `ISC AND (Apache-2.0 OR ISC) AND Apache-2.0 AND MIT AND BSD-3-Clause AND
+  (Apache-2.0 OR ISC OR MIT) AND (Apache-2.0 OR ISC OR MIT-0)`. Its `LICENSE`
+  file carries the AWS-LC, BoringSSL and OpenSSL notices and those of the code
+  compiled into the library: Fiat Cryptography (MIT), s2n-bignum
+  (Apache-2.0 OR ISC OR MIT-0), mlkem-native and mldsa-native
+  (Apache-2.0 OR ISC OR MIT), the Jitter Entropy RNG (BSD-3-Clause, which
+  Amazon elects over GPL-2.0) and public-domain (CC0) Keccak and AES reference
+  code. Those CC0 and BSD-3-Clause parts are parts of a native library under
+  AD-3 and need no cargo-deny crate-licence exception (owner, 2026-11-24).
+
+Each release ships this file and AWS-LC's licence notices, the BSD-3-Clause
+notice included, inside every artefact that carries the binary: the app
+bundle (so the updater's payload carries them too) and any `agentic` archive a
+release publishes. AWS-LC's notices are that `LICENSE` file and the upstream
+licence files it points to but does not package (Jitter Entropy's BSD-3-Clause
+text, s2n-bignum's licence), taken from AWS-LC's source at the linked version;
+the release job fails when an artefact lacks them (architecture AD-3). Epic
+11's release checklist includes a licence review of every component a release
+carries, this list included, and the notices their licences require ship in
+the same artefacts.
+
+The desktop app (`am-desktop`, epic 11) also compiles one small native file:
+`objc2-exception-helper` 0.1.1's Objective-C `try_catch.m`, through Tauri
+(`Zlib OR Apache-2.0 OR MIT`).
 
 ## Not bundled, launched only in development and tests
 
