@@ -446,6 +446,11 @@ fn tainted_waiting(env: &Env, root: &Path, output: &str) -> (String, String) {
             }],
             taint: Taint::Tainted,
             prompt: vec![],
+            writes: am_store::AttemptWrites {
+                seat: "first".into(),
+                table: None,
+                document: None,
+            },
         },
     )
     .unwrap();
@@ -576,6 +581,11 @@ fn failed_run(env: &Env, root: &Path) -> (String, String) {
             inputs: vec![],
             taint: Taint::Clean,
             prompt: vec![],
+            writes: am_store::AttemptWrites {
+                seat: "first".into(),
+                table: None,
+                document: None,
+            },
         },
     )
     .unwrap();
@@ -1717,6 +1727,11 @@ fn stuck_run(env: &Env, root: &Path, how: Stuck) -> (String, String) {
             inputs: vec![],
             taint: Taint::Clean,
             prompt: vec![],
+            writes: am_store::AttemptWrites {
+                seat: "first".into(),
+                table: None,
+                document: None,
+            },
         },
     )
     .unwrap();
@@ -2401,6 +2416,11 @@ async fn titles_and_bodies_are_shown_escaped() {
             inputs: vec![],
             taint: Taint::Clean,
             prompt: vec![],
+            writes: am_store::AttemptWrites {
+                seat: "first".into(),
+                table: None,
+                document: None,
+            },
         },
     )
     .unwrap();

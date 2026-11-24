@@ -28,7 +28,7 @@ mod support;
 use am_domain::{Actor, Decision, HumanActor, Part, REVIEWER_HAT, Taint, TrustedInput};
 use am_engine::prompt::{StepPrompt, skill_label};
 use am_engine::run::{HandOff, RunPlan, StepPlan, continue_run, run_plan};
-use am_store::{NewPromptPart, PromptKind, PromptSlot, StepInput, WriteCommand};
+use am_store::{AttemptWrites, NewPromptPart, PromptKind, PromptSlot, StepInput, WriteCommand};
 use support::*;
 use tokio_util::sync::CancellationToken;
 
@@ -234,6 +234,11 @@ async fn no_instruction_row_is_ever_tainted_and_no_untrusted_row_is_clean() {
                     inputs,
                     taint: Taint::Clean,
                     prompt: vec![part],
+                    writes: AttemptWrites {
+                        seat: "seat-write".into(),
+                        table: None,
+                        document: None,
+                    },
                 },
             )
             .expect_err(what);

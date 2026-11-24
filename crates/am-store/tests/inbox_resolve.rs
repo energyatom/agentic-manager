@@ -227,6 +227,11 @@ fn failed() -> Rig {
         inputs: vec![],
         taint: Taint::Clean,
         prompt: vec![],
+        writes: am_store::AttemptWrites {
+            seat: "seat-a".into(),
+            table: None,
+            document: None,
+        },
     })
     .unwrap();
     r.exec(WriteCommand::FailWithItem {
@@ -381,6 +386,11 @@ impl Rig {
             inputs,
             taint: Taint::Clean,
             prompt: vec![],
+            writes: am_store::AttemptWrites {
+                seat: "seat-a".into(),
+                table: None,
+                document: None,
+            },
         })
         .unwrap();
         self.exec(WriteCommand::ReserveCall {
@@ -778,6 +788,11 @@ fn the_note_is_stored_once() {
         inputs: vec![],
         taint: Taint::Clean,
         prompt: vec![],
+        writes: am_store::AttemptWrites {
+            seat: "seat-a".into(),
+            table: None,
+            document: None,
+        },
     })
     .unwrap();
 
@@ -1128,6 +1143,11 @@ fn a_gate_note_input_needs_a_human_return() {
             inputs: vec![input],
             taint: Taint::Clean,
             prompt: vec![],
+            writes: am_store::AttemptWrites {
+                seat: "seat-a".into(),
+                table: None,
+                document: None,
+            },
         });
         assert!(refused.is_err(), "a gate_note input {what}");
         assert_eq!(r.state(), before, "{what}");
@@ -1142,6 +1162,11 @@ fn a_gate_note_input_needs_a_human_return() {
         inputs: vec![],
         taint: Taint::Clean,
         prompt: vec![],
+        writes: am_store::AttemptWrites {
+            seat: "seat-a".into(),
+            table: None,
+            document: None,
+        },
     })
     .expect("the attempt starts with the apply's gate note");
     assert_eq!(r.latest("draft").status, "running");
@@ -1184,6 +1209,11 @@ fn no_system_command_changes_an_open_items_status() {
             inputs: vec![],
             taint: Taint::Clean,
             prompt: vec![],
+            writes: am_store::AttemptWrites {
+                seat: "seat-a".into(),
+                table: None,
+                document: None,
+            },
         },
         WriteCommand::FinishStep {
             step_run_id: gate.clone(),
@@ -1222,6 +1252,11 @@ fn no_system_command_changes_an_open_items_status() {
             inputs: vec![],
             taint: Taint::Clean,
             prompt: vec![],
+            writes: am_store::AttemptWrites {
+                seat: "seat-a".into(),
+                table: None,
+                document: None,
+            },
         },
         WriteCommand::StartStep {
             step_run_id: publish,

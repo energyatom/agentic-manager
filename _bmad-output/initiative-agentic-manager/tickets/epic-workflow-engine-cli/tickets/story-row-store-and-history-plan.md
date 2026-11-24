@@ -3,15 +3,15 @@ title: 'Row store and history'
 type: feature
 ticket: 6
 created: '2026-11-24'
-status: approved
+status: built
 baseline_revision: '8a305a3cca78154ccc2bade96435be0cdbd1b788'
 route: full
 route_source: auto
 risk: high
 review: quick
 review_source: pinned
-lenses_ran: []
-review_loop_iteration: 0
+lenses_ran: [correctness, adversarial-security]
+review_loop_iteration: 2
 followup_review_recommended: false
 context:
   - '{project-root}/docs/owner-standing-rules.md'
@@ -307,13 +307,13 @@ Store-level only; no network; no real model. The tester splits these from the te
   - `pub struct RowRecord { pub table_id: String, pub row_id: String, pub data: String, pub version: i64, pub taint: Taint, pub created_at: String, pub updated_at: String }`;
   - `pub struct RowHistoryRecord { pub seq: i64, pub table_id: String, pub row_id: String, pub version: i64, pub data: String, pub taint: Taint, pub actor: Actor, pub run_id: Option<String>, pub step_run_id: Option<String>, pub seat: Option<String>, pub call_seq: Option<i64>, pub tool_call_id: Option<String>, pub op: String, pub created_at: String }`. Here `op` is `insert` or `update`, and `data` is the whole row after the change.
 - `Reader` methods, each returning `Result<_, StoreError>`:
-  - `rows(&self, table_id: &str) -> Vec<RowRecord>`, in creation order;
-  - `row(&self, table_id: &str, row_id: &str) -> Option<RowRecord>`;
-  - `row_history(&self, table_id: &str, row_id: &str) -> Vec<RowHistoryRecord>`, in version order;
-  - `row_write(&self, step_run_id: &str, call_seq: i64) -> Option<RowHistoryRecord>`;
+  - `table_rows_of(&self, table_id: &str) -> Vec<RowRecord>`, in creation order;
+  - `table_row_by_id(&self, table_id: &str, row_id: &str) -> Option<RowRecord>`;
+  - `row_history_of(&self, table_id: &str, row_id: &str) -> Vec<RowHistoryRecord>`, in version order;
+  - `row_written_at(&self, step_run_id: &str, call_seq: i64) -> Option<RowHistoryRecord>`;
   - `row_receipt(&self, step_run_id: &str, call_seq: i64) -> Option<RowReceipt>`;
   - `attempt_writes(&self, step_run_id: &str) -> Option<AttemptWrites>`, which is `None` for an old attempt.
-  The first four read row content and are test-facing (row 49).
+  The first four read row content and are test-facing (row 49). *(Review triage round 1, R4: renamed from `rows`, `row`, `row_history` and `row_write` to these names, which are unique in `crates/` (tester's choice). `row_receipt` and `attempt_writes` keep their names.)*
 - Migration 0010 (`SCHEMA_VERSION` at least 10; no test pins it equal):
   - tables `table_rows` and `row_history`, with the plan's columns;
   - `step_runs.seat` and `.writes_table`;
@@ -332,7 +332,34 @@ Store-level only; no network; no real model. The tester splits these from the te
 
 **xtask** (`check-deps`):
 - Row 48: `apply_row_write` in shipped code outside `crates/am-store/src/` fails. That includes `crates/am-engine/src/row_writer.rs` until the ToolGate slice widens the rule (its patch removes that planted case). Each finding names `file:line` of the token, `apply_row_write` and `AD-21`.
-- Row 49: a call of `.rows(`, `.row(`, `.row_history(` or `.row_write(` in shipped code outside `crates/am-store/src/` fails. This covers a call split over lines, spaced around `.`, or made on a `use … as` alias of `Reader`. Each finding names `file:line` and the reader. A call of `.row_receipt(` passes. The shipped tree has none.
+- Row 49 (R4, R13): `table_rows_of`, `table_row_by_id`, `row_history_of` or `row_written_at`, named anywhere in shipped code outside `crates/am-store/src/`, fails. It is matched as a bare token over the whole file. That covers a method call; a call split over lines or spaced around `.`; a call on a `use … as` alias of `Reader`; a function value (`let f = Reader::<name>`); `.map(Reader::<name>)`; a turbofish; `r#<name>`; and a path call. Each finding names, on one line, `file:line` and the exact reader. A call of `.row_receipt(` passes. The shipped tree has none.
+
+**Review triage round 1 (tester, 2026-11-24): what the round-1 tests add to this API.**
+- **Readers (R4).** `table_rows_of`, `table_row_by_id`, `row_history_of` and `row_written_at`, as listed above.
+- **Caps (R10)** *(tester's choice: named constants the implementer sets)*:
+  - `pub const ROW_MAX_BYTES: usize` and `pub const ROW_MAX_COLUMNS: usize`, exported at the am-store root;
+  - the byte cap applies to the row's stored JSON text after the write, so a minified insert of exactly `ROW_MAX_BYTES` bytes is written and one byte more is refused;
+  - an object of exactly `ROW_MAX_COLUMNS` keys is written and one more is refused;
+  - an update that grows a row past either cap is refused;
+  - refusals are `Err`, with words holding `byte` or `column`, never the data, and nothing written.
+- **Recursive triggers (R3).** `am_store::testing::configured_pragma(path: &Path, name: &str) -> Result<i64, StoreError>` (test-support): it opens `path` the way the store opens its connections and returns `PRAGMA <name>`. `recursive_triggers` and `foreign_keys` are 1.
+- **Trigger words** (tester's choice where the guard is new). Each test asserts the error text holds:
+  - R2: `a tool call with a result kind never changes`. Once `result_kind` is set, it aborts a change of `id`, `step_run_id`, `call_seq`, `tool`, `status` or the rowid, `UPDATE OR REPLACE` included. It covers an `engine` and an `untrusted` call alike.
+  - R3: `a row is never re-created`. It aborts an insert of a row whose history goes beyond version 1.
+  - R5: `an after-image never lowers its row's taint`.
+  - R6: `an attempt's writes are set only when it starts`. It aborts a change of `seat` or `writes_table` once the attempt is past `queued`.
+  - Existing guards, now reached on their own (R1):
+    - `table, id and creation time never change`;
+    - `table_rows.taint only rises`;
+    - `an engine result answers only a table_write call whose row was written`;
+    - `result kind is set once`;
+    - `a row is never replaced`.
+- **Actor check (R5).** A raw after-image whose actor is `{}`, `"seat"`, `[1]`, or a seat with no provenance, is refused. The message is not pinned.
+- **Blank seat (R7).** `AttemptWrites { seat: "" }` is journaled as a NULL seat, and `attempt_writes` gives `None`. The spike's attempts get `None` too.
+- **Closed run (R8).** `apply_row_write` into a run whose status is not open (`cancelled`, `succeeded`, `failed`) is refused. The words hold the run's id; nothing changes and the call stays `issued`.
+- **Numbers as written (R9).** An insert's data text is stored exactly as written (minified input). The tests use `{"ref":12345678901234567890123}` and `{"x":1e2}`. An update merging `{"y":2}` keeps `"ref":12345678901234567890123`, and the after-image equals the row.
+- **Debug (R11).** `Debug` of `RowOp` and `RowWrite` holds no key or value of the data or the patch. It does hold the JSON text's byte length.
+- **Table words (R12).** A refusal for a table that is not the attempt's names the journaled table and never the caller's table id.
 
 **Checked against stubs:**
 - I used a scratch tree, which was git-archived from HEAD and given its own target directory.
@@ -462,3 +489,376 @@ Also clean with this slice's files: `cargo fmt --all -- --check`, `cargo xtask d
 - about 230 literal lines;
 - about 60 doc lines.
 That is at the top of the plan's 2,300 to 2,600.
+
+### Implementation (store slice, 2026-11-24)
+
+*Implementer, on Opus. No test file was changed; no dependency or feature was added; nothing was recorded in git.*
+
+**Built:**
+- **am-domain** `src/rows.rs` (new, `pub mod rows`): `RowOp { Insert, Update }` and `RowWrite`, owned types, as the API list fixes them.
+- **am-store** migration `0010_rows.sql`:
+  - `table_rows` and `row_history` with the plan's columns;
+  - `step_runs.seat` and `.writes_table`;
+  - `tool_calls.result_kind` (CHECK `engine`, `untrusted`) and `.result_label`;
+  - the plan's triggers: `row_history_no_update`, `_no_delete`, `_never_replaced` (`seq`, version key, call key); `table_rows_no_delete`, `_never_replaced` (key or rowid), `_fixed_fields`, `_version_steps`, `_taint_only_rises`, `_insert_needs_after_image`, `_update_needs_after_image`; `step_runs_writes_set_once`; `tool_calls_engine_result_needs_its_write`, `_result_kind_set_once`.
+- **am-store** `src/rows.rs` (new): `Writer::apply_row_write`'s body (`Command::Row`, not a `WriteCommand`), in one immediate transaction with checks in the plan's order:
+  1. the replay is `Ok`, with nothing written;
+  2. the actor is the attempt's own `Actor::Seat` (its run, its step, the journaled seat);
+  3. the attempt is `running`;
+  4. the call at the key is an `issued` `table_write` call with this id;
+  5. the table is the journaled `writes_table`;
+  6. an insert needs a new row id, and an update needs the row at the current version (`RowRefused`).
+
+  Then the after-image, the row, the call `succeeded` with `engine` / `tool:table_write`, and `row.written`. The module also holds `RowRecord`, `RowHistoryRecord`, `RowReceipt` and the readers `rows`, `row`, `row_history`, `row_write`, `row_receipt` and `attempt_writes`.
+- **am-store** `src/lib.rs`:
+  - `StoreError::RowRefused`;
+  - `AttemptWrites`, and `StartAttempt.writes` journaled by `start_attempt` (`StartStep` and a gate's `PauseStep` journal none);
+  - a `document` value refused in words naming 3.6b;
+  - `FinishToolCall` sets `untrusted` / `'tool:' || tool`;
+  - `ToolCallRow.result_kind` and `.result_label`;
+  - module docs.
+- **am-engine**: the two `StartAttempt` literals.
+- **xtask** `deps.rs`: `row_findings`, over whole-file code (comments and literals stripped):
+  - row 48: the token `apply_row_write` outside `crates/am-store/src/`, naming `file:line`, the owner's condition and AD-21;
+  - row 49: a call of `rows`, `row`, `row_history` or `row_write` after `.` or `::` and before `(`, with whitespace and line breaks allowed, naming `file:line` and the reader.
+
+**Choices the plan left open:**
+- **The spike's linear executor** (`am-engine/src/journal.rs`) has no seat; its `StepRow` has no `seat` field. It journals `seat: ""`, with `table: None` and `document: None`. So `attempt_writes` gives `Some` with an empty seat. `StartAttempt` refuses a table that is empty or holds a control character, and a table with an empty seat.
+- **Row data is normalised.** The writer stores data as serde_json's compact text: keys sorted, since `preserve_order` is not enabled. The insert's text and its after-image's text are byte-equal.
+- **Updates merge top-level keys.** A `null` in the patch removes the column.
+- **`columns`** (in the receipt and in `row.written`) is the row's column count after the write. For an insert, that is the number of data keys. The receipt counts it in SQL (`json_each`), so `row_receipt` never loads the data.
+- **`row.written` args:** `op`, `version`, `step_run_id`, `call_seq`, `tool_call_id`, `taint` (0 or 1) and `columns`. The target is `row:<table_id>/<row_id>`. There is no hash.
+- **Refusal types.** Only the stale-version and unknown-row refusals are `RowRefused`. Every other refusal is `Invalid`: "refused: …; nothing was changed", naming store and config ids only. A refusal never echoes the data, the patch or the tool name. An unknown row's words never hold its id.
+- **Extra guards.** These only narrow; none is in the plan's trigger list.
+  - Triggers:
+    - `row_history_next_version`: an after-image is the current version + 1, so it is written before the row.
+    - `tool_calls_result_kind_not_on_insert`.
+    - `tool_calls_result_kind_on_finish`: the kind and label are set together, and only on a `succeeded` or `failed` call.
+    - `tool_calls_never_replaced`: by id or by (step run, call sequence); without it, an `INSERT OR REPLACE` on 0007's table would clear a kind that is set once. It is the 3.5 lesson. No code or test depends on the old conflict error.
+  - CHECKs:
+    - `data` is a JSON object, and `actor` is valid JSON;
+    - the provenance columns are all set or all NULL;
+    - the actor is a seat exactly when the provenance is set;
+    - `op = 'insert'` exactly when `version = 1`.
+- **Row 49's rule also catches `::name(`** (a path call such as `Reader::rows(&r, …)`). A use path such as `am_domain::rows::RowWrite` is not a call, so it passes.
+
+**Mechanical test edits:** none.
+
+**Mis-specified test: `xtask/tests/check_deps.rs` `no_shipped_code_reads_row_content`, the case "spaced around the dot".**
+- Its planted source line is `reader . row_write ("s", 1)`, but its markers are `row_write(` and `Reader as`.
+- `lines_holding` therefore finds no line, and `assert!(!lines.is_empty(), …)` (`:1295`) panics before check-deps runs. That happens with any implementation.
+- I did not change it. A fix changes the test's input or assertion: for example, write the call as `reader . row_write("s", 1)`, or match the marker with whitespace normalised.
+- Run by hand on the same planted tree (`cargo run -p xtask -- check-deps --metadata xtask/tests/fixtures/metadata/clean.json --root <tree>`), the rule fails it, naming `crates/am-engine/src/scheduler.rs:2` and `row_write`.
+- The two parts the panic skips pass when run by hand or checked:
+  - the alias case fails, naming `crates/am-app/src/gate.rs:3`, which holds `rows(`;
+  - the shipped-tree scan is clean: no `.rows(`, `.row(`, `.row_history(` or `.row_write(` outside am-store, and the real workspace's `cargo xtask check-deps` passes.
+- Every earlier case of that test passes.
+
+**Deferred:** nothing of this slice. The ToolGate slice still widens row 48 to `crates/am-engine/src/row_writer.rs`.
+
+**Size.** Added code is about 924 lines, counting the SQL and the doc comments:
+- `0010_rows.sql`: 173 lines;
+- am-store `src/rows.rs`: 503 lines;
+- am-store `src/lib.rs`: about 122 lines, not counting the tester's 33 doc lines;
+- `src/migrations.rs`: 1 line;
+- am-domain `src/rows.rs`: 43 lines, plus 1 line in `lib.rs`;
+- am-engine: 20 lines;
+- xtask `deps.rs`: 61 lines.
+
+That is inside the plan's 900 to 1,200 and far under the ~4,000-line stop. The tests are the tester's, about 2,600 lines, unchanged.
+
+**Verification:**
+- `cargo nextest run -p am-store --test rows`: 23 of 23 pass.
+- The am-store, am-engine, am-domain, am-app, am-e2e and am-server suites: 917 of 917 pass.
+- `cargo test --doc -p am-store -p am-domain`: green (am-store 4 + 7, am-domain 5 + 8).
+- `cargo test -p xtask --test check_deps`: 32 pass, 1 fails (the mis-specified test above).
+- `cargo clippy --all-targets -D warnings`: clean.
+- These `just check` recipes are green: `fmt-check`, `doctest`, `check-deps`, `check-forbid`, `denylist`, `runtime-paths`, `fixed-hosts`, `seam-guard` and `validate`.
+- One slip: an early `cargo clippy --workspace` also built `am-desktop`. Nothing was cleaned.
+
+**Final `just check`:** red only on the mis-specified test. `cargo nextest run --no-fail-fast` gives `1429 tests run: 1428 passed, 1 failed, 8 skipped`. `just check` itself stops at that failure: `Summary [55.176s] 1353/1429 tests run: 1352 passed, 1 failed, 8 skipped` (`xtask::check_deps no_shipped_code_reads_row_content`).
+
+**Test correction (tester, 2026-11-24):** `no_shipped_code_reads_row_content`'s "spaced around the dot" case plants `reader . row_write ("s", 1)`, with a space before the paren. The test looked for its planted line with the marker `row_write(`, found none, and panicked before check-deps ran, whatever the rule did.
+
+- **The fix:** the test now finds a planted line by the reader's call with spaces taken out (`.row_write(`), or by the `Reader as` alias, and passes those exact lines on.
+- **What still holds:** the finding must name `file:line` of a planted line and the reader. No case or assertion was dropped.
+- **Result:** `cargo test -p xtask --test check_deps` gives 33 passed, 0 failed against the implemented rule.
+- **Patches:** the ToolGate patch's xtask hunks still apply.
+
+### Review triage round 1 (manager, 2026-11-24)
+
+Two Opus reviews ran on the working tree over 0824ab9: correctness (C) and adversarial security (S). Neither found a way for the row command to lower taint, rewrite history or leak row content. Every hole needs raw SQL inside am-store, or a gap in check-deps row 49. The fixes are below, all done tests first.
+
+| Id | From | Finding | Decision |
+|----|------|---------|----------|
+| R1 | C1 | Three tests pass for the wrong reason: row 13's taint UPDATE, row 18's `table_id`/`created_at` UPDATEs and row 44's "engine on …" cases are aborted by other triggers, so the trigger each test names is never reached. | The tester fixes the tests. Each one sets up a state where only the named trigger can abort (a matching after-image at v+1; a finished call), and asserts that trigger's message. |
+| R2 | C2, S3 | Once a call's result kind is set, a raw UPDATE can still change its `tool`, `status`, `step_run_id`, `call_seq` or `id`, or move its rowid. `UPDATE OR REPLACE` on `call_seq` deletes another call and clears its kind. | A BEFORE UPDATE trigger aborts any change to `id`, `step_run_id`, `call_seq`, `tool` or `status` when `OLD.result_kind IS NOT NULL`; a rowid change is aborted; `recursive_triggers` is on (R3). Tests for each. |
+| R2b | tester, 2026-11-24 | The reverse collision: an unkinded call `UPDATE OR REPLACE`d onto a kinded call's `call_seq` deletes the kinded call (no BEFORE DELETE, D1). | Fix: `id`, `step_run_id`, `call_seq` and `tool` are fixed for every call, not only kinded ones (none changes on any legitimate path; finishing a call sets only status and result). Test: the reverse collision aborts and the kinded call stays. |
+| R3 | S1 | Rowid collision: `UPDATE OR REPLACE table_rows SET rowid=<R>` deletes row R without firing `table_rows_no_delete` (REPLACE deletes skip triggers while `recursive_triggers` is off). R can then be re-inserted clean at v1, lowering its taint and rolling back its version. | Turn `PRAGMA recursive_triggers=ON` on every store connection; check every existing trigger still behaves, and stop and report if any conflicts. Abort any rowid change on `table_rows`. Allow an insert only for a row with no history beyond its v1 after-image (a row is never re-created). Tests: the exact attack aborts; a REPLACE by rowid aborts. |
+| R4 | C4, S2 | Row 49 is bypassed by a function value (`let f = Reader::rows; f(..)`, `.map(Reader::row_history)`), a turbofish or `r#`. It also matches by name with no receiver, so it would hit unrelated `.row(` calls later. | Give the row-content readers names unique in `crates/` (the implementer picks them, as AD-21 already requires of the port's method and the row command). Match them as bare tokens over the whole file, as row 48 does. The tester updates every test and the three `.git/wip` patches that use the old names. Tests: every bypass form fails; the shipped tree passes. |
+| R5 | C5, S4 | `row_history` accepts an after-image with a lower taint than its row. Its actor CHECK passes when the value is NULL (`{}`, `"seat"`, `[1]`). | Refuse `NEW.taint` below the row's current taint. Require `json_type(actor)='object'` and test the kind with `IS`. Tests for each. |
+| R6 | C6 | An attempt's seat and table can be set by raw UPDATE after it has started. | Set them only on the queued→running transition; abort when `OLD.status <> 'queued'`. Test. |
+| R7 | C7 | The spike executor journals an empty seat, so `attempt_writes` returns `Some("")`, and the set-once trigger locks it. | Journal NULL for a blank seat. Test. |
+| R8 | C8, S6 | A row can be written into a cancelled or finished run, because only the step's status is checked. | `write_row` refuses when the run is not open (`run_open_for`), in words. Test. |
+| R9 | C3 | Row data is normalised through serde `Value`, so big integers lose precision and `1e2` becomes `100.0`. The after-image is then not what the seat wrote. | Store the insert's text through SQLite `json(?)`, keeping each number as written, and merge an update's patch in SQL (`json_set` and `json_remove` per top-level key). Tests: a big integer and `1e2` round-trip as written. If the bundled SQLite does not keep them, stop and report. |
+| R10 | S7 | No cap on row size or column count, and each update re-stores the whole row. | A byte cap and a column cap, refused in words. The implementer picks values within the architecture and records them. Test at the boundary. |
+| R11 | S8 | `RowOp` and `RowWrite` derive `Debug` and print row data in full. | Write `Debug` by hand, showing only the column count and byte length. Test. |
+| R12 | S9 | A refusal repeats the caller's table id verbatim; from the ToolGate slice on, that could be model text. | Refusal words name only the journaled table. Test. |
+| R13 | C9 | Two weak xtask assertions: `err.contains(reader)` is always true for `"row"`, and the path-call form is built but never tested. | The tester strengthens both (folded into R4's tests). |
+
+**Accepted or deferred, with reasons:**
+- **D1 (S3, part):** no BEFORE DELETE trigger on `tool_calls`. AD-25 requires that deleting a run really deletes its content, the same reason as 3.4's D2.
+- **D2 (S, informational):** `Actor::Seat` carries no attempt id, so concurrent attempts of one step under a future fan-out cannot be told apart by actor. This goes to 3.14's plan.
+- **D3 (S):** an identifier-pasting proc-macro could hide a name from check-deps. None is in `Cargo.lock`, and adding one is an owner decision on a new dependency.
+
+### Red run round 1 (store slice, 2026-11-24)
+
+The tester's response to review triage round 1, tests first. No `src/` line changed and no dependency changed. I ran no `--workspace` build. `cargo fmt --all` passes.
+
+**Commands, on the checkout** (`CARGO_TARGET_DIR=/Users/hiteshmamgain/cargo-target/agentic-manager`):
+- `cargo nextest run -p am-store --test rows`: does not compile. The first missing items are `E0425 cannot find function configured_pragma in module am_store::testing`, then `ROW_MAX_BYTES`, `ROW_MAX_COLUMNS` and the four renamed readers.
+- `cargo nextest run -p am-engine --test journal`: 1 of 3 fails, `a_spike_attempt_journals_no_seat` (left `Some(AttemptWrites { seat: "", .. })`, right `None`).
+- `cargo test -p xtask --test check_deps`: 32 pass, 1 fails, `no_shipped_code_reads_row_content`, with "a call in the engine: must fail:". Today's rule matches the old names only.
+
+**Each test's own red reason.** These come from a scratch copy of the checkout with its own target directory, after which I deleted the copy. The shim did three things only:
+- the four new reader names, delegating to today's readers;
+- placeholder caps (65,536 bytes, 256 columns);
+- a `configured_pragma` that reads the pragma after the store's `configure`.
+
+Command: `cargo test -p am-store --test rows`. Result: 25 pass, 15 fail. Clippy `-D warnings` on the am-store, am-engine and xtask test targets is clean.
+
+| Row | Test | Red reason (today's build) |
+|---|---|---|
+| R1 | `a_rows_table_id_and_creation_time_never_change` (new) | green on arrival. It now reaches `table_rows_fixed_fields` alone: a person's after-image at v+1, then a version+1 update naming the field. The control update goes through |
+| R1 | `a_rows_taint_never_falls_by_its_own_guard` (new) | "a lower-taint after-image: must abort, changed 1 row(s)". That is R5's missing guard; the taint guard's own half runs once it is there |
+| R1 | `each_result_kind_guard_aborts_with_its_own_words` (new; replaces `an_engine_kind_needs_its_after_image_and_is_set_once`) | green on arrival. Each case now reaches its named guard: the calls are finished by hand first, and a renamed label reaches set-once alone |
+| R1 | `row_taint_only_rises`, `rows_and_history_are_append_only` | the cases that passed for the wrong reason move to the two tests above; the rest stay green |
+| R2 | `a_tool_call_with_a_result_kind_never_changes` | "tool: must abort, changed 1 row(s)" |
+| R3 | `the_rowid_collision_attack_aborts` | "the rowid collision: must abort, changed 1 row(s)". The exact attack succeeds today: a person's after-image for the other row, then `UPDATE OR REPLACE … SET rowid = <tainted row's>, version = version + 1` |
+| R3 | `a_replace_by_rowid_aborts` | green on arrival. `table_rows_never_replaced` checks the rowid, now reached alone |
+| R3 | `a_row_is_never_re_created` | "a re-created row: must abort, changed 1 row(s)" |
+| R3 | `store_connections_turn_recursive_triggers_on` | `recursive_triggers` is 0 (left 0, right 1) |
+| R5 | `an_after_image_never_lowers_its_rows_taint` | "taint 0: must abort, changed 1 row(s)" |
+| R5 | `an_after_images_actor_is_an_object_with_a_kind` | "actor {}: refused, got Ok(1)" |
+| R6 | `an_attempts_writes_are_set_only_when_it_starts` | "UPDATE step_runs SET seat = 'seat-late' …: must abort, changed 1 row(s)" |
+| R7 | `a_blank_seat_is_journaled_as_none`, and the spike's `a_spike_attempt_journals_no_seat` | `Some(AttemptWrites { seat: "", table: None, document: None })`, not `None` |
+| R8 | `a_row_is_never_written_into_a_finished_run` | "the run is not open: ()". The write succeeds into a cancelled run |
+| R9 | `numbers_are_stored_as_written` | the row holds `{"ref":1.2345678901234568e+22}` |
+| R10 | `a_row_over_the_byte_cap_is_refused`, `a_row_over_the_column_cap_is_refused` | "one byte over: ()" and "one column over: ()": no cap today |
+| R11 | `a_row_writes_debug_holds_no_data` | `column_canary_7d21` is in `Insert { …, data_json: "{\"column_canary_7d21\":…" }` |
+| R12 | `a_wrong_tables_refusal_never_echoes_its_id` | the words hold `not \`table-canary-0c41\`` |
+| R4, R13 | xtask `no_shipped_code_reads_row_content` | rewritten for the four new names and every bypass form (function value, `.map(Reader::…)`, turbofish, `r#`, path call, `use … as`, split, spaced). It asserts one finding naming both `file:line:` and the exact reader. Red as above |
+| R4 | every test that used the old names | renamed. The checkout's store tests are in `rows.rs`; the later slices' are in the patches |
+
+**Patches.** I applied the round-1 changes to all four slice states and regenerated the three patches in `.git/wip/`:
+- `tests-toolgate.patch`: 27 files, +4,434/−74 lines;
+- `tests-rows-reaching.patch`: 23 files, +634/−63 lines;
+- `tests-documents.patch`: 18 files, +1,695/−84 lines.
+
+All three check clean in order on a temporary index (`git read-tree HEAD` and this checkout, with nothing recorded and the real index untouched), and the final state equals the full test set file for file. The slice-4 state, with every later slice's tests, type-checks and passes clippy on test files against the earlier stubs plus the reader-name shim.
+
+**One case left out.** R2's finding also describes the reverse collision: an `UPDATE OR REPLACE` on a call *without* a kind, onto a call *with* one, deletes the latter. The decision's trigger only guards calls whose `OLD.result_kind` is set, so this case is not tested. The manager decides whether to add it.
+
+**R2b, added by the tester on 2026-11-24 after the triage decided it.** New test: `a_tool_calls_identity_never_changes` in `rows.rs`.
+- **The reverse collision.** `UPDATE OR REPLACE tool_calls SET call_seq = <kinded call's seq> WHERE id = <unkinded, issued call>` must abort, and the kinded call must stay exactly as it was. Today it already aborts, but only through `FOREIGN KEY constraint failed`: the kinded call's after-image references it, and the bundled SQLite turns foreign keys on by default. It is not stopped by a guard.
+- **Plain updates.** A plain update of `id`, `step_run_id`, `call_seq` or `tool` on the unkinded, issued call must abort. Red today: "id: must abort, changed 1 row(s)". I took that reason from a scratch copy with the reader-name shim, which has since been deleted.
+- **No words are pinned.** The decision names none for R2b.
+- **Patches and lint.** All three patches were regenerated (the test is in every slice state). They still check clean in order on a temporary index, and the final state equals the full test set file for file. Clippy on `rows.rs` is clean.
+
+### Implementation round 1 (store slice, 2026-11-24)
+
+*Implementer, on Opus, against "Review triage round 1" and "Red run round 1". No test file was changed; no dependency or feature was added; no `--workspace` build; nothing was recorded in git.*
+
+**Built, by triage row:**
+- **R2, R2b** (0010, two triggers that split on `OLD.result_kind`, so one guard answers each change):
+  - `tool_calls_identity_fixed`: on a call with no kind, a change of `id`, `step_run_id`, `call_seq`, `tool` or the rowid aborts with "a tool call's id, step run, call sequence and tool never change". Finishing a call (status, finish time, result) still passes.
+  - `tool_calls_with_a_kind_never_change`: once a kind is set, the same fields plus `status`, `created_at` and `finished_at` are fixed. It aborts with "a tool call with a result kind never changes".
+  - A change of the kind or the label itself still meets `tool_calls_result_kind_set_once`.
+- **R3:**
+  - `configure()` (every read-write connection: the project store, the user store and migrations) and `Reader::open` set `PRAGMA recursive_triggers=ON`. `testing::configured_pragma` opens a connection through `configure()` and reads the pragma.
+  - New triggers on `table_rows`: `table_rows_rowid_fixed` ("a row's rowid never changes") and `table_rows_never_re_created` ("a row is never re-created": an insert whose row has history past version 1).
+- **R4:** the readers are renamed `table_rows_of`, `table_row_by_id`, `row_history_of` and `row_written_at`. Row 49's rule now matches these four names as bare tokens over the whole file outside `crates/am-store/src/`, as row 48 does. Each finding names `file:line` and the exact name.
+- **R5:**
+  - `row_history_keeps_taint` aborts with "an after-image never lowers its row's taint".
+  - The actor column's CHECK is now `json_type(actor) = 'object' AND json_type(actor, '$.kind') IS 'text'`, and the seat CHECK uses `IS 'seat'`.
+- **R6:** `step_runs_writes_set_at_start` replaces `step_runs_writes_set_once`. It aborts any update of `seat` or `writes_table` unless that update takes the attempt from `queued` to `running` ("an attempt's writes are set only when it starts"). `start_attempt` now journals the writes in that same update.
+- **R7:** a blank seat is journaled as NULL, so `attempt_writes` gives `None`; the spike's attempts get `None` too. A table still needs a seat that is not blank.
+- **R8:** `write_row` calls `run_open_to(tx, &step, "writes a row")`. That is `run_open_for` with the action words passed in; its other callers keep "starts or waits". So a write into a finished or cancelled run is refused in words naming the run.
+- **R9:**
+  - An insert is checked with `json_valid` (strict RFC 8259) and stored as `json(?)`.
+  - An update's patch is merged in SQL, one top-level key at a time: `json_set(data, fullkey, json(value))`, or `json_remove` for a `null`. Each key comes from `json_each(patch)`, and its value is read as JSON text with `patch -> fullkey`.
+  - Number text is kept: the bundled SQLite 3.54.1 has the same JSONB code as the 3.51.0 I probed (`{"x":1e2}` and a 23-digit integer round-trip as written), and `numbers_are_stored_as_written` passes. Nothing to stop on.
+- **R10:**
+  - `pub const ROW_MAX_BYTES: usize = 65_536` (64 KiB), counted on the row's stored text after the write. Why: it is the size the config already allows a skill's body (`SKILL_BODY_MAX_BYTES`); a row is a record of columns, not a document; and every update stores the whole row again as an after-image, so the cap also bounds what one write adds to history.
+  - `pub const ROW_MAX_COLUMNS: usize = 256` top-level keys. Why: it is far past what a config table declares, yet it bounds a write that spreads a model's output over thousands of keys.
+  - The architecture names no row cap. Both refusals give sizes only (`bytes`, `columns`), never data.
+- **R11:** `RowOp` and `RowWrite` have hand-written `Debug`. It shows `data_json_bytes` or `patch_json_bytes`, the row id, the version and ids. It shows no column count: am-domain may not parse JSON (AD-4: serde, thiserror, jiff and uuid only), and the test pins only the byte length.
+- **R12:** after the table check, every refusal, the SQL and the audit target use the journaled table. A wrong table is refused as "writes only the table `<journaled>`, and this write names another".
+
+**The `recursive_triggers` check:**
+- Every trigger in migrations 0001–0010 and in the user store's 0001–0002 has a body that is only `SELECT RAISE(ABORT, …)`. None runs DML, so nothing can recurse.
+- No store code uses `INSERT OR REPLACE` or `REPLACE`. The one conflict clause is `UpsertTrigger`'s `ON CONFLICT DO UPDATE` on `triggers`, which has no trigger.
+- The pragma only makes a REPLACE's delete fire the delete guards. No conflict was found, and the whole suite passes with it on.
+- By hand (Python's sqlite3 over the migrations), the rowid collision is stopped by `table_rows_rowid_fixed` and R2b's reverse collision by `tool_calls_identity_fixed`, not by a foreign key, and an unkinded call still finishes.
+
+**Mechanical test edits:** none.
+
+**Size, this round:** about +195 net lines of code:
+- `0010_rows.sql`: +51;
+- am-store `src/rows.rs`: +78;
+- am-domain `src/rows.rs`: +40;
+- am-store `src/lib.rs`: +24;
+- xtask: +1.
+
+The slice's code is now about 1,120 lines, far under the ~4,000-line stop.
+
+**Verification:**
+- `--test rows`: 41 of 41 pass.
+- am-engine `--test journal`: 3 of 3 pass.
+- `cargo test -p xtask --test check_deps`: 33 of 33 pass.
+- `cargo test --doc -p am-store -p am-domain`: green (am-store 4 + 7, am-domain 5 + 8).
+
+**Final `just check`:** green (exit 0). `Summary [52.823s] 1448 tests run: 1448 passed, 8 skipped`, with every other recipe clean.
+
+### Review triage round 2 (manager, 2026-11-24)
+
+An Opus follow-up review read round 1. It confirms R1–R13 and R2b hold, and finds no way through the row command. Six smaller gaps were found, one of them opened by R9. Each is fixed tests first.
+
+| Id | From | Finding | Decision |
+|----|------|---------|----------|
+| T1 | F1 | `step_runs` has had no guard against being replaced since 0007. An `INSERT OR REPLACE` (or a status round-trip through `queued`) rewrites an attempt's `seat` and `writes_table`, and lowers its taint, which `write_row` then copies into the row. | Fix: a `step_runs_never_replaced` trigger (on id, rowid, and run/step/attempt). R6 also aborts when `OLD.seat`, `OLD.writes_table` or `OLD.started_at` is set. The implementer checks every legitimate `step_runs` path from 3.1–3.5 (requeue, loop-back, gate return) and stops and reports if one conflicts. Tests for each route. |
+| T2 | F2 | Since R9, `json()` keeps duplicate keys and `json_set` changes only the first, so SQL readers and serde readers see different values. | Fix: refuse duplicate keys, at any depth, in an insert and in a patch, in words. Test. |
+| T3 | F3 | The caps are checked after the merge, and the merge's cost grows with the square of the patch's key count on the single writer thread (a 1 MB patch took 18 s). | Fix: refuse a patch over `ROW_MAX_BYTES`, or with more than `ROW_MAX_COLUMNS` keys, before merging, in words. Test (bounded time). |
+| T4 | F4 | `tool_calls_never_replaced` does not check the rowid, so an insert by rowid silently deletes a kinded call. | Fix: add `OR rowid = NEW.rowid`. Test. |
+| T5 | F5 | A seat after-image planted by raw SQL at the next version makes that key a false replay: `apply_row_write` returns `Ok` while the call stays `issued`. | Fix: a replay requires the call at that key to be finished with kind `engine`. Anything else is refused in words. Test. |
+| T6 | F6 | `Debug` prints `table_id` verbatim, and `RowRecord`/`RowHistoryRecord` derive `Debug` with data. | Fix: hand-written `Debug` showing lengths only. Test. |
+
+**Accepted:** **D4 (F7):** the unique reader names could collide with a future field name. A collision makes check-deps fail, so it fails closed and is noticed at once, and renaming then is cheap.
+
+### Red run round 2 (store slice, 2026-11-24)
+
+These are the tester's tests for review triage round 2. Seven tests are appended to `crates/am-store/tests/rows.rs`, with no `src/` change, and `cargo fmt --all` passes.
+- Commands, on the checkout with `CARGO_TARGET_DIR=/Users/hiteshmamgain/cargo-target/agentic-manager`:
+  - `cargo nextest run -p am-store --test rows --no-fail-fast`: 48 run, 41 passed (every earlier test, round 1 included), 7 failed (the new ones);
+  - `cargo clippy -p am-store --tests -D warnings`: clean.
+- Words pinned (tester's choice): T1(a)'s new guard is `an attempt is never replaced`. The other guards' words are as implemented.
+
+| Row | Test | Red reason |
+|---|---|---|
+| T1 (a) | `an_attempt_is_never_replaced`: an `INSERT OR REPLACE` of a started, tainted, child-free attempt with another seat, another table and taint 0, by its id, by its rowid (under a new id) and by its run, step and attempt; each must abort with `an attempt is never replaced`, and the writes and taint must stay | "by its id: must abort, changed 1 row(s)" |
+| T1 (b) | `a_status_round_trip_never_reopens_an_attempts_writes`: status back to `queued` (allowed or not), then `running` with another seat or table, on an attempt with writes and on one started by `StartStep`; each must abort with `an attempt's writes are set only when it starts` | "UPDATE step_runs SET status = 'running', seat = 'seat-other' …: must abort, changed 1 row(s)" |
+| T2 | `a_repeated_key_is_refused_in_words`: a repeated key at the top level and nested in an insert, and in a patch; each refused, the words holding `duplicate` and never the key; nothing changed, the call `issued` | "a repeated top-level key: ()" (it is written) |
+| T3 | `an_oversized_patch_is_refused_before_it_is_merged`: a patch over `ROW_MAX_BYTES` (`byte`), one with `ROW_MAX_COLUMNS` + 1 keys (`column`), and a ~0.5 MB patch of 50,000 keys, each refused within a generous 2 s; nothing changed | the first two cases already refuse (after the merge). The large one is refused only after 77.9 s: "a large patch: refused before the merge, in 77.873572459s" |
+| T4 | `a_kinded_call_is_never_replaced_by_its_rowid`: an `INSERT OR REPLACE` at the rowid of an `untrusted` call (no after-image references it, so no foreign key intervenes) must abort with `a tool call is never replaced`, and the call must stay | "a replace by rowid: must abort, changed 1 row(s)" |
+| T5 | `a_planted_after_image_is_no_replay`: a seat's after-image planted by raw SQL at an `issued` call's key; `apply_row_write` there must be refused in words, with nothing changed and the call `issued` with no kind | "a planted after-image is no replay: ()" (it returned `Ok`) |
+| T6 | `no_row_types_debug_holds_data_or_a_table_id`: canaries in the data and the table id must not appear in the `Debug` of `RowWrite`, `RowOp`, `RowRecord` or `RowHistoryRecord` | `RowWrite` prints `table_id: "table-canary-5a91"` |
+
+**Patches.**
+- I appended the tests to every slice state and regenerated the three patches in `.git/wip/`: `tests-toolgate.patch` (+4,434/−74), `tests-rows-reaching.patch` (+634/−63) and `tests-documents.patch` (+1,695/−84).
+- They check clean in order on a temporary index built from the checkout, with nothing recorded in git.
+- The final state equals the full test set file for file, except `crates/am-store/src/lib.rs`. The slice trees hold the source from before round 1's implementation; the patches' doc-comment hunks on that file apply cleanly to the implemented source.
+
+### Implementation round 2 (store slice, 2026-11-24)
+
+*Implementer, on Opus, against "Review triage round 2" and "Red run round 2". No test file was changed; no dependency was added; no `--workspace` build; nothing was recorded in git.*
+
+**Built:**
+- **T1 (a):** `step_runs_never_replaced` aborts an insert that meets an attempt's id, its rowid, or its (run, step, attempt), with "an attempt is never replaced".
+- **T1 (b):** `step_runs_writes_set_at_start` now also aborts when `OLD.seat` or `OLD.writes_table` is set. The `OLD.started_at` clause is left out (the conflict is below). Following the manager's T1(b) decision, `step_runs_never_requeued` aborts any update that moves `status` to `queued` from any other status, with "an attempt never goes back to queued".
+- **T2:** an insert's data and an update's patch are refused when they repeat a key at any depth. The check is `json_tree` grouped by parent and key, and the words say "duplicate key" without naming the key.
+- **T3:** a patch is refused before it is parsed further or merged if:
+  - its text is over `ROW_MAX_BYTES`, refused in words with `bytes`;
+  - it has more top-level keys than `ROW_MAX_COLUMNS`, refused in words with `columns`.
+
+  The ~0.5 MB patch is now refused at once; the whole `rows` target runs in about 1 s.
+- **T4:** `tool_calls_never_replaced` also matches the rowid.
+- **T5:** a key that holds an after-image is a replay only when the tool call at that key has result kind `engine`. Anything else is refused in words ("… so it is no replay").
+- **T6:** `Debug` is written by hand for `RowWrite` (`table_id_bytes`), `RowRecord` and `RowHistoryRecord` (`table_id_bytes`, `data_bytes`). `RowOp` already showed lengths only.
+
+**The `step_runs` path check (T1):**
+- Store paths, all compatible:
+  - inserts: `CreateRun`, and the new attempts queued by loop-back and by a gate return (always a new id and `MAX(attempt) + 1`);
+  - updates: `start_attempt` (`queued` to `running`), `PauseStep`, `raise_taint`, the Human resolve, `finish_step` and the `looped_back` mark;
+  - `FailBeforeStart` writes no `step_runs`, and `continue_run` and the spike write only through commands.
+- No update ever moves a status back to `queued`.
+- **The conflict:** `crates/am-engine/tests/loop_caps.rs` (story 3.3 review P1) stamps `started_at` on a still-queued attempt by raw SQL. It relies on the store's documented behaviour that `StartAttempt` keeps a `started_at` already there, which story 3.9's resume will count.
+- With the `OLD.started_at` clause in, `StartAttempt`'s queued-to-running update, which sets the seat, aborts. Two existing tests fail: `a_fresh_attempt_gets_its_whole_wall_clock_cap` and `a_fresh_attempt_started_just_before_a_second_boundary_waits_the_full_cap`. I confirmed this by running them.
+- Without the clause, `a_status_round_trip_never_reopens_an_attempts_writes` stays red on its `StartStep` attempt.
+- **Resolved** by the manager's T1(b) decision: the guard that refuses any move back to `queued`, built above. `loop_caps.rs` stays green.
+
+**Mechanical test edits:** none.
+
+**Size, this round:** about +100 lines of code:
+- `0010_rows.sql`: +14;
+- am-store `src/rows.rs`: +86;
+- am-domain `src/rows.rs`: +1.
+
+The no-requeue guard adds 8 more lines of SQL. The slice's code is about 1,230 lines.
+
+**Verification:**
+- `cargo test --doc -p am-store -p am-domain`: green.
+- Every `just check` recipe but `test` is green.
+- Before the T1(b) decision, `a_status_round_trip_never_reopens_an_attempts_writes` was the one red test. It passes with the no-requeue guard.
+
+**Final `just check`:** green (exit 0). `Summary [54.118s] 1455 tests run: 1455 passed, 8 skipped`, with every other recipe clean.
+
+**T1(b) decision (manager, 2026-11-24):** the `OLD.started_at` clause conflicts with story 3.3's `loop_caps.rs` fixture, which sets `started_at` on a still-queued attempt. So T1(b) is closed another way: an attempt's status never moves back to `queued` from any other status. No code path from 3.1 to 3.5 does that, so the round trip fails at its first step, and 3.3's behaviour is unchanged. This only narrows. Note for story 3.9: if resume ever needs to requeue an attempt, it relaxes this guard in its own migration and review. The tester adjusts T1(b) to expect the move back to `queued` to abort with the guard's words.
+
+**T1(b), revised after the manager's decision (tester, 2026-11-24).** `a_status_round_trip_never_reopens_an_attempts_writes` now pins the first step of the round trip, with the words (tester's choice) `an attempt never goes back to queued`.
+- **What it asserts:**
+  - a raw `UPDATE step_runs SET status = 'queued'` aborts with those words on four attempts: one `running` with its writes journaled, one `running` started by `StartStep` with none, one `succeeded` and one `failed`;
+  - every attempt, its seat and its table stay as they were;
+  - a queued attempt still starts through `StartAttempt` and journals its writes.
+- **Red reason** (`cargo test -p am-store --test rows -- a_status_round_trip`): "running, with writes: must abort, changed 1 row(s)", because today the move back to `queued` goes through.
+- **Lint and patches:** clippy is clean. The three patches are regenerated and still check clean in order on a temporary index.
+
+## Auto Run Result
+
+**Status:** built (2026-11-24). This is slice 1 of 4 of the re-sliced story 3.6: store, then ToolGate (23), then rows reaching later steps (22), then documents and Drafts (21). It was planned, tested, built and reviewed on Opus, as the owner asked.
+
+**Summary:** the row store and its history exist at the store level only. Nothing shipped writes or reads rows yet.
+- **Migration 0010:**
+  - `table_rows` and an append-only `row_history` of after-images, plus `step_runs.seat`/`writes_table` and the result kind and label on `tool_calls`.
+  - Every guard is a trigger, and `recursive_triggers` is on for every store connection, so a REPLACE delete fires them too.
+  - No UPDATE or DELETE on history, no DELETE on rows, and no replace by key, id or rowid on rows, history, tool calls or attempts.
+  - A row is never re-created. Taint only rises.
+  - A tool call's identity is fixed, and its status is fixed once its result kind is set.
+  - An attempt's seat and table are set only when it starts, and an attempt never goes back to `queued`.
+  - The pre-migration copy is kept, and an old database upgrades with every row kept.
+- **The row write (`apply_row_write`):** a typed writer command with an explicit Actor.
+  - It runs in one transaction with its after-image at the next version.
+  - Its taint is the larger of the attempt's, the write's and the row's.
+  - A stale version is refused in words, and the old version stays readable.
+  - A cancelled or finished run is refused.
+  - Row data is stored through SQLite `json()`, so numbers keep their text, and an update's patch is merged one level deep in SQL.
+  - A duplicate key at any depth is refused.
+  - The caps are 64 KiB and 256 columns, and an oversized patch is refused before merging.
+  - Refusals give sizes, ids and the journaled table only.
+  - A replay is honoured only for a finished `engine` call.
+  - The result kind `engine`, labelled `tool:table_write`, is set on the tool call's journal row (AD-10 as amended). The data-free receipt counts columns in SQL.
+  - Audit arguments are ids, counts and versions, with no data and no hash.
+- **The owner's conditions:**
+  - check-deps row 48: the row-write command is named only in am-store and its tests until the ToolGate slice.
+  - check-deps row 49: the row-content readers have unique names (`table_rows_of`, `table_row_by_id`, `row_history_of`, `row_written_at`) and are matched as bare tokens.
+  - A step has no read path: no `from_row`, no row-input slot.
+  - `Debug` on the row types shows lengths only.
+
+**Size (owner rule: code and test lines reported separately):** 1,288 lines of code (source and migration, doc comments included) and 3,844 lines of tests.
+
+**Tests:** 48 store tests in `rows.rs`, plus migration tests, xtask tests for rows 48 and 49, doctests, and literal updates. Every test was written and seen red first, with red runs logged for the build and both review rounds. `just check`: 1455 passed, 8 skipped.
+
+**Review:** a correctness review and an adversarial security review, then a follow-up review, all on Opus. None found a way through the row command.
+- Round 1 fixed R1–R13 and R2b. The worst was a rowid collision that could re-create a tainted row clean.
+- Round 2 fixed T1–T6. T1(b) was closed by the never-back-to-`queued` guard, because the `started_at` clause conflicted with a 3.3 fixture.
+- D1–D4 are accepted, with reasons above.
+
+**For the owner:**
+- **Decided under the standing rules:**
+  - the row caps (64 KiB, 256 columns);
+  - row 49 moved into this slice (it only narrows);
+  - the never-back-to-`queued` guard.
+- **Note for 3.9:** a resume that requeues an attempt must relax that guard in its own review.
+- **Residuals:**
+  - a proc-macro could hide a name from check-deps (D3);
+  - `Actor::Seat` carries no attempt id, which matters for 3.14 (D2);
+  - deleting a tool call stays possible, for AD-25 run deletion (D1).

@@ -18,7 +18,10 @@ use am_domain::{
     Actor, ChatRequest, EventSink, Instruction, LlmProvider, Message, Part, Role, StopReason,
     StreamEvent, Usage,
 };
-use am_store::{CallPurpose, Reader, StepInput, StepRow, StoreError, WriteCommand, Writer, new_id};
+use am_store::{
+    AttemptWrites, CallPurpose, Reader, StepInput, StepRow, StoreError, WriteCommand, Writer,
+    new_id,
+};
 use tokio_util::sync::CancellationToken;
 
 use crate::TokenSignal;
@@ -160,6 +163,13 @@ pub async fn drive_run(
                     inputs,
                     taint,
                     prompt: Vec::new(),
+                    // The spike's linear workflow runs no seat and writes
+                    // no table (story 3.6, the store slice).
+                    writes: AttemptWrites {
+                        seat: String::new(),
+                        table: None,
+                        document: None,
+                    },
                 },
             )?;
         }

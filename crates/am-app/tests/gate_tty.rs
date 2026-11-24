@@ -542,6 +542,11 @@ fn item_by_system(e: &Env, kind: am_domain::InboxKind) -> String {
                 inputs: vec![],
                 taint: Taint::Clean,
                 prompt: vec![],
+                writes: am_store::AttemptWrites {
+                    seat: "first".into(),
+                    table: None,
+                    document: None,
+                },
             },
         )
         .unwrap();

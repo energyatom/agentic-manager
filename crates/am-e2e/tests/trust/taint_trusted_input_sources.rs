@@ -30,7 +30,7 @@ use am_domain::{
 use am_engine::journal::{LinearWorkflow, Price, create_run, drive_run};
 use am_engine::run::run_plan;
 use am_providers::{AnthropicProvider, OpenAiCompatProvider};
-use am_store::{Reader, Store, WriteCommand};
+use am_store::{AttemptWrites, Reader, Store, WriteCommand};
 use am_testkit::{FakeEgress, FakeLlm, ScriptedTurn};
 use serde_json::Value;
 use support::*;
@@ -196,6 +196,11 @@ fn spike_run_after_a(db: &Path, store: &Store, taint: Taint) -> String {
             inputs: vec![],
             taint,
             prompt: vec![],
+            writes: AttemptWrites {
+                seat: "seat-a".into(),
+                table: None,
+                document: None,
+            },
         },
     )
     .unwrap();

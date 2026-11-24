@@ -43,7 +43,7 @@ use am_api::{
 };
 use am_domain::{Decision, HumanActor, InboxKind, LlmProvider, REVIEWER_HAT, Taint};
 use am_engine::run::{HandOff, RunOutcome, RunPlan, StepPlan, run_plan};
-use am_store::{NewInboxItem, StepInput, Store, WriteCommand, new_id};
+use am_store::{AttemptWrites, NewInboxItem, StepInput, Store, WriteCommand, new_id};
 use inbox::{
     FakePin, INBOX, OTHER, PINNED, events_until, item_path, resolve, resolve_path, with_pin,
     with_project_writer,
@@ -556,6 +556,11 @@ async fn an_inbox_event_carries_only_the_id_and_status() {
             inputs: vec![],
             taint: Taint::Clean,
             prompt: vec![],
+            writes: AttemptWrites {
+                seat: "seat-draft".into(),
+                table: None,
+                document: None,
+            },
         },
     )
     .unwrap();
@@ -788,6 +793,11 @@ fn failed_run(rig: &Rig) -> String {
             inputs: vec![],
             taint: Taint::Clean,
             prompt: vec![],
+            writes: AttemptWrites {
+                seat: "seat-draft".into(),
+                table: None,
+                document: None,
+            },
         },
     )
     .unwrap();
@@ -927,6 +937,11 @@ fn stuck(rig: &Rig, how: Stuck) -> String {
             inputs: vec![],
             taint: Taint::Clean,
             prompt: vec![],
+            writes: AttemptWrites {
+                seat: "seat-draft".into(),
+                table: None,
+                document: None,
+            },
         },
     )
     .unwrap();

@@ -90,8 +90,8 @@ use am_domain::{
     StreamEvent, Taint, ToolCall, ToolRunner, ToolSpec, TrustedInput, UntrustedData,
 };
 use am_store::{
-    CallPurpose, CallSettlement, NewInboxItem, NewPromptPart, PromptKind, PromptSlot, Reader,
-    StepInput, StepRow, Store, StoreError, WriteCommand, new_id,
+    AttemptWrites, CallPurpose, CallSettlement, NewInboxItem, NewPromptPart, PromptKind,
+    PromptSlot, Reader, StepInput, StepRow, Store, StoreError, WriteCommand, new_id,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -1138,6 +1138,13 @@ impl Run<'_> {
                 inputs: journaled,
                 taint,
                 prompt: assembled.parts,
+                // Story 3.6, the store slice: the attempt's seat, and no
+                // table yet (the ToolGate slice declares it).
+                writes: AttemptWrites {
+                    seat: step.seat.clone(),
+                    table: None,
+                    document: None,
+                },
             },
         )?;
         progress.open_step = Some(row.id.clone());

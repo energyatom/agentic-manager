@@ -1204,3 +1204,417 @@ fn a_site_cannot_reach_the_part_variants_by_import_alias_spacing_or_line_breaks(
         refused(what, &[(file, source)], file, &["AD-10"]);
     }
 }
+
+// ------------------------------------------------ the store slice of 3.6
+//
+// Epic 3, the store slice of story 3.6 ("Row store and history"; the
+// owner's condition of the third re-slice and the manager's row 49,
+// 2026-11-24; AD-21): two call-site rules beside 3.4's resolve rule, each
+// over whole-file shipped text with whitespace around `.` and `::`
+// normalised and line breaks joined:
+//
+// - row 48: the store's row command `apply_row_write` stands in shipped
+//   code only in `crates/am-store/src/` (its definition and its
+//   `#[cfg(test)]` items): nothing else calls it until the ToolGate slice
+//   adds its one caller, the engine's port implementation;
+// - row 49: the readers of row content on the store's `Reader` (`rows`,
+//   `row`, `row_history`, `row_write`) are named in shipped code only in
+//   `crates/am-store/src/`; the data-free receipt (`row_receipt`) is not one
+//   of them.
+//
+// Tests, comments and literals are not shipped code. Written before the
+// rules exist.
+
+/// am-store's row command and a unit test that calls it.
+const STORE_ROWS: &str = "impl Writer {\n    pub fn apply_row_write(&self, actor: Actor, write: RowWrite) -> Result<(), StoreError> {\n        self.send(actor, Command::Row(write))\n    }\n}\n#[cfg(test)]\nmod tests {\n    fn replay(w: &super::Writer, a: Actor, x: RowWrite) {\n        let _ = w.apply_row_write(a, x);\n    }\n}\n";
+
+/// am-store's readers of row content and its receipt (their definitions),
+/// a reader that calls another, and a unit test that calls them.
+const STORE_READERS: &str = "impl Reader {\n    pub fn table_rows_of(&self, table_id: &str) -> Result<Vec<RowRecord>, StoreError> {\n        self.select(table_id)\n    }\n    pub fn table_row_by_id(&self, table_id: &str, row_id: &str) -> Result<Option<RowRecord>, StoreError> {\n        Ok(self.table_rows_of(table_id)?.into_iter().find(|r| r.row_id == row_id))\n    }\n    pub fn row_history_of(&self, table_id: &str, row_id: &str) -> Result<Vec<RowHistoryRecord>, StoreError> {\n        self.images(table_id, row_id)\n    }\n    pub fn row_written_at(&self, step_run_id: &str, call_seq: i64) -> Result<Option<RowHistoryRecord>, StoreError> {\n        self.image_at(step_run_id, call_seq)\n    }\n    pub fn row_receipt(&self, step_run_id: &str, call_seq: i64) -> Result<Option<RowReceipt>, StoreError> {\n        Ok(self.row_written_at(step_run_id, call_seq)?.map(|i| receipt(&i)))\n    }\n}\n#[cfg(test)]\nmod tests {\n    fn t(w: &crate::Writer, r: &super::Reader, a: Actor, x: RowWrite) {\n        let _ = w.apply_row_write(a, x);\n        let _ = r.row_history_of(\"entries\", \"r-1\");\n    }\n}\n";
+
+/// The store slice's allowed sites: am-store's command and readers, the
+/// engine's `StartAttempt` with no table (no write path) and a call of the
+/// data-free receipt, tests that call everything, and comments and
+/// literals that name the tokens.
+fn store_slice_files() -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("crates/am-store/src/lib.rs", STORE_ROWS),
+        ("crates/am-store/src/rows.rs", STORE_READERS),
+        (
+            "crates/am-engine/src/run.rs",
+            "// No step writes or reads a row yet: apply_row_write and table_rows_of are the store's.\nconst WHY: &str = \"apply_row_write is called from the ToolGate slice on; reader.row_history_of( never\";\nfn start(step: &StepPlan) -> WriteCommand {\n    WriteCommand::StartAttempt { step_run_id: String::new(), inputs: vec![], taint: Taint::Clean, prompt: vec![], writes: AttemptWrites { seat: step.seat.clone(), table: None, document: None } }\n}\n",
+        ),
+        (
+            "crates/am-engine/src/toolgate.rs",
+            "fn receipt(r: &am_store::Reader, step_run: &str, seq: i64) -> Option<am_store::RowReceipt> {\n    r.row_receipt(step_run, seq).ok().flatten()\n}\n",
+        ),
+        (
+            "crates/am-store/tests/rows.rs",
+            "fn t(w: &am_store::Writer, r: &am_store::Reader, a: Actor, x: RowWrite) {\n    let _ = w.apply_row_write(a, x);\n    let _ = r.table_rows_of(\"entries\");\n    let _ = r.table_row_by_id(\"entries\", \"r-1\");\n    let _ = r.row_history_of(\"entries\", \"r-1\");\n    let _ = r.row_written_at(\"s\", 1);\n}\n",
+        ),
+        (
+            "crates/am-e2e/tests/engine/support/mod.rs",
+            "pub fn rows_of(db: &Path, table: &str) -> Vec<RowRecord> {\n    Reader::open(db).unwrap().table_rows_of(table).unwrap()\n}\n",
+        ),
+    ]
+}
+
+/// A tree holding [`store_slice_files`], with each of `files` added or put
+/// in place of the file at the same path.
+fn store_slice_tree(files: &[(&str, &str)]) -> tempfile::TempDir {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut all = store_slice_files();
+    for (file, _) in files {
+        all.retain(|(f, _)| f != file);
+    }
+    for (file, text) in all.iter().chain(files.iter()) {
+        common::write(tmp.path(), file, text);
+    }
+    tmp
+}
+
+/// The 1-based lines of `source` that hold any of `markers`.
+fn lines_holding(source: &str, markers: &[&str]) -> Vec<usize> {
+    source
+        .lines()
+        .enumerate()
+        .filter(|(_, l)| markers.iter().any(|m| l.contains(m)))
+        .map(|(i, _)| i + 1)
+        .collect()
+}
+
+/// `check-deps` on [`store_slice_tree`] with `(file, source)` planted
+/// fails, naming `file:<line>` for one of the lines of `source` that hold
+/// one of `markers` and every one of `words`; no allowed site is a finding.
+fn store_slice_refused(what: &str, file: &str, source: &str, markers: &[&str], words: &[&str]) {
+    let tmp = store_slice_tree(&[(file, source)]);
+    let out = deps_at(tmp.path());
+    let err = stderr(&out);
+    assert!(!out.status.success(), "{what}: must fail: {err}");
+    let lines = lines_holding(source, markers);
+    assert!(!lines.is_empty(), "{what}: the source holds {markers:?}");
+    assert!(
+        lines.iter().any(|n| err.contains(&format!("{file}:{n}"))),
+        "{what}: names {file} at a line holding {markers:?} ({lines:?}): {err}"
+    );
+    for w in words {
+        assert!(err.contains(w), "{what}: names `{w}`: {err}");
+    }
+    for (allowed, _) in store_slice_files() {
+        if allowed != file {
+            assert!(
+                !err.contains(allowed),
+                "{what}: an allowed site is not a finding ({allowed}): {err}"
+            );
+        }
+    }
+}
+
+/// Row 48 (the owner's condition: nothing in shipped code calls the
+/// row-write command until the ToolGate slice): am-store's definition and
+/// its own `#[cfg(test)]` calls, tests, comments and literals pass. Each
+/// planted call fails, naming the file, the line, `apply_row_write` and
+/// AD-21: in the engine's driver, in the file the ToolGate slice will make
+/// its one caller (not yet), in am-app and in am-server; split over lines
+/// and spaced around `.`; by path (`Writer::apply_row_write(&w, …)`), also
+/// with spaces around `::`.
+#[test]
+fn the_row_write_command_is_named_only_in_the_store() {
+    let tmp = store_slice_tree(&[]);
+    let out = deps_at(tmp.path());
+    assert!(
+        out.status.success(),
+        "am-store, tests, comments and literals pass: {}",
+        stderr(&out)
+    );
+
+    let call = "fn write(w: &am_store::Writer, a: Actor, x: RowWrite) {\n    let _ = w.apply_row_write(a, x);\n}\n";
+    for (what, file, source) in [
+        ("the engine's driver", "crates/am-engine/src/run.rs", call),
+        (
+            "the engine's port file, before the ToolGate slice",
+            "crates/am-engine/src/row_writer.rs",
+            call,
+        ),
+        ("am-app", "crates/am-app/src/run.rs", call),
+        ("am-server", "crates/am-server/src/inbox.rs", call),
+        (
+            "split over lines and spaced",
+            "crates/am-tools/src/lib.rs",
+            "fn write(w: &Writer, a: Actor, x: RowWrite) {\n    let _ = w\n        . apply_row_write (a, x);\n}\n",
+        ),
+        (
+            "by path",
+            "crates/am-engine/src/gate.rs",
+            "fn write(w: &am_store::Writer, a: Actor, x: RowWrite) {\n    let _ = am_store::Writer::apply_row_write(w, a, x);\n}\n",
+        ),
+        (
+            "by path, spaces around ::",
+            "crates/am-mcp/src/lib.rs",
+            "fn write(w: &Writer, a: Actor, x: RowWrite) {\n    let _ = Writer :: apply_row_write(&w, a, x);\n}\n",
+        ),
+    ] {
+        store_slice_refused(
+            what,
+            file,
+            source,
+            &["apply_row_write"],
+            &["apply_row_write", "AD-21"],
+        );
+    }
+}
+
+/// The `.rs` files of the shipped tree (every crate's `src/`), with their
+/// code (lines that are only a comment left out) as one line, whitespace
+/// around `.` and `::` and line breaks normalised away.
+fn shipped_sources() -> Vec<(String, String)> {
+    fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                walk(&p, out);
+            } else if p.extension().is_some_and(|x| x == "rs") {
+                out.push(p);
+            }
+        }
+    }
+    let root = repo_root();
+    let mut files = Vec::new();
+    for krate in std::fs::read_dir(root.join("crates")).unwrap().flatten() {
+        walk(&krate.path().join("src"), &mut files);
+    }
+    files.sort();
+    files
+        .into_iter()
+        .map(|p| {
+            let text = std::fs::read_to_string(&p).unwrap();
+            let code: String = text
+                .lines()
+                .filter(|l| !l.trim_start().starts_with("//"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let flat = code
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .replace(" ::", "::")
+                .replace(":: ", "::")
+                .replace(" .", ".")
+                .replace(". ", ".");
+            let rel = p
+                .strip_prefix(&root)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/");
+            (rel, flat)
+        })
+        .collect()
+}
+
+/// Row 48: on the shipped tree am-store defines the row command, no file
+/// outside `crates/am-store/src/` names it, and `cargo xtask check-deps`
+/// passes on the real workspace.
+#[test]
+fn the_shipped_tree_passes_the_row_write_rule() {
+    let sources = shipped_sources();
+    let defined: Vec<&String> = sources
+        .iter()
+        .filter(|(rel, code)| {
+            rel.starts_with("crates/am-store/src/") && code.contains("fn apply_row_write(")
+        })
+        .map(|(rel, _)| rel)
+        .collect();
+    assert!(!defined.is_empty(), "am-store defines the row command");
+    let elsewhere: Vec<&String> = sources
+        .iter()
+        .filter(|(rel, code)| {
+            !rel.starts_with("crates/am-store/src/") && code.contains("apply_row_write")
+        })
+        .map(|(rel, _)| rel)
+        .collect();
+    assert!(
+        elsewhere.is_empty(),
+        "no shipped caller of the row command: {elsewhere:?}"
+    );
+    let out = xtask(&["check-deps"]);
+    assert!(
+        out.status.success(),
+        "the real workspace passes the rule: {}",
+        stderr(&out)
+    );
+}
+
+/// The readers of row content on the store's `Reader`, by their names
+/// unique in `crates/` (story 3.6's review triage round 1, R4).
+const ROW_READERS: [&str; 4] = [
+    "table_rows_of",
+    "table_row_by_id",
+    "row_history_of",
+    "row_written_at",
+];
+
+/// Row 49 (manager, 2026-11-24; review triage round 1, R4 and R13: no
+/// shipped code reads row content). The store's readers, a test and a
+/// shipped call of the data-free receipt pass. A reader named anywhere in
+/// shipped code outside `crates/am-store/src/` fails, matched as a bare
+/// token over the whole file: called in the engine, am-providers, am-tools,
+/// am-app and am-server; split over lines; spaced around `.`; on a `use …
+/// as` alias of `Reader`; taken as a function value
+/// (`let f = Reader::<name>`); passed to `.map(Reader::<name>)`; with a
+/// turbofish; as a raw identifier (`r#<name>`); and called by its path.
+/// Each finding names `file:line` of a planted line and, on that same
+/// finding, the exact reader. On the shipped tree no file outside
+/// `crates/am-store/src/` names one.
+#[test]
+fn no_shipped_code_reads_row_content() {
+    let tmp = store_slice_tree(&[]);
+    let out = deps_at(tmp.path());
+    assert!(
+        out.status.success(),
+        "the store's readers, tests and the receipt pass: {}",
+        stderr(&out)
+    );
+
+    for (what, file, source, reader) in [
+        (
+            "a call in the engine",
+            "crates/am-engine/src/run.rs",
+            "fn peek(r: &am_store::Reader) -> usize {\n    r.table_rows_of(\"entries\").unwrap().len()\n}\n",
+            "table_rows_of",
+        ),
+        (
+            "a call in am-providers",
+            "crates/am-providers/src/common.rs",
+            "fn peek(r: &am_store::Reader, id: &str) -> Option<String> {\n    r.table_row_by_id(\"entries\", id).ok().flatten().map(|x| x.data)\n}\n",
+            "table_row_by_id",
+        ),
+        (
+            "a call in am-tools",
+            "crates/am-tools/src/lib.rs",
+            "fn peek(r: &am_store::Reader, id: &str) -> usize {\n    r.row_history_of(\"entries\", id).unwrap().len()\n}\n",
+            "row_history_of",
+        ),
+        (
+            "a call in am-app",
+            "crates/am-app/src/run.rs",
+            "fn peek(r: &am_store::Reader, step_run: &str) -> bool {\n    r.row_written_at(step_run, 1).unwrap().is_some()\n}\n",
+            "row_written_at",
+        ),
+        (
+            "a call in am-server",
+            "crates/am-server/src/runs.rs",
+            "fn peek(r: &am_store::Reader) -> usize {\n    r.table_rows_of(\"entries\").unwrap().len()\n}\n",
+            "table_rows_of",
+        ),
+        (
+            "split over lines",
+            "crates/am-engine/src/gate.rs",
+            "fn peek(reader: &am_store::Reader, id: &str) -> usize {\n    reader\n        .row_history_of(\"entries\", id)\n        .unwrap()\n        .len()\n}\n",
+            "row_history_of",
+        ),
+        (
+            "spaced around the dot",
+            "crates/am-engine/src/scheduler.rs",
+            "fn peek(reader: &am_store::Reader) -> bool {\n    reader . row_written_at (\"s\", 1).unwrap().is_some()\n}\n",
+            "row_written_at",
+        ),
+        (
+            "on a use-as alias of Reader",
+            "crates/am-app/src/gate.rs",
+            "use am_store::Reader as Journal;\nfn peek(j: &Journal) -> usize {\n    j.table_rows_of(\"entries\").unwrap().len()\n}\n",
+            "table_rows_of",
+        ),
+        (
+            "a function value",
+            "crates/am-engine/src/prompt.rs",
+            "fn peek(r: &am_store::Reader) -> usize {\n    let f = am_store::Reader::table_rows_of;\n    f(r, \"entries\").unwrap().len()\n}\n",
+            "table_rows_of",
+        ),
+        (
+            "passed to map",
+            "crates/am-engine/src/schema.rs",
+            "fn peek(r: &am_store::Reader, keys: Vec<(&str, &str)>) -> usize {\n    keys.into_iter().map(|(t, id)| (r, t, id)).map(Reader::row_history_of).count()\n}\n",
+            "row_history_of",
+        ),
+        (
+            "a turbofish",
+            "crates/am-server/src/inbox.rs",
+            "fn peek(r: &am_store::Reader, id: &str) -> bool {\n    r.table_row_by_id::<>(\"entries\", id).unwrap().is_some()\n}\n",
+            "table_row_by_id",
+        ),
+        (
+            "a raw identifier",
+            "crates/am-mcp/src/lib.rs",
+            "fn peek(r: &am_store::Reader) -> bool {\n    r.r#row_written_at(\"s\", 1).unwrap().is_some()\n}\n",
+            "row_written_at",
+        ),
+        (
+            "a path call",
+            "crates/am-engine/src/cancel.rs",
+            "fn peek(r: &am_store::Reader, id: &str) -> usize {\n    am_store::Reader::row_history_of(r, \"entries\", id).unwrap().len()\n}\n",
+            "row_history_of",
+        ),
+    ] {
+        reader_refused(what, file, source, reader);
+    }
+
+    let sources = shipped_sources();
+    let elsewhere: Vec<(&String, &str)> = sources
+        .iter()
+        .filter(|(rel, _)| !rel.starts_with("crates/am-store/src/"))
+        .flat_map(|(rel, code)| {
+            ROW_READERS
+                .iter()
+                .filter(|reader| names_token(code, reader))
+                .map(move |reader| (rel, *reader))
+        })
+        .collect();
+    assert!(
+        elsewhere.is_empty(),
+        "no shipped reader of row content outside am-store: {elsewhere:?}"
+    );
+}
+
+/// True when `code` holds `token` with no word character directly before
+/// or after it.
+fn names_token(code: &str, token: &str) -> bool {
+    code.match_indices(token).any(|(at, _)| {
+        let word = |c: char| c.is_alphanumeric() || c == '_';
+        let before = code[..at].chars().next_back();
+        let after = code[at + token.len()..].chars().next();
+        !before.is_some_and(word) && !after.is_some_and(word)
+    })
+}
+
+/// `check-deps` on [`store_slice_tree`] with `(file, source)` planted
+/// fails with a finding that names, on one stderr line, `file:<line>` for a
+/// line of `source` holding `reader` and the exact `reader` (R13); no
+/// allowed site is a finding.
+fn reader_refused(what: &str, file: &str, source: &str, reader: &str) {
+    let tmp = store_slice_tree(&[(file, source)]);
+    let out = deps_at(tmp.path());
+    let err = stderr(&out);
+    assert!(!out.status.success(), "{what}: must fail: {err}");
+    let lines = lines_holding(source, &[reader]);
+    assert!(!lines.is_empty(), "{what}: the source holds {reader}");
+    assert!(
+        err.lines().any(|finding| {
+            lines
+                .iter()
+                .any(|n| finding.contains(&format!("{file}:{n}:")))
+                && names_token(finding, reader)
+        }),
+        "{what}: a finding names {file} at a line holding {reader} ({lines:?}) and `{reader}`: {err}"
+    );
+    for (allowed, _) in store_slice_files() {
+        if allowed != file {
+            assert!(
+                !err.contains(allowed),
+                "{what}: an allowed site is not a finding ({allowed}): {err}"
+            );
+        }
+    }
+}

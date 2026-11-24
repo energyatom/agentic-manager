@@ -627,6 +627,11 @@ fn migration_0007_keeps_every_row_as_attempt_one_untainted() {
                 inputs: vec![],
                 taint: Taint::Clean,
                 prompt: vec![],
+                writes: am_store::AttemptWrites {
+                    seat: "seat-a".into(),
+                    table: None,
+                    document: None,
+                },
             },
         )
         .unwrap();
@@ -657,6 +662,11 @@ fn run_step(store: &Store, id: &str, call: &str, output: &str) {
             inputs: vec![],
             taint: Taint::Clean,
             prompt: vec![],
+            writes: am_store::AttemptWrites {
+                seat: "seat-a".into(),
+                table: None,
+                document: None,
+            },
         },
     )
     .unwrap();
@@ -723,6 +733,11 @@ fn a_loop_back_keeps_the_old_attempt_and_queues_new_ones() {
             inputs: vec![],
             taint: Taint::Clean,
             prompt: vec![],
+            writes: am_store::AttemptWrites {
+                seat: "seat-a".into(),
+                table: None,
+                document: None,
+            },
         },
     )
     .unwrap();
@@ -878,6 +893,11 @@ fn the_loop_back_input_is_journaled_by_the_loop_back() {
             inputs: vec![],
             taint: Taint::Tainted,
             prompt: vec![],
+            writes: am_store::AttemptWrites {
+                seat: "seat-a".into(),
+                table: None,
+                document: None,
+            },
         },
     )
     .unwrap();

@@ -643,6 +643,11 @@ async fn continue_refuses_a_step_left_running() {
             inputs: vec![],
             taint: Taint::Clean,
             prompt: vec![],
+            writes: am_store::AttemptWrites {
+                seat: "seat-draft".into(),
+                table: None,
+                document: None,
+            },
         },
     )
     .unwrap();
