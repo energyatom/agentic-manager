@@ -85,17 +85,19 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use am_domain::{
-    Actor, AuditEvent, AuditSink, ChatOutcome, ChatRequest, EventSink, InboxKind, Instruction,
-    LlmProvider, Message, Part, ProviderError, Role, StepStatus, StopReason, StreamEvent, Taint,
-    ToolCall, ToolRunner, ToolSpec, TrustedInput, UntrustedData,
+    Actor, AuditEvent, AuditSink, ChatOutcome, ChatRequest, Clock, EventSink, InboxKind,
+    Instruction, LlmProvider, Message, Part, ProviderError, Role, StepStatus, StopReason,
+    StreamEvent, Taint, ToolCall, ToolRunner, ToolSpec, TrustedInput, UntrustedData,
 };
 use am_store::{
-    CallSettlement, NewInboxItem, Reader, StepInput, StepRow, Store, StoreError, WriteCommand,
-    new_id,
+    CallPurpose, CallSettlement, NewInboxItem, NewPromptPart, PromptKind, PromptSlot, Reader,
+    StepInput, StepRow, Store, StoreError, WriteCommand, new_id,
 };
 use tokio_util::sync::CancellationToken;
 
 use crate::TokenSignal;
+use crate::prompt::{self, Slots, StepPrompt};
+use crate::schema::{self, Compiled, OutputSchema};
 use crate::toolgate::{ToolGate, builtin_names, label_of};
 
 /// The rate-snapshot id of a zero reservation: no price was read (amounts
@@ -164,6 +166,13 @@ pub struct StepPlan {
     pub max_output_tokens: u32,
     /// A gate step's provider is never called.
     pub provider: Arc<dyn LlmProvider>,
+    /// Story 3.5 (AD-27): the seat's goal, backstory, skills, notes, file
+    /// names and links, as typed slots; `system` and `instruction` above
+    /// are slots 1 and 10. A gate assembles nothing.
+    pub prompt: StepPrompt,
+    /// Story 3.5 (AD-36): the schema the step's final message must match;
+    /// compiled before any row is written.
+    pub output_schema: Option<OutputSchema>,
 }
 
 /// A run to make: the workflow's steps in order, built from one config
@@ -175,6 +184,9 @@ pub struct RunPlan {
     /// pinned on the run row.
     pub config_hash: String,
     pub steps: Vec<StepPlan>,
+    /// Story 3.5 (AD-27): read at each attempt's start, so a guidance note
+    /// that has expired is absent from the prompt.
+    pub clock: Arc<dyn Clock>,
 }
 
 /// How a run ended, or where it waits. A failed run is an outcome, not an
@@ -197,6 +209,11 @@ pub struct RunOutcome {
 pub enum RunError {
     #[error("the workflow {0} has no steps, so there is nothing to run")]
     NoSteps(String),
+    /// Story 3.5 (AD-3, AD-36): a step's output schema cannot be used (a
+    /// remote or file `$ref`, a pattern the linear-time engine refuses, an
+    /// unknown type); nothing was written.
+    #[error("step `{step}` cannot run: {why}")]
+    Schema { step: String, why: String },
     /// The tools handed to the run cannot be used (story 3.3, review R7).
     #[error("the run's tools were refused: {0}")]
     Tools(String),
@@ -396,6 +413,8 @@ async fn run_on(
     if plan.steps.is_empty() {
         return Err(RunError::NoSteps(plan.workflow.clone()));
     }
+    // Story 3.5: every step's schema is compiled before any row is written.
+    let schemas = compile_schemas(plan)?;
     let run_id = new_id();
     // A tool call acts as `Actor::Seat` of this run, named by its UUID: an
     // id that does not parse is an error, never a made-up UUID (review P13).
@@ -417,6 +436,7 @@ async fn run_on(
         run_id: &run_id,
         run_uuid,
         plan,
+        schemas: &schemas,
         cancel,
         tools: tools.as_ref(),
     };
@@ -446,6 +466,7 @@ pub async fn continue_run(
     if plan.steps.is_empty() {
         return Err(RunError::NoSteps(plan.workflow.clone()));
     }
+    let schemas = compile_schemas(plan)?;
     let reader = store.reader()?;
     let Some(run) = reader.run(run_id)? else {
         return Err(RunError::NotContinuable(format!(
@@ -494,6 +515,7 @@ pub async fn continue_run(
         run_id,
         run_uuid,
         plan,
+        schemas: &schemas,
         cancel,
         tools: None,
     };
@@ -632,6 +654,26 @@ impl Refusals {
     }
 }
 
+/// Story 3.5 (AD-3, AD-36): each step's output schema, compiled; `None` for
+/// a step that declares none. A schema that cannot be compiled refuses the
+/// run in words naming the step and the schema's id.
+fn compile_schemas(plan: &RunPlan) -> Result<Vec<Option<Compiled>>, RunError> {
+    plan.steps
+        .iter()
+        .map(|step| {
+            step.output_schema
+                .as_ref()
+                .map(|s| {
+                    schema::compile(&s.id, &s.schema).map_err(|e| RunError::Schema {
+                        step: step.key.clone(),
+                        why: e.to_string(),
+                    })
+                })
+                .transpose()
+        })
+        .collect()
+}
+
 /// One run being driven.
 struct Run<'a> {
     store: &'a Store,
@@ -639,6 +681,8 @@ struct Run<'a> {
     run_id: &'a str,
     run_uuid: uuid::Uuid,
     plan: &'a RunPlan,
+    /// The compiled output schema of each plan step, by index.
+    schemas: &'a [Option<Compiled>],
     cancel: CancellationToken,
     tools: Option<&'a Tooling>,
 }
@@ -943,17 +987,17 @@ impl Run<'_> {
             }
         }
         // The plan's own inputs: untrusted, so every attempt is tainted.
+        // Their parts are the assembler's (it fences them last, after the
+        // produced ones); only their rows are journaled here.
         for data in &self.plan.steps[i].inputs {
-            inputs.add(
-                StepInput {
-                    kind: "untrusted".into(),
-                    from_step_run: None,
-                    from_item: None,
-                    label: data.label().to_string(),
-                    taint: Taint::Tainted,
-                },
-                Part::Untrusted(data.clone()),
-            );
+            inputs.taint = inputs.taint.raise(Taint::Tainted);
+            inputs.rows.push(StepInput {
+                kind: "untrusted".into(),
+                from_step_run: None,
+                from_item: None,
+                label: data.label().to_string(),
+                taint: Taint::Tainted,
+            });
         }
         Ok(inputs)
     }
@@ -1070,14 +1114,30 @@ impl Run<'_> {
             taint,
             ..
         } = inputs;
+        // Story 3.5 (AD-27): the one assembler builds the request's parts in
+        // AD-27's order, and the journal's record of each, read at the
+        // attempt's start.
+        let assembled = prompt::assemble(
+            Slots {
+                role: step.system.clone(),
+                prompt: step.prompt.clone(),
+                step: step.instruction.clone(),
+                trusted,
+                produced_untrusted: fenced,
+                plan_inputs: step.inputs.clone(),
+            },
+            self.plan.clock.now(),
+        );
+        let system = assembled.system;
         // Committed before the first call (AD-8): the attempt's start, its
-        // inputs and its taint.
+        // inputs, its taint and the prompt it was sent.
         self.exec(
             engine(),
             WriteCommand::StartAttempt {
                 step_run_id: row.id.clone(),
                 inputs: journaled,
                 taint,
+                prompt: assembled.parts,
             },
         )?;
         progress.open_step = Some(row.id.clone());
@@ -1085,12 +1145,9 @@ impl Run<'_> {
         // start committed (review P1; story 3.9's resume will count a
         // resumed attempt's persisted `started_at`).
         let deadline = tokio::time::Instant::now() + step.limits.wall_clock;
-        let mut parts = vec![Part::Instruction(step.instruction.clone())];
-        parts.extend(trusted);
-        parts.extend(fenced);
         let mut messages = vec![Message {
             role: Role::User,
-            parts,
+            parts: assembled.user,
         }];
         let seat = Actor::Seat {
             seat: step.seat.clone(),
@@ -1100,6 +1157,11 @@ impl Run<'_> {
         // The taint the next reservation carries: the attempt's, then
         // tainted once a tool result is appended.
         let mut carry = taint;
+        // Story 3.5 (AD-36): the repair call's own parts, once the final
+        // message failed its schema and a turn and time remain; `repaired`
+        // once that call is reserved (at most one per attempt).
+        let mut pending_repair: Option<Vec<NewPromptPart>> = None;
+        let mut repaired = false;
         loop {
             // Nothing starts once the deadline has passed (review P7).
             if tokio::time::Instant::now() >= deadline {
@@ -1115,6 +1177,10 @@ impl Run<'_> {
             }
             let made = self.store.reader()?.calls_for_step(&row.id)?.len() as i64;
             let call_id = new_id();
+            let (purpose, own_parts) = match pending_repair.take() {
+                Some(parts) => (CallPurpose::Repair, parts),
+                None => (CallPurpose::Turn, Vec::new()),
+            };
             self.exec(
                 engine(),
                 WriteCommand::ReserveCall {
@@ -1124,18 +1190,58 @@ impl Run<'_> {
                     reserved_micro_usd: 0,
                     rate_snapshot: NO_RATE_SNAPSHOT.into(),
                     taint: carry,
+                    purpose,
+                    prompt: own_parts,
                 },
             )?;
             let request = ChatRequest {
                 model: step.model.clone(),
-                system: step.system.clone(),
+                system: system.clone(),
                 messages: messages.clone(),
-                tools: self.tools.map(|t| t.specs.clone()).unwrap_or_default(),
+                // A repair call offers no tool (story 3.5, review R9): it
+                // asks for one message that matches the schema.
+                tools: match purpose {
+                    CallPurpose::Repair => Vec::new(),
+                    CallPurpose::Turn => self.tools.map(|t| t.specs.clone()).unwrap_or_default(),
+                },
                 max_output_tokens: step.max_output_tokens,
             };
             let (turn, timed_out) = self.call_within(step, request, deadline).await;
             if timed_out {
                 let usage = turn.as_ref().ok().and_then(|out| out.usage);
+                // Story 3.5 (review R10): a final message in hand that does
+                // not match its schema fails as a schema failure, with no
+                // time left to repair it. A valid one, a tool request or a
+                // cancelled call still loses to the deadline (P7).
+                if let Ok(out) = &turn
+                    && out.tool_calls.is_empty()
+                    && out.stop == StopReason::EndTurn
+                    && let Some((id, words)) = self.schema_findings(i, step, &out.text)
+                {
+                    let cap = if purpose == CallPurpose::Repair {
+                        // The one repair was used and did not fix it.
+                        Cap::Schema { id, words }
+                    } else {
+                        Cap::SchemaNoTime {
+                            id,
+                            words,
+                            wall_clock: step.limits.wall_clock,
+                        }
+                    };
+                    return self.fail_with_item(
+                        step,
+                        row,
+                        carry,
+                        Some(CallSettlement {
+                            call_id,
+                            usage,
+                            cost_micro_usd: None,
+                        }),
+                        None,
+                        cap,
+                        progress,
+                    );
+                }
                 return self.fail_with_item(
                     step,
                     row,
@@ -1157,7 +1263,140 @@ impl Run<'_> {
             let Ok(out) = turn else {
                 unreachable!("failure_of names every provider error");
             };
+            // Story 3.5 (review R9): a repair call offers no tool, so a tool
+            // call in its reply is an invalid final message; the step fails.
+            if purpose == CallPurpose::Repair
+                && !out.tool_calls.is_empty()
+                && let Some(declared) = &step.output_schema
+            {
+                return self.fail_with_item(
+                    step,
+                    row,
+                    carry,
+                    Some(CallSettlement {
+                        call_id,
+                        usage: out.usage,
+                        cost_micro_usd: None,
+                    }),
+                    None,
+                    Cap::Schema {
+                        id: declared.id.clone(),
+                        words: "its reply asked for a tool, and the repair call offers none".into(),
+                    },
+                    progress,
+                );
+            }
             if out.tool_calls.is_empty() {
+                // Story 3.5 (AD-36): the final message is checked against
+                // the step's schema before anything reads it (a loop-back's
+                // reasons included).
+                if let (Some(declared), Some(Some(compiled))) =
+                    (&step.output_schema, self.schemas.get(i))
+                    && let Err(findings) = schema::check(compiled, &out.text)
+                {
+                    let words = schema::words(&findings);
+                    let settle = CallSettlement {
+                        call_id: call_id.clone(),
+                        usage: out.usage,
+                        cost_micro_usd: None,
+                    };
+                    if repaired {
+                        return self.fail_with_item(
+                            step,
+                            row,
+                            carry,
+                            Some(settle),
+                            None,
+                            Cap::Schema {
+                                id: declared.id.clone(),
+                                words,
+                            },
+                            progress,
+                        );
+                    }
+                    // No time left (review R10): the repair is a model call
+                    // like any other, and nothing starts past the deadline.
+                    if tokio::time::Instant::now() >= deadline {
+                        return self.fail_with_item(
+                            step,
+                            row,
+                            carry,
+                            Some(settle),
+                            None,
+                            Cap::SchemaNoTime {
+                                id: declared.id.clone(),
+                                words,
+                                wall_clock: step.limits.wall_clock,
+                            },
+                            progress,
+                        );
+                    }
+                    // The repair is a model call like any other: the
+                    // iteration cap counts it.
+                    let made = self.store.reader()?.calls_for_step(&row.id)?.len() as u32;
+                    if made >= step.limits.iterations {
+                        return self.fail_with_item(
+                            step,
+                            row,
+                            carry,
+                            Some(settle),
+                            None,
+                            Cap::SchemaNoTurn {
+                                id: declared.id.clone(),
+                                words,
+                                iterations: step.limits.iterations,
+                            },
+                            progress,
+                        );
+                    }
+                    self.exec(
+                        engine(),
+                        WriteCommand::SettleCall {
+                            call_id,
+                            usage: out.usage,
+                            cost_micro_usd: None,
+                        },
+                    )?;
+                    // The repair's parts: the invalid reply (the attempt's
+                    // own words, carrying the attempt's taint) and the
+                    // schema's repair instruction, which am-app built from
+                    // config. The validation words go into no prompt.
+                    pending_repair = Some(vec![
+                        NewPromptPart {
+                            slot: PromptSlot::Reply,
+                            kind: PromptKind::Assistant,
+                            label: format!("reply:{}@{}", step.key, row.attempt),
+                            taint: carry,
+                            text: Some(out.text.clone()),
+                        },
+                        NewPromptPart {
+                            slot: PromptSlot::Repair,
+                            kind: PromptKind::Instruction,
+                            label: "repair".into(),
+                            taint: Taint::Clean,
+                            text: Some(declared.repair.text().to_string()),
+                        },
+                    ]);
+                    repaired = true;
+                    // The repair request (review T3): the attempt's own first
+                    // user message, the invalid final text, the repair
+                    // instruction. Earlier tool turns are not replayed: the
+                    // repair call offers no tool, and a provider may refuse a
+                    // tool block with none defined.
+                    let first = messages[0].clone();
+                    messages = vec![
+                        first,
+                        Message {
+                            role: Role::Assistant,
+                            parts: vec![Part::AssistantText(out.text)],
+                        },
+                        Message {
+                            role: Role::User,
+                            parts: vec![Part::Instruction(declared.repair.clone())],
+                        },
+                    ];
+                    continue;
+                }
                 return self.end_turn(step, row, call_id, out, carry, progress);
             }
             let Some(tools) = self.tools else {
@@ -1220,6 +1459,17 @@ impl Run<'_> {
             // committed with the next call's reservation.
             carry = Taint::Tainted;
         }
+    }
+
+    /// Story 3.5: the schema's id and the findings in words when `text` does
+    /// not match step `i`'s output schema; `None` when it matches or the step
+    /// declares none.
+    fn schema_findings(&self, i: usize, step: &StepPlan, text: &str) -> Option<(String, String)> {
+        let declared = step.output_schema.as_ref()?;
+        let compiled = self.schemas.get(i)?.as_ref()?;
+        schema::check(compiled, text)
+            .err()
+            .map(|findings| (declared.id.clone(), schema::words(&findings)))
     }
 
     /// One model call, cancelled through its own child token when the
@@ -1616,7 +1866,30 @@ enum Cap {
     Iterations(u32),
     ToolCalls(u32),
     WallClock(Duration),
-    LoopBack { to: String, max: u32 },
+    LoopBack {
+        to: String,
+        max: u32,
+    },
+    /// Story 3.5 (AD-36): the final message did not match the step's output
+    /// schema after its one repair. `words` are built from the schema.
+    Schema {
+        id: String,
+        words: String,
+    },
+    /// The final message did not match the schema and the wall clock had
+    /// passed, so no time was left to repair it.
+    SchemaNoTime {
+        id: String,
+        words: String,
+        wall_clock: Duration,
+    },
+    /// The final message did not match the schema and the iterations cap
+    /// left no turn to repair it.
+    SchemaNoTurn {
+        id: String,
+        words: String,
+        iterations: u32,
+    },
 }
 
 impl Cap {
@@ -1636,12 +1909,33 @@ impl Cap {
             Cap::LoopBack { to, max } => format!(
                 "it asked to loop back to step `{to}` again, past its maximum of {max} loop-backs (loop_back.max)"
             ),
+            Cap::Schema { id, words } => format!(
+                "its final message does not match the output schema `{id}`, and the one repair did not fix it: {words}"
+            ),
+            Cap::SchemaNoTime {
+                id,
+                words,
+                wall_clock,
+            } => format!(
+                "its final message does not match the output schema `{id}` ({words}), and there was no time left to repair it: its wall_clock cap of {} (limits.wall_clock) had passed",
+                duration_words(*wall_clock)
+            ),
+            Cap::SchemaNoTurn {
+                id,
+                words,
+                iterations,
+            } => format!(
+                "its final message does not match the output schema `{id}` ({words}), and its iterations cap of {iterations} model turns (limits.iterations) left no turn to repair it"
+            ),
         }
     }
 
     fn title(&self, key: &str) -> String {
         match self {
             Cap::LoopBack { .. } => format!("Step {key} looped back too often"),
+            Cap::Schema { .. } | Cap::SchemaNoTurn { .. } | Cap::SchemaNoTime { .. } => {
+                format!("Step {key} did not match its output schema")
+            }
             _ => format!("Step {key} stopped at a cap"),
         }
     }
@@ -1663,6 +1957,24 @@ impl Cap {
             Cap::LoopBack { to, max } => format!(
                 "Step `{key}` asked to loop back to step `{to}` past its maximum of {max} loop-backs (loop_back.max) and failed, so the run failed. Its reasons are in the output of its last attempt, step run {step_run}."
             ),
+            Cap::Schema { id, words } => format!(
+                "Step `{key}` ended with a final message that does not match its output schema `{id}`, and the one repair did not fix it, so the step failed and the run failed: {words}. The calls are in step run {step_run}; an invalid message is not stored as the step's output."
+            ),
+            Cap::SchemaNoTime {
+                id,
+                words,
+                wall_clock,
+            } => format!(
+                "Step `{key}` ended with a final message that does not match its output schema `{id}` ({words}), and there was no time left to repair it: its wall_clock cap of {} (limits.wall_clock) had passed, so the step failed and the run failed. The call is in step run {step_run}.",
+                duration_words(*wall_clock)
+            ),
+            Cap::SchemaNoTurn {
+                id,
+                words,
+                iterations,
+            } => format!(
+                "Step `{key}` ended with a final message that does not match its output schema `{id}` ({words}), and its iterations cap of {iterations} model turns (limits.iterations) left no turn to repair it, so the step failed and the run failed. The call is in step run {step_run}."
+            ),
         }
     }
 }
@@ -1680,6 +1992,7 @@ mod tests {
             workflow: "wf".into(),
             config_hash: "0".repeat(64),
             steps: vec![],
+            clock: am_testkit::FakeClock::at("2026-11-24T10:00:00Z"),
         };
         let refused = run_plan(
             &store,
@@ -1728,7 +2041,10 @@ mod tests {
                 model: "example-local".into(),
                 max_output_tokens: 64,
                 provider,
+                prompt: StepPrompt::default(),
+                output_schema: None,
             }],
+            clock: am_testkit::FakeClock::at("2026-11-24T10:00:00Z"),
         }
     }
 

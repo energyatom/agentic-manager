@@ -226,6 +226,7 @@ fn failed() -> Rig {
         step_run_id: approve.id.clone(),
         inputs: vec![],
         taint: Taint::Clean,
+        prompt: vec![],
     })
     .unwrap();
     r.exec(WriteCommand::FailWithItem {
@@ -379,6 +380,7 @@ impl Rig {
             step_run_id: draft.id.clone(),
             inputs,
             taint: Taint::Clean,
+            prompt: vec![],
         })
         .unwrap();
         self.exec(WriteCommand::ReserveCall {
@@ -388,6 +390,8 @@ impl Rig {
             reserved_micro_usd: 0,
             rate_snapshot: "none".into(),
             taint: Taint::Clean,
+            purpose: am_store::CallPurpose::Turn,
+            prompt: vec![],
         })
         .unwrap();
         self.exec(WriteCommand::SettleAndFinishStep {
@@ -773,6 +777,7 @@ fn the_note_is_stored_once() {
         step_run_id: draft.id,
         inputs: vec![],
         taint: Taint::Clean,
+        prompt: vec![],
     })
     .unwrap();
 
@@ -919,6 +924,8 @@ fn apply_follows_the_decision_and_nothing_else() {
         reserved_micro_usd: 0,
         rate_snapshot: "none".into(),
         taint: Taint::Clean,
+        purpose: am_store::CallPurpose::Turn,
+        prompt: vec![],
     });
     let before = r.state();
     let back = WriteCommand::SettleAndLoopBack {
@@ -1120,6 +1127,7 @@ fn a_gate_note_input_needs_a_human_return() {
             step_run_id: draft.id.clone(),
             inputs: vec![input],
             taint: Taint::Clean,
+            prompt: vec![],
         });
         assert!(refused.is_err(), "a gate_note input {what}");
         assert_eq!(r.state(), before, "{what}");
@@ -1133,6 +1141,7 @@ fn a_gate_note_input_needs_a_human_return() {
         step_run_id: draft.id.clone(),
         inputs: vec![],
         taint: Taint::Clean,
+        prompt: vec![],
     })
     .expect("the attempt starts with the apply's gate note");
     assert_eq!(r.latest("draft").status, "running");
@@ -1174,6 +1183,7 @@ fn no_system_command_changes_an_open_items_status() {
             step_run_id: gate.clone(),
             inputs: vec![],
             taint: Taint::Clean,
+            prompt: vec![],
         },
         WriteCommand::FinishStep {
             step_run_id: gate.clone(),
@@ -1211,6 +1221,7 @@ fn no_system_command_changes_an_open_items_status() {
             step_run_id: publish.clone(),
             inputs: vec![],
             taint: Taint::Clean,
+            prompt: vec![],
         },
         WriteCommand::StartStep {
             step_run_id: publish,

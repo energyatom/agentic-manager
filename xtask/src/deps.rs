@@ -13,8 +13,24 @@
 //!   am-domain, on their definition lines;
 //! - `Instruction::authored` (review P14), which turns text into a trusted
 //!   instruction, is named only where config or the owner's own words
-//!   become one: [`INSTRUCTION_SITES`], the `#[cfg(test)]` items of
-//!   [`INSTRUCTION_TEST_SITES`], and am-domain's definition line.
+//!   become one: [`INSTRUCTION_SITES`] (three am-app files), the
+//!   `#[cfg(test)]` items of [`INSTRUCTION_TEST_SITES`], and am-domain's
+//!   definition line.
+//!
+//! Story 3.5 (AD-10, the type wall), and what the rule can and cannot do.
+//! `UntrustedData` has no conversion into an `Instruction`, but a string
+//! can still be pulled out of `UntrustedContent::Text(s)`, `Part::Untrusted`
+//! or a `TrustedInput` and handed to `Instruction::authored`. So a file in
+//! [`INSTRUCTION_SITES`] may not name `UntrustedData`, `UntrustedContent`,
+//! `into_content`, `Part::Untrusted`, `Part::Trusted` or `TrustedInput`, over
+//! whole-file text with whitespace normalised (a glob or braced import of
+//! `Part`'s variants and an alias of `Part` fail too), and no file in
+//! `crates/` may alias the untrusted types or `TrustedInput`. **The limit:**
+//! this bans names in a short list of am-app files that build only from
+//! config or fixed text. It does not follow data: a `String` already in
+//! scope in a site file (a step's output, say) can still be handed to
+//! `authored`, so what a site passes in is a review check, not this rule's.
+//! The rule only narrows what story 3.3's rule allows.
 //!
 //! Story 3.4 (AD-15, AD-28; review R12): the one Human-only resolve of an
 //! Inbox item, `Writer::resolve_inbox_item`, and the Human actor's type,
@@ -47,14 +63,32 @@ const TRUSTED_HOME: &str = "crates/am-domain/src/";
 
 /// The shipped files that may call `Instruction::authored` (review P14):
 /// am-app building a run's plan from the config snapshot (a seat's
-/// instructions, a step's instruction), the spike harness's and the
-/// Account test's fixed prompts, and the spike driver's fixed prompt.
-pub const INSTRUCTION_SITES: [&str; 4] = [
+/// instructions, a step's instruction) and the spike harness's and the
+/// Account test's fixed prompts. Only am-app files: am-engine authors no
+/// `Instruction` (its spike driver takes the fixed prompts from the caller).
+pub const INSTRUCTION_SITES: [&str; 3] = [
     "crates/am-app/src/run.rs",
     "crates/am-app/src/spike.rs",
     "crates/am-app/src/accounts.rs",
-    "crates/am-engine/src/journal.rs",
 ];
+
+/// What a file in [`INSTRUCTION_SITES`] may not name in code (story 3.5,
+/// AD-10): the untrusted types, and the accessor that hands their content
+/// out.
+/// Review R3 adds `Part::Untrusted`, `Part::Trusted` and `TrustedInput`,
+/// through which untrusted or journaled text could still be handed on.
+const UNTRUSTED_NAMES: [&str; 6] = [
+    "UntrustedData",
+    "UntrustedContent",
+    "into_content",
+    "Part::Untrusted",
+    "Part::Trusted",
+    "TrustedInput",
+];
+
+/// The types no file in `crates/` may rename (review R3): an alias would
+/// carry them past the site rule above.
+const ALIASED_TYPES: [&str; 3] = ["UntrustedData", "UntrustedContent", "TrustedInput"];
 
 /// The shipped files whose `#[cfg(test)]` items (only) may call it: the
 /// engine driver's own unit tests build plans with it.
@@ -114,6 +148,17 @@ fn call_site_findings(root: &Path) -> Vec<String> {
                 || (INSTRUCTION_TEST_SITES.contains(&source.name.as_str())
                     && in_ranges(&tests, n + 1))
                 || definition("authored");
+            if INSTRUCTION_SITES.contains(&source.name.as_str()) {
+                for name in UNTRUSTED_NAMES {
+                    if names(line, name) {
+                        findings.push(format!(
+                            "{}:{}: names {name}, and this file may call Instruction::authored; a file that turns config or the owner's words into an Instruction may not name untrusted content, so no text of it can become one (AD-10: no conversion from UntrustedData to Instruction)",
+                            source.name,
+                            n + 1
+                        ));
+                    }
+                }
+            }
             if names(line, "authored") && !allowed {
                 findings.push(format!(
                     "{}:{}: names Instruction::authored; text becomes a trusted Instruction only where config or the owner's own words do, at the sites xtask/src/deps.rs lists (AD-10; model, tool and file text is never an Instruction)",
@@ -122,9 +167,86 @@ fn call_site_findings(root: &Path) -> Vec<String> {
                 ));
             }
         }
+        if INSTRUCTION_SITES.contains(&source.name.as_str()) {
+            findings.extend(site_findings(&source.name, &code, &findings));
+        }
         findings.extend(resolve_findings(&source.name, &code, &tests));
+        findings.extend(alias_findings(&source.name, &code, &ALIASED_TYPES));
     }
     findings
+}
+
+/// Review T5: the site ban over whole-file text with whitespace around `::`
+/// normalised, so `Part ::Untrusted` or a path split over lines is seen, plus
+/// the forms that reach `Part`'s variants without writing the path: a glob
+/// or braced import (`Part::*`, `Part::{…}`) and an alias of `Part`. A name
+/// already reported with its line by the per-line check is not repeated.
+fn site_findings(name: &str, code: &str, earlier: &[String]) -> Vec<String> {
+    let mut flat = String::new();
+    let mut pending_space = false;
+    for word in code.split_whitespace() {
+        if !flat.is_empty() && !flat.ends_with("::") && !word.starts_with("::") {
+            pending_space = true;
+        }
+        if pending_space {
+            flat.push(' ');
+            pending_space = false;
+        }
+        flat.push_str(word);
+    }
+    let mut findings = Vec::new();
+    for token in UNTRUSTED_NAMES {
+        let seen = earlier
+            .iter()
+            .any(|f| f.starts_with(&format!("{name}:")) && f.contains(&format!("names {token},")));
+        if !seen && !token_offsets(&flat, token).is_empty() {
+            findings.push(format!(
+                "{name}: names {token} (across spaces or line breaks), and this file may call Instruction::authored; a file that turns config or the owner's words into an Instruction may not name untrusted content (AD-10: no conversion from UntrustedData to Instruction)"
+            ));
+        }
+    }
+    for form in ["Part::*", "Part::{"] {
+        if flat.contains(form) {
+            findings.push(format!(
+                "{name}: imports Part's variants with `{form}`, and this file may call Instruction::authored; it may not reach Part::Untrusted or Part::Trusted without naming them (AD-10)"
+            ));
+        }
+    }
+    findings.extend(alias_findings(name, &flat, &["Part"]));
+    findings
+}
+
+/// Story 3.5, review R3 (AD-10): a `type X = …Token…;` or a `use … Token
+/// as X` of an untrusted type or `TrustedInput`, anywhere in shipped code.
+fn alias_findings(name: &str, code: &str, types: &[&'static str]) -> Vec<String> {
+    let mut lines: BTreeSet<(usize, &str)> = BTreeSet::new();
+    for token in types.iter().copied() {
+        for at in token_offsets(code, token) {
+            let after = code[at + token.len()..].trim_start();
+            let renamed =
+                after.starts_with("as") && !after[2..].chars().next().is_some_and(is_word);
+            // The statement the token stands in: back to the last `;`, `{`
+            // or `}` that is not a use group's brace is close enough to see
+            // a leading `type`.
+            let start = code[..at].rfind([';', '}']).map_or(0, |i| i + 1);
+            let statement = &code[start..at];
+            let type_alias = statement.contains('=')
+                && statement
+                    .split(|c: char| !is_word(c))
+                    .any(|word| word == "type");
+            if renamed || type_alias {
+                lines.insert((line_at(code, at), token));
+            }
+        }
+    }
+    lines
+        .into_iter()
+        .map(|(line, token)| {
+            format!(
+                "{name}:{line}: makes an alias of {token} (`type` or `use … as`); the types are named as themselves so the call-site rules see every use of them (AD-10: no path from untrusted text to an Instruction)"
+            )
+        })
+        .collect()
 }
 
 /// The byte offsets of `token` in `code`, as a whole token.

@@ -15,15 +15,18 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use am_app::cli::RunContext;
-use am_app::runtime::Places;
+use am_app::runtime::{OpenRequest, Places, Prompt, open_project};
 use am_config::ModelRef;
 use am_domain::{
     Actor, BoxFuture, CancelSignal, ChatOutcome, ChatRequest, EventSink, Instruction, LlmProvider,
     ModelCapabilities, Part, ProviderError, Role, RuntimeLayout, UntrustedContent, UntrustedData,
 };
+use am_engine::prompt::{StepPrompt, heading};
 use am_engine::run::{HandOff, Limits, RunPlan, StepPlan};
+use am_engine::schema::OutputSchema;
 use am_store::{
-    CallRow, InboxItemRow, LedgerRow, Reader, RunRow, StepInput, StepRow, Store, ToolCallRow,
+    CallRow, InboxItemRow, LedgerRow, PromptPartRow, Reader, RunRow, StepInput, StepRow, Store,
+    ToolCallRow,
 };
 use am_testkit::{FakeLlm, FakeProjectIdentity, FakeTerminal, ScriptedTurn};
 use serde_json::Value;
@@ -81,6 +84,8 @@ pub fn step(key: &str, provider: Arc<dyn LlmProvider>) -> StepPlan {
         model: "example-local".into(),
         max_output_tokens: 512,
         provider,
+        prompt: am_engine::prompt::StepPrompt::default(),
+        output_schema: None,
     }
 }
 
@@ -120,11 +125,51 @@ pub fn poisoned(step: StepPlan) -> StepPlan {
     }
 }
 
+/// A system slot's instruction as am-app builds it: the part's heading,
+/// then its body (am-engine never authors an instruction; story 3.5).
+pub fn labelled(label: &str, body: &str) -> Instruction {
+    Instruction::authored(format!("{}{body}", heading(label)))
+}
+
+/// [`step`] with the seat's prompt slots `prompt` (story 3.5).
+pub fn with_prompt(step: StepPlan, prompt: StepPrompt) -> StepPlan {
+    StepPlan { prompt, ..step }
+}
+
+/// The schema `line` (an object with one string field `line`, no other
+/// field) and the repair instruction am-app builds from it.
+pub fn line_schema() -> OutputSchema {
+    OutputSchema::new(
+        "line",
+        serde_json::json!({
+            "schema_version": 2,
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "type": "object",
+            "required": ["line"],
+            "additionalProperties": false,
+            "properties": { "line": { "type": "string" } }
+        }),
+        Instruction::authored(REPAIR),
+    )
+}
+
+/// The repair instruction of [`line_schema`].
+pub const REPAIR: &str = "Your last message did not match the output schema `line`. Reply again with one JSON object that does.";
+
+/// [`step`] whose final message must match `schema` (story 3.5).
+pub fn with_schema(step: StepPlan, schema: OutputSchema) -> StepPlan {
+    StepPlan {
+        output_schema: Some(schema),
+        ..step
+    }
+}
+
 pub fn plan(steps: Vec<StepPlan>) -> RunPlan {
     RunPlan {
         workflow: "wf".into(),
         config_hash: HASH.into(),
         steps,
+        clock: am_testkit::FakeClock::at("2026-11-24T10:00:00Z"),
     }
 }
 
@@ -158,6 +203,9 @@ pub struct Journal {
     pub inputs: BTreeMap<String, Vec<StepInput>>,
     /// The tool calls of each step attempt, by step-run id.
     pub tool_calls: BTreeMap<String, Vec<ToolCallRow>>,
+    /// The journaled prompt parts of each step attempt (story 3.5), by
+    /// step-run id, in the reader's order (`call_seq`, then `ord`).
+    pub prompt: BTreeMap<String, Vec<PromptPartRow>>,
     /// The audit export, one JSON value per entry, without migrations.
     pub audit: Vec<Value>,
 }
@@ -173,6 +221,7 @@ pub fn journal(db: &Path) -> Journal {
         items: vec![],
         inputs: BTreeMap::new(),
         tool_calls: BTreeMap::new(),
+        prompt: BTreeMap::new(),
         audit: audit(&reader),
     };
     for run in &runs {
@@ -182,6 +231,8 @@ pub fn journal(db: &Path) -> Journal {
                 .insert(s.id.clone(), reader.step_inputs(&s.id).unwrap());
             j.tool_calls
                 .insert(s.id.clone(), reader.tool_calls(&s.id).unwrap());
+            j.prompt
+                .insert(s.id.clone(), reader.prompt_parts(&s.id).unwrap());
         }
         j.steps.extend(steps);
         j.calls.extend(reader.calls_for_run(&run.id).unwrap());
@@ -223,6 +274,20 @@ impl Journal {
 
     pub fn inputs_of(&self, step_run_id: &str) -> Vec<StepInput> {
         self.inputs.get(step_run_id).cloned().unwrap_or_default()
+    }
+
+    /// The journaled prompt parts of one step attempt (all calls).
+    pub fn parts_of(&self, step_run_id: &str) -> Vec<PromptPartRow> {
+        self.prompt.get(step_run_id).cloned().unwrap_or_default()
+    }
+
+    /// The labels of the attempt's own prompt (`call_seq` 0), in order.
+    pub fn labels_of(&self, step_run_id: &str) -> Vec<String> {
+        self.parts_of(step_run_id)
+            .into_iter()
+            .filter(|p| p.call_seq == 0)
+            .map(|p| p.label)
+            .collect()
     }
 
     pub fn tool_calls_of(&self, step_run_id: &str) -> Vec<ToolCallRow> {
@@ -517,6 +582,53 @@ impl Cli {
             code,
             out: String::from_utf8(out).unwrap(),
             err: String::from_utf8(err).unwrap(),
+        }
+    }
+}
+
+/// The open-time prompt of a setup: never asked.
+struct NoPrompt;
+
+impl Prompt for NoPrompt {
+    fn interactive(&self) -> bool {
+        false
+    }
+    fn ask(&mut self, _question: &str) -> bool {
+        false
+    }
+}
+
+impl Cli {
+    /// Opens the project once on this Mac (an id, a runtime folder and a
+    /// store) and closes it again (story 3.5).
+    pub fn open_once(&self, root: &Path) {
+        let req = OpenRequest {
+            root: root.to_path_buf(),
+            confirm_move: false,
+            take_over: false,
+        };
+        drop(
+            open_project(
+                &self.places,
+                &FakeProjectIdentity::new("Test Mac"),
+                &req,
+                &mut NoPrompt,
+            )
+            .unwrap(),
+        );
+    }
+
+    /// Copies the project's `runtime-seed/knowledge/<seat>/` files into the
+    /// runtime folder's `knowledge/<seat>/`, where the app keeps a seat's
+    /// reference files (story 3.5). The project was opened once.
+    pub fn seed_knowledge(&self, root: &Path, seat: &str) {
+        let layout = self.layout(root).expect("the project was opened once");
+        let from = root.join("runtime-seed/knowledge").join(seat);
+        let to = layout.knowledge(seat);
+        std::fs::create_dir_all(&to).unwrap();
+        for entry in std::fs::read_dir(&from).unwrap() {
+            let entry = entry.unwrap();
+            am_testkit::stream_copy_file(&entry.path(), &to.join(entry.file_name()));
         }
     }
 }

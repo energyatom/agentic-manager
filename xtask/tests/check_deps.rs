@@ -545,7 +545,7 @@ fn instruction_authored_is_called_only_at_its_allowed_sites() {
             "fn seat(text: &str) -> Instruction {\n    Instruction::authored(text)\n}\n",
         ),
         (
-            "crates/am-engine/src/journal.rs",
+            "crates/am-app/src/spike.rs",
             "fn prompt(text: String) -> Part {\n    Part::Instruction(Instruction::authored(text))\n}\n",
         ),
         (
@@ -908,5 +908,299 @@ fn an_alias_or_a_re_export_of_human_actor_fails_even_in_an_allowed_file() {
         );
         assert!(err.contains("HumanActor"), "{what}: names the token: {err}");
         assert!(err.contains("AD-15"), "{what}: states the rule: {err}");
+    }
+}
+
+// ---------------------------------------------------------------- story 3.5
+//
+// The type wall's source rule (AD-10, epic 3 story 5): `UntrustedData` has
+// no conversion into an `Instruction`, but a string can still be pulled out
+// of `UntrustedContent::Text(s)` (or `into_content()`) and handed to
+// `Instruction::authored`. So a shipped file that is allowed to call
+// `Instruction::authored` (`INSTRUCTION_SITES`) may not name
+// `UntrustedData`, `UntrustedContent` or `into_content` in code (comments
+// and literals left out). The rule only narrows: no file that passed
+// before fails unless it names one of them. Written before the rule.
+
+/// A file that is a site for `Instruction::authored` and names `token` in
+/// code fails `check-deps`, naming the file, the token, `Instruction` and
+/// the rule's AD.
+#[test]
+fn an_instruction_site_naming_untrusted_data_fails() {
+    for (what, token, source) in [
+        (
+            "the type, in a signature",
+            "UntrustedData",
+            "use am_domain::{Instruction, UntrustedData};\nfn seat(d: &UntrustedData) -> Instruction {\n    Instruction::authored(\"x\")\n}\n",
+        ),
+        (
+            "the content enum",
+            "UntrustedContent",
+            "fn seat(c: &am_domain::UntrustedContent) -> Instruction {\n    match c {\n        am_domain::UntrustedContent::Text(s) => Instruction::authored(s.clone()),\n        _ => Instruction::authored(\"\"),\n    }\n}\n",
+        ),
+        (
+            "the accessor that hands the content out",
+            "into_content",
+            "fn seat(d: Data) -> Instruction {\n    let c = d.into_content();\n    Instruction::authored(format!(\"{c:?}\"))\n}\n",
+        ),
+        (
+            "a use with a rename",
+            "UntrustedData",
+            "use am_domain::UntrustedData as Page;\nfn seat() -> Instruction {\n    Instruction::authored(\"x\")\n}\n",
+        ),
+    ] {
+        for file in INSTRUCTION_SITES_NOW {
+            refused(
+                &format!("{what} in {file}"),
+                &[(file, source)],
+                file,
+                &[token, "Instruction", "AD-10"],
+            );
+        }
+    }
+}
+
+/// The files that may call `Instruction::authored` today (round 2, T1: am-app's only).
+const INSTRUCTION_SITES_NOW: [&str; 3] = [
+    "crates/am-app/src/run.rs",
+    "crates/am-app/src/spike.rs",
+    "crates/am-app/src/accounts.rs",
+];
+
+/// What the rule leaves alone: a comment or a literal naming the types in a
+/// site, a file that is no site (an adapter, the engine's driver, whose own
+/// unit tests call `authored` inside `#[cfg(test)]` and which names
+/// `UntrustedData` in code as the plan's inputs) and am-domain's own
+/// definitions all pass.
+#[test]
+fn the_rule_leaves_comments_literals_and_other_files_alone() {
+    let tmp = tree(&[
+        (
+            "crates/am-app/src/run.rs",
+            "// An instruction is never built from UntrustedData, UntrustedContent or into_content.\nconst WHY: &str = \"UntrustedData\";\nfn seat(t: &str) -> Instruction {\n    Instruction::authored(t)\n}\n",
+        ),
+        (
+            "crates/am-engine/src/run.rs",
+            "use am_domain::UntrustedData;\npub struct StepPlan {\n    pub inputs: Vec<UntrustedData>,\n}\n#[cfg(test)]\nmod tests {\n    fn seat() -> Instruction {\n        Instruction::authored(\"x\")\n    }\n}\n",
+        ),
+        (
+            "crates/am-providers/src/common.rs",
+            "pub fn text_of(d: &UntrustedData) -> String {\n    match d.content() {\n        UntrustedContent::Text(t) => t.clone(),\n        _ => String::new(),\n    }\n}\n",
+        ),
+    ]);
+
+    let out = deps_at(tmp.path());
+
+    assert!(
+        out.status.success(),
+        "comments, literals and non-sites pass: {}",
+        stderr(&out)
+    );
+}
+
+/// The shipped sites name none of the three in code today (a comment that
+/// names the type is not code): the rule is green on shipped source. The
+/// check itself is `current_workspace_passes`; this pins what it relies on,
+/// file by file, so a failure names the file.
+#[test]
+fn the_shipped_instruction_sites_name_none() {
+    let root = repo_root();
+    for file in INSTRUCTION_SITES_NOW {
+        let text = std::fs::read_to_string(root.join(file)).unwrap();
+        for (n, line) in text.lines().enumerate() {
+            if line.trim_start().starts_with("//") {
+                continue;
+            }
+            for token in ["UntrustedData", "UntrustedContent", "into_content"] {
+                assert!(
+                    !line.contains(token),
+                    "{file}:{} names {token} in code; an Instruction is never built from it (AD-10)",
+                    n + 1
+                );
+            }
+        }
+    }
+    let out = xtask(&["check-deps"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+}
+
+// ------------------------------------------------------- review round 1
+//
+// Story 3.5 review triage round 1 (manager, 2026-11-24), R3: a site file
+// can still pass untrusted text on through `Part::Untrusted(d)` and its
+// accessors, or through a trusted input, or an alias defined elsewhere. So
+// a file that may call `Instruction::authored` may not name `Part::Untrusted`,
+// `Part::Trusted` or `TrustedInput` either, and an alias of `UntrustedData`,
+// `UntrustedContent` or `TrustedInput` (`type X = ..` or `use .. as X`) is
+// refused anywhere in `crates/`. Written before the rule grows.
+
+/// A site file naming a part or a trusted input in code fails, naming the
+/// file, the token, `Instruction` and `AD-10`.
+#[test]
+fn an_instruction_site_naming_a_part_or_a_trusted_input_fails() {
+    for (what, token, source) in [
+        (
+            "Part::Untrusted in a match",
+            "Part::Untrusted",
+            "fn seat(p: &Part) -> Instruction {\n    match p {\n        Part::Untrusted(d) => Instruction::authored(d.label()),\n        _ => Instruction::authored(\"\"),\n    }\n}\n",
+        ),
+        (
+            "Part::Trusted in a match",
+            "Part::Trusted",
+            "fn seat(p: &Part) -> Instruction {\n    match p {\n        Part::Trusted(t) => Instruction::authored(t.text()),\n        _ => Instruction::authored(\"\"),\n    }\n}\n",
+        ),
+        (
+            "TrustedInput in a signature",
+            "TrustedInput",
+            "fn seat(t: &TrustedInput) -> Instruction {\n    Instruction::authored(t.text())\n}\n",
+        ),
+    ] {
+        for file in INSTRUCTION_SITES_NOW {
+            refused(
+                &format!("{what} in {file}"),
+                &[(file, source)],
+                file,
+                &[token, "Instruction", "AD-10"],
+            );
+        }
+    }
+}
+
+/// An alias of one of the three types, by `type` or by `use .. as`, fails
+/// wherever it stands in `crates/` (a file that is no site, another crate's
+/// source), naming the file, the type and the word `alias`; the plain use
+/// of the types passes (see the rule's pass test).
+#[test]
+fn an_alias_of_an_untrusted_type_is_refused_anywhere_in_crates() {
+    for (what, file, token, source) in [
+        (
+            "a type alias of UntrustedData",
+            "crates/am-providers/src/common.rs",
+            "UntrustedData",
+            "pub type Page = am_domain::UntrustedData;\n",
+        ),
+        (
+            "a use-as of UntrustedContent",
+            "crates/am-engine/src/run.rs",
+            "UntrustedContent",
+            "use am_domain::UntrustedContent as Content;\nfn f(_c: Content) {}\n",
+        ),
+        (
+            "a use-as in a group, of TrustedInput",
+            "crates/am-server/src/inbox.rs",
+            "TrustedInput",
+            "use am_domain::{Part, TrustedInput as Note};\nfn f(_n: Option<Note>, _p: Part) {}\n",
+        ),
+        (
+            "a type alias of TrustedInput",
+            "crates/am-tools/src/lib.rs",
+            "TrustedInput",
+            "type Trusted = TrustedInput;\n",
+        ),
+    ] {
+        refused(what, &[(file, source)], file, &[token, "alias", "AD-10"]);
+    }
+}
+
+// ------------------------------------------------------- review round 2
+//
+// Story 3.5 review triage round 2 (manager, 2026-11-24): T1 (am-engine calls
+// `Instruction::authored` nowhere in shipped code, `journal.rs` included;
+// the sites are am-app files only) and T5 (the part ban reads whole-file
+// text with whitespace normalised: glob and braced imports of `Part`'s
+// variants, aliases of `Part`, `Part ::Untrusted` and a path split over
+// lines all fail in a site). Written before the rule is changed.
+
+/// T1: the engine's spike-scope executor builds no instruction itself.
+#[test]
+fn the_engine_journal_names_no_authored() {
+    let text =
+        std::fs::read_to_string(repo_root().join("crates/am-engine/src/journal.rs")).unwrap();
+    for (n, line) in text.lines().enumerate() {
+        if line.trim_start().starts_with("//") {
+            continue;
+        }
+        assert!(
+            !line.contains("authored"),
+            "journal.rs:{} names authored; am-engine authors no Instruction (AD-10): its caller passes them",
+            n + 1
+        );
+    }
+}
+
+/// T1: `INSTRUCTION_SITES` (read from the rule's own source) holds only
+/// files of `crates/am-app/src/`.
+#[test]
+fn the_instruction_sites_are_am_app_files_only() {
+    let text = std::fs::read_to_string(repo_root().join("xtask/src/deps.rs")).unwrap();
+    let start = text.find("pub const INSTRUCTION_SITES").expect("the list");
+    let block = &text[start..start + text[start..].find("];").unwrap()];
+    let entries: Vec<&str> = block.split('"').skip(1).step_by(2).collect();
+    assert!(!entries.is_empty(), "{block}");
+    for entry in entries {
+        assert!(
+            entry.starts_with("crates/am-app/src/"),
+            "{entry} is a site; only am-app builds an Instruction from config"
+        );
+    }
+}
+
+/// T1: a planted `journal.rs` (or any engine file) calling `authored` fails;
+/// the engine driver's `#[cfg(test)]` items still may.
+#[test]
+fn am_engine_calls_authored_only_in_test_items() {
+    let call = "fn prompt(text: String) -> Part {\n    Part::Instruction(Instruction::authored(text))\n}\n";
+    for file in [
+        "crates/am-engine/src/journal.rs",
+        "crates/am-engine/src/prompt.rs",
+        "crates/am-engine/src/run.rs",
+    ] {
+        refused(
+            &format!("{file} outside a test item"),
+            &[(file, call)],
+            file,
+            &["authored", "Instruction"],
+        );
+    }
+    let tmp = tree(&[(
+        "crates/am-engine/src/run.rs",
+        "#[cfg(test)]\nmod tests {\n    fn seat() -> Instruction {\n        Instruction::authored(\"x\")\n    }\n}\n",
+    )]);
+    let out = deps_at(tmp.path());
+    assert!(out.status.success(), "{}", stderr(&out));
+}
+
+/// T5: whole-file matching of the ban on `Part`'s untrusted and trusted
+/// variants in a site file, with spacing and line breaks normalised.
+#[test]
+fn a_site_cannot_reach_the_part_variants_by_import_alias_spacing_or_line_breaks() {
+    for (what, source) in [
+        (
+            "a glob import of the variants",
+            "use am_domain::Part::*;\nfn seat(p: &Part) -> Instruction {\n    match p {\n        Untrusted(d) => Instruction::authored(d.label()),\n        _ => Instruction::authored(\"\"),\n    }\n}\n",
+        ),
+        (
+            "a braced import with a rename",
+            "use am_domain::Part::{Untrusted as U};\nfn seat(p: &Part) -> Instruction {\n    match p {\n        U(d) => Instruction::authored(d.label()),\n        _ => Instruction::authored(\"\"),\n    }\n}\n",
+        ),
+        (
+            "an alias of Part",
+            "type P = am_domain::Part;\nfn seat(p: &P) -> Instruction {\n    match p {\n        P::Untrusted(d) => Instruction::authored(d.label()),\n        _ => Instruction::authored(\"\"),\n    }\n}\n",
+        ),
+        (
+            "a space before the path separator",
+            "fn seat(p: &Part) -> Instruction {\n    match p {\n        Part ::Untrusted(d) => Instruction::authored(d.label()),\n        _ => Instruction::authored(\"\"),\n    }\n}\n",
+        ),
+        (
+            "a path split across lines",
+            "fn seat(p: &Part) -> Instruction {\n    match p {\n        Part\n            ::Trusted(t) => Instruction::authored(t.text()),\n        _ => Instruction::authored(\"\"),\n    }\n}\n",
+        ),
+        (
+            "a use-as alias of Part",
+            "use am_domain::Part as Piece;\nfn seat(_p: &Piece) -> Instruction {\n    Instruction::authored(\"x\")\n}\n",
+        ),
+    ] {
+        let file = "crates/am-app/src/run.rs";
+        refused(what, &[(file, source)], file, &["AD-10"]);
     }
 }

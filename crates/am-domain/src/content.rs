@@ -24,7 +24,67 @@ use crate::llm::Part;
 /// Trusted, config- or owner-authored text. Build it only from config files or
 /// the owner's own words, never from anything a tool, file or model returned
 /// (a clean step's output is a [`TrustedInput`], never an `Instruction`).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// The allowed build, beside the two other kinds of content:
+///
+/// ```
+/// use am_domain::{Instruction, UntrustedData};
+/// let goal = Instruction::authored("Keep every line short.");
+/// assert_eq!(goal.text(), "Keep every line short.");
+/// let owned = Instruction::authored(String::from("a backstory"));
+/// assert_eq!(owned.text(), "a backstory");
+/// let data = UntrustedData::text("test:page", "a page");
+/// assert_eq!(data.label(), "test:page");
+/// ```
+///
+/// There is no conversion from untrusted data to an `Instruction` (story
+/// 3.5, AD-10), by `From`:
+///
+/// ```compile_fail
+/// use am_domain::{Instruction, UntrustedData};
+/// let _i = Instruction::from(UntrustedData::text("test:page", "a page"));
+/// ```
+///
+/// by handing the data to the constructor:
+///
+/// ```compile_fail
+/// use am_domain::{Instruction, UntrustedData};
+/// let _i = Instruction::authored(UntrustedData::text("test:page", "a page"));
+/// ```
+///
+/// or by `Into`:
+///
+/// ```compile_fail
+/// use am_domain::{Instruction, UntrustedData};
+/// let _i: Instruction = UntrustedData::text("test:page", "a page").into();
+/// ```
+///
+/// and none the other way:
+///
+/// ```compile_fail
+/// use am_domain::{Instruction, UntrustedData};
+/// let _d: UntrustedData = Instruction::authored("a goal").into();
+/// ```
+///
+/// An `Instruction` cannot be deserialized either (story 3.5, review R4:
+/// `serde_json::from_value::<Instruction>` would build one from any text in
+/// any crate), so the bound is refused where the probe itself is fine:
+///
+/// ```compile_fail
+/// fn deserializable<T: serde::de::DeserializeOwned>() {}
+/// deserializable::<am_domain::Instruction>();
+/// ```
+///
+/// while the same probe takes plain text and an `Instruction` still
+/// serializes:
+///
+/// ```
+/// fn deserializable<T: serde::de::DeserializeOwned>() {}
+/// deserializable::<String>();
+/// fn serializable<T: serde::Serialize>() {}
+/// serializable::<am_domain::Instruction>();
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Instruction(String);
 
 impl Instruction {
@@ -210,12 +270,13 @@ impl Taint {
 /// deserializable::<am_domain::TrustedInput>();
 /// ```
 ///
-/// while the same bound holds for an `Instruction`, so the refusal above
-/// is the missing impl, not the probe:
+/// while the same bound holds for plain text, so the refusal above is the
+/// missing impl, not the probe (an `Instruction` has none either, see its
+/// docs):
 ///
 /// ```
 /// fn deserializable<T: serde::de::DeserializeOwned>() {}
-/// deserializable::<am_domain::Instruction>();
+/// deserializable::<String>();
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrustedInput {

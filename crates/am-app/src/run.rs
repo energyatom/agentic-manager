@@ -28,8 +28,11 @@
 //!    and its plan is built from it only, AD-16);
 //! 7. check 3 again, on the snapshot the run pins;
 //! 8. the workflow exists, and no step declares what this version cannot
-//!    honour yet (a run-graph key such as `review`, `handoff` or `seats`,
-//!    or an `output_schema`): such a step is never run as a plain turn;
+//!    honour yet (a run-graph key such as `review`, `handoff` or `seats`):
+//!    such a step is never run as a plain turn. A step's `output_schema` is
+//!    honoured since story 3.5: its final message is checked, repaired
+//!    once and failed in words (AD-36), and a schema the engine cannot
+//!    compile refuses the run before any row is written;
 //! 9. every step has a seat with a model, and the context's provider
 //!    factory gives a provider for it; a gate step (`gate: review`, story
 //!    3.3) makes no model call, so its seat needs no model and no provider
@@ -68,10 +71,12 @@ use std::sync::Arc;
 
 use am_config::{ConfigSnapshot, ModelRef, Severity};
 use am_domain::{
-    BoxFuture, CancelSignal, ChatOutcome, ChatRequest, EventSink, Instruction, LlmProvider,
+    BoxFuture, CancelSignal, ChatOutcome, ChatRequest, Clock, EventSink, Instruction, LlmProvider,
     ModelCapabilities, ProjectIdentity, ProviderError, Terminal,
 };
+use am_engine::prompt::{self, StepPrompt};
 use am_engine::run::{HandOff, Limits, RunError, RunOutcome, RunPlan, StepPlan, run_plan};
+use am_engine::schema::OutputSchema;
 use am_store::{InboxItemRow, RunRow, StepRow};
 use tokio_util::sync::CancellationToken;
 
@@ -274,20 +279,116 @@ pub(crate) fn no_outside_change_in(
 }
 
 /// What a step declares that this version of `agentic run` cannot honour
-/// yet: its run-graph keys (AD-40..AD-42) and an `output_schema`, by name.
+/// yet: its run-graph keys (AD-40..AD-42), by name.
 fn not_honoured(step: &am_config::Step) -> Vec<&str> {
-    let mut keys: Vec<&str> = step.run_graph.iter().map(String::as_str).collect();
-    if step.output_schema.is_some() {
-        keys.push("output_schema");
+    step.run_graph.iter().map(String::as_str).collect()
+}
+
+/// The real clock: the engine reads it at each attempt's start, so a
+/// guidance note that has expired is absent from the prompt.
+struct SystemClock;
+
+impl Clock for SystemClock {
+    fn now(&self) -> jiff::Timestamp {
+        jiff::Timestamp::now()
     }
-    keys
+}
+
+/// A headed system part (AD-27): the part's heading, then its body. am-app
+/// builds every `Instruction` from config; am-engine authors none.
+fn headed(label: &str, body: &str) -> Instruction {
+    Instruction::authored(format!("{}{body}", prompt::heading(label)))
+}
+
+/// The seat's slots 2 to 9 (AD-27), built from the seat and its skills in
+/// the snapshot. Names only for files and skill references: nothing is
+/// opened or read; a link is its title and URL. A seat that lacks a field
+/// gets no part for it.
+///
+/// CEO goals, guidance notes and memory notes have no source in the config
+/// yet, so their slots stay empty here: story 5.8 ("Human seats, CEO goals
+/// and guidance notes") fills the first two and story 5.3 (the seat sheet,
+/// with 10.2 and 10.4, the learning loop) fills memory. The engine's order,
+/// types, expiry and journal are built and tested with values.
+fn prompt_of(snapshot: &ConfigSnapshot, seat: &am_config::Seat) -> StepPrompt {
+    let mut prompt = StepPrompt::default();
+    if let Some(goal) = seat.goal.as_deref().filter(|g| !g.is_empty()) {
+        prompt = prompt.with_goal(headed(prompt::GOAL, goal));
+    }
+    if let Some(backstory) = seat.backstory.as_deref().filter(|b| !b.is_empty()) {
+        prompt = prompt.with_backstory(headed(prompt::BACKSTORY, backstory));
+    }
+    for id in &seat.skills {
+        // An attached skill the snapshot does not hold is already a
+        // validate error (1.12); it adds no part here.
+        let Some(skill) = snapshot.skills().get(id) else {
+            continue;
+        };
+        // The one list of the skill's reference files, by name as
+        // `references/<name>` (the snapshot's keys are the bare names); the
+        // files' text is in the snapshot but never read for the prompt.
+        // Story 9.16 swaps this one list for the loader's list of every
+        // skill file (AD-38).
+        let names: Vec<String> = skill
+            .references
+            .keys()
+            .map(|name| format!("references/{name}"))
+            .collect();
+        let mut body = skill.body.clone();
+        if !names.is_empty() {
+            body.push_str("\n\n");
+            body.push_str(&prompt::file_list(&names));
+        }
+        prompt = prompt.with_skill(id.clone(), headed(&prompt::skill_label(id), &body));
+    }
+    if !seat.knowledge.is_empty() {
+        let names: Vec<String> = seat.knowledge.iter().map(|k| k.file.clone()).collect();
+        prompt = prompt
+            .with_reference_files(headed(prompt::REFERENCE_FILES, &prompt::file_list(&names)));
+    }
+    if !seat.links.is_empty() {
+        let links: Vec<(String, String)> = seat
+            .links
+            .iter()
+            .map(|l| (l.title.clone(), l.url.clone()))
+            .collect();
+        prompt = prompt.with_saved_links(headed(prompt::SAVED_LINKS, &prompt::link_list(&links)));
+    }
+    prompt
+}
+
+/// The step's output schema and its repair instruction (AD-36), built from
+/// the schema file in the snapshot: a fixed sentence and the schema's own
+/// text. The validation words never go into a prompt.
+fn schema_of(
+    snapshot: &ConfigSnapshot,
+    step: &am_config::Step,
+    workflow: &str,
+    not_done: &str,
+) -> Result<Option<OutputSchema>, String> {
+    let Some(id) = &step.output_schema else {
+        return Ok(None);
+    };
+    let Some(schema) = snapshot.schemas().get(id) else {
+        return Err(format!(
+            "step `{}` of the workflow `{workflow}` names the output schema `{id}`, which this project does not have. {not_done}",
+            step.id
+        ));
+    };
+    // `{:#}` is the value's own pretty JSON text.
+    let text = format!("{schema:#}");
+    let repair = Instruction::authored(format!(
+        "Your last message did not match the output schema `{id}`. Reply again with one JSON object that matches this schema, and nothing else:\n{text}"
+    ));
+    Ok(Some(OutputSchema::new(id.clone(), schema.clone(), repair)))
 }
 
 /// The engine's plan for `workflow`, built from `snapshot` only: per step,
 /// the seat's instructions as the system part, the step's instruction, the
 /// seat's model and the step's output limit, on the provider the factory
-/// gives for that model. A workflow with a step that declares a run-graph
-/// key or an `output_schema` gives no plan (see [`not_honoured`]).
+/// gives for that model, and (story 3.5) the seat's prompt slots and the
+/// step's output schema. A workflow with a step that declares a run-graph
+/// key gives no plan (see [`not_honoured`]).
 pub(crate) fn plan_of(
     snapshot: &ConfigSnapshot,
     workflow: &str,
@@ -359,6 +460,9 @@ pub(crate) fn plan_of(
                 model: String::new(),
                 max_output_tokens: step.max_tokens.unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS),
                 provider: Arc::new(NoModelAtGate),
+                // A gate makes no model call and assembles nothing.
+                prompt: StepPrompt::default(),
+                output_schema: None,
             });
             continue;
         }
@@ -369,6 +473,7 @@ pub(crate) fn plan_of(
             ));
         };
         let provider = providers(model).map_err(|why| format!("{why}. {not_done}"))?;
+        let output_schema = schema_of(snapshot, step, workflow, not_done)?;
         let hand_off = match &step.loop_back {
             Some(l) => HandOff::LoopBack {
                 to: l.to.clone(),
@@ -388,12 +493,15 @@ pub(crate) fn plan_of(
             model: model.model.clone(),
             max_output_tokens: step.max_tokens.unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS),
             provider,
+            prompt: prompt_of(snapshot, seat),
+            output_schema,
         });
     }
     Ok(RunPlan {
         workflow: workflow.to_string(),
         config_hash: snapshot.hash().to_string(),
         steps,
+        clock: Arc::new(SystemClock),
     })
 }
 

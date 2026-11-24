@@ -25,6 +25,8 @@ thiserror.workspace = true
 # (AD-24). Both are workspace-pinned crates already in the graph.
 serde_json.workspace = true
 uuid.workspace = true
+# Story 3.5: output schemas (AD-36), the only user is src/schema.rs.
+jsonschema.workspace = true
 
 [dev-dependencies]
 am-testkit.workspace = true

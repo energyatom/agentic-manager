@@ -12,8 +12,11 @@
 pub mod cancel;
 pub mod gate;
 pub mod journal;
+mod parts;
+pub mod prompt;
 pub mod run;
 pub mod scheduler;
+pub mod schema;
 pub mod toolgate;
 
 pub use cancel::{CancelTree, TokenSignal};

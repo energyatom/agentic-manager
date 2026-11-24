@@ -89,6 +89,8 @@ fn populated(root: &Path) -> Store {
             // Story 3.3: the attempt's taint, raised (never lowered) with
             // the reservation (AD-10).
             taint: Taint::Clean,
+            purpose: am_store::CallPurpose::Turn,
+            prompt: vec![],
         },
     )
     .unwrap();
@@ -353,6 +355,7 @@ fn a_resolution_is_audited_as_you_reviewer_without_the_note() {
             step_run_id: draft.clone(),
             inputs: vec![],
             taint: Taint::Clean,
+            prompt: vec![],
         },
     )
     .unwrap();
@@ -365,6 +368,8 @@ fn a_resolution_is_audited_as_you_reviewer_without_the_note() {
             reserved_micro_usd: 0,
             rate_snapshot: "none".into(),
             taint: Taint::Clean,
+            purpose: am_store::CallPurpose::Turn,
+            prompt: vec![],
         },
     )
     .unwrap();

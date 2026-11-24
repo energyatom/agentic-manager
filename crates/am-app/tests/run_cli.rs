@@ -1575,13 +1575,13 @@ async fn a_file_the_app_wrote_that_was_changed_outside_it_refuses_the_run() {
 
 /// What this version cannot honour (review of story 3.1): a step that
 /// declares a run-graph key (a review gate, a hand-off, a fan-out over
-/// seats) or an `output_schema` would run as one plain turn and report
-/// `succeeded` with the gate, hand-off, fan-out or schema skipped. Each is
-/// refused before the run is created, naming the step and the key; no
-/// provider is asked for and no run row is written.
+/// seats) would run as one plain turn and report `succeeded` with the
+/// gate, hand-off or fan-out skipped. Each is refused before the run is
+/// created, naming the step and the key; no provider is asked for and no
+/// run row is written. Story 3.5 (superseded): `output_schema` is no
+/// longer in this list; the engine checks it (see `run_prompt.rs`).
 #[tokio::test]
 async fn a_step_this_version_cannot_honour_refuses_the_run_by_name() {
-    const SCHEMA: &str = "{\n  \"schema_version\": 2,\n  \"$schema\": \"https://json-schema.org/draft/2020-12/schema\",\n  \"type\": \"object\",\n  \"required\": [\"line\"],\n  \"properties\": {\n    \"line\": { \"type\": \"string\" }\n  }\n}\n";
     for (key, step) in [
         (
             "review",
@@ -1591,15 +1591,10 @@ async fn a_step_this_version_cannot_honour_refuses_the_run_by_name() {
             "handoff",
             "    seat: alpha\n    handoff:\n      to: core/hello/check\n      payload: document:note\n",
         ),
-        (
-            "output_schema",
-            "    seat: alpha\n    output_schema: line\n",
-        ),
         ("seats", "    seats:\n      - alpha\n"),
     ] {
         let env = env();
         let root = env.copy_of("one-step");
-        write(&root, "schemas/line.json", SCHEMA);
         write(
             &root,
             "workflows/hello.yaml",

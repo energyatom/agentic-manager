@@ -97,6 +97,7 @@ fn rig() -> Rig {
             step_run_id: ids[0].clone(),
             inputs: vec![],
             taint: Taint::Clean,
+            prompt: vec![],
         },
     )
     .unwrap();
@@ -109,6 +110,8 @@ fn rig() -> Rig {
             reserved_micro_usd: 0,
             rate_snapshot: "none".into(),
             taint: Taint::Clean,
+            purpose: am_store::CallPurpose::Turn,
+            prompt: vec![],
         },
     )
     .unwrap();
@@ -202,6 +205,7 @@ impl Rig {
                 step_run_id: self.approve.clone(),
                 inputs: vec![],
                 taint: Taint::Clean,
+                prompt: vec![],
             },
         )
         .unwrap();
@@ -214,6 +218,8 @@ impl Rig {
                 reserved_micro_usd: 0,
                 rate_snapshot: "none".into(),
                 taint: Taint::Clean,
+                purpose: am_store::CallPurpose::Turn,
+                prompt: vec![],
             },
         )
         .unwrap();
@@ -479,6 +485,7 @@ fn nothing_leaves_waiting_human() {
             step_run_id: publish.clone(),
             inputs: vec![],
             taint: Taint::Clean,
+            prompt: vec![],
         },
     )
     .unwrap();
@@ -491,6 +498,8 @@ fn nothing_leaves_waiting_human() {
             reserved_micro_usd: 0,
             rate_snapshot: "none".into(),
             taint: Taint::Clean,
+            purpose: am_store::CallPurpose::Turn,
+            prompt: vec![],
         },
     )
     .unwrap();
@@ -511,6 +520,7 @@ fn nothing_leaves_waiting_human() {
                 step_run_id: waiting.clone(),
                 inputs: vec![],
                 taint: Taint::Clean,
+                prompt: vec![],
             },
         ),
         (
@@ -596,6 +606,7 @@ fn the_writer_refuses_an_edge_ad_8_does_not_have() {
             step_run_id: r.draft.clone(),
             inputs: vec![],
             taint: Taint::Clean,
+            prompt: vec![],
         },
         WriteCommand::FinishStep {
             step_run_id: r.draft.clone(),
@@ -750,6 +761,7 @@ fn an_input_from_an_unfinished_producer_is_refused() {
         step_run_id: r.approve.clone(),
         inputs: vec![from(producer)],
         taint: Taint::Clean,
+        prompt: vec![],
     };
     // A queued producer.
     assert!(
@@ -770,6 +782,7 @@ fn an_input_from_an_unfinished_producer_is_refused() {
                 step_run_id: publish.clone(),
                 inputs: vec![],
                 taint: Taint::Clean,
+                prompt: vec![],
             },
         )
         .unwrap();
@@ -807,6 +820,7 @@ fn an_input_from_an_unfinished_producer_is_refused() {
                     taint: Taint::Clean,
                 }],
                 taint: Taint::Clean,
+                prompt: vec![],
             },
         )
         .unwrap();
@@ -829,6 +843,7 @@ fn a_loop_back_never_crosses_a_waiting_step() {
             step_run_id: publish.clone(),
             inputs: vec![],
             taint: Taint::Clean,
+            prompt: vec![],
         },
     )
     .unwrap();
@@ -841,6 +856,8 @@ fn a_loop_back_never_crosses_a_waiting_step() {
             reserved_micro_usd: 0,
             rate_snapshot: "none".into(),
             taint: Taint::Clean,
+            purpose: am_store::CallPurpose::Turn,
+            prompt: vec![],
         },
     )
     .unwrap();
@@ -879,6 +896,7 @@ fn the_reservation_audit_carries_the_taint() {
             step_run_id: r.approve.clone(),
             inputs: vec![],
             taint: Taint::Clean,
+            prompt: vec![],
         },
     )
     .unwrap();
@@ -896,6 +914,8 @@ fn the_reservation_audit_carries_the_taint() {
                 reserved_micro_usd: 0,
                 rate_snapshot: "none".into(),
                 taint: sent,
+                purpose: am_store::CallPurpose::Turn,
+                prompt: vec![],
             },
         )
         .unwrap();
@@ -934,6 +954,7 @@ fn start(r: &Rig, id: &str) -> Result<(), StoreError> {
             step_run_id: id.into(),
             inputs: vec![],
             taint: Taint::Clean,
+            prompt: vec![],
         },
     )
 }
@@ -957,6 +978,8 @@ fn a_failure_never_finishes_a_run_while_another_step_waits() {
                 reserved_micro_usd: 0,
                 rate_snapshot: "none".into(),
                 taint: Taint::Clean,
+                purpose: am_store::CallPurpose::Turn,
+                prompt: vec![],
             },
         )
         .unwrap();
@@ -1022,6 +1045,7 @@ fn nothing_starts_or_pauses_on_a_finished_run() {
                 step_run_id: r.approve.clone(),
                 inputs: vec![],
                 taint: Taint::Clean,
+                prompt: vec![],
             },
         ),
         ("PauseStep", r.pause(&new_id())),
@@ -1055,6 +1079,7 @@ fn nothing_starts_or_pauses_while_another_step_waits() {
                 step_run_id: publish.clone(),
                 inputs: vec![],
                 taint: Taint::Clean,
+                prompt: vec![],
             },
         ),
         (
@@ -1157,6 +1182,7 @@ fn an_inputs_kind_decides_its_producer_and_taint() {
                     taint: Taint::Clean,
                 }],
                 taint: Taint::Clean,
+                prompt: vec![],
             },
         )
         .unwrap();
@@ -1206,6 +1232,7 @@ fn an_inputs_kind_decides_its_producer_and_taint() {
                 step_run_id: publish.clone(),
                 inputs: vec![input],
                 taint: Taint::Clean,
+                prompt: vec![],
             },
         );
         assert!(refused.is_err(), "{what}");

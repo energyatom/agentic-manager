@@ -23,7 +23,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use am_domain::{
-    Actor, BoxFuture, CancelSignal, ChatOutcome, ChatRequest, EventSink, LlmProvider,
+    Actor, BoxFuture, CancelSignal, ChatOutcome, ChatRequest, EventSink, Instruction, LlmProvider,
     ModelCapabilities, Part, ProviderError, StopReason, Taint, TrustedInput, UntrustedContent,
     Usage,
 };
@@ -174,6 +174,12 @@ fn linear() -> LinearWorkflow {
             output_micro_per_mtok: 0,
             snapshot: "test".into(),
         },
+        system: Instruction::authored("You are a step in a test workflow."),
+        step_prompt: |step_key, workflow| {
+            Instruction::authored(format!(
+                "Step {step_key} of workflow {workflow}. Reply with one short line."
+            ))
+        },
     }
 }
 
@@ -189,6 +195,7 @@ fn spike_run_after_a(db: &Path, store: &Store, taint: Taint) -> String {
             step_run_id: a.clone(),
             inputs: vec![],
             taint,
+            prompt: vec![],
         },
     )
     .unwrap();
