@@ -7,6 +7,7 @@
 # parser fuzzing (7), security suites as gates (8), SECURITY.md, threat model, protections page (9), docs (10, 11), review window (13), v1.0 gate (15).
 # 2026-11-19 owner folder-access direction: 16 bundles Local search only (OCR retired); 6, 7, 8 and 9 drop Tesseract, Leptonica, pdfium, docx and pptx and add the folder suites.
 # 2026-11-23 owner decision: 17 (owner-only start check covers macOS ACLs and the folder owner) is the pre-release hardening item from 3.2's review; it builds between 7 and 8 after 1 (shared am-app server start), and 8 and the sweep (13) wait on it.
+# 2026-11-24 owner decision (keyed audit hashes, condition 5): 8 also gates on `audit_hash_*` (a release build holds no bare hash of free text); 12 moves keychain entries before any store opens.
 
 [[entry]]
 id = 1
@@ -112,8 +113,8 @@ risk = "medium"
 id = 8
 type = "story"
 title = "Security suites gate every release"
-description = "The release workflow publishes nothing unless, on the signed macOS Apple Silicon build, every suite under crates/am-e2e/tests/trust/ and crates/am-e2e/tests/engine/ passes, selected by directory and never by a hand-kept list (final review 2 security M5, 2026-11-19): rule_08 to rule_19 (including rebinding, CSRF and WebSocket, path traversal and symlink escape, budget and kill-switch, secret-leak scan), connectors_*, local_search_*, capabilities_*, folder_access_*, taint_*, widening_*, sandbox_* and the cross-department engine suites, together with the golden run and injection pack on FakeLlm; the owner's real-local-model golden run and injection pack record for the same commit is required before a tag. The gate also checks entitlements per binary: the main app carries no com.apple.security.cs.disable-library-validation, allow-unsigned-executable-memory or allow-dyld-environment-variables entitlement, and each helper (agentic-extract, the Python executable) carries exactly its AD-13 App Sandbox set."
-verify = "A release run lists every trust suite as passed on the signed macOS build; a seeded failing trust test stops publishing; tagging without the owner's real-model record for that commit is refused by the gate. A test file added to tests/trust/ without being listed anywhere runs in the gate; a seeded disable-library-validation entitlement on the main app stops publishing."
+description = "The release workflow publishes nothing unless, on the signed macOS Apple Silicon build, every suite under crates/am-e2e/tests/trust/ and crates/am-e2e/tests/engine/ passes, selected by directory and never by a hand-kept list (final review 2 security M5, 2026-11-19): rule_08 to rule_19 (including rebinding, CSRF and WebSocket, path traversal and symlink escape, budget and kill-switch, secret-leak scan), connectors_*, local_search_*, capabilities_*, folder_access_*, taint_*, widening_*, sandbox_*, audit_hash_* (owner, 2026-11-24, verbatim: \"add a check to the release trust-gate that a release build has no bare hash of free text\"; arch AD-32: the suite, written by epic 9 story 10, writes every audit action the store's classifier marks as text with a canary text, with a key and without one, and finds no bare sha256 of the canary in the runtime folder or the audit export, each keyed value recomputing independently) and the cross-department engine suites, together with the golden run and injection pack on FakeLlm; the owner's real-local-model golden run and injection pack record for the same commit is required before a tag. The gate also checks entitlements per binary: the main app carries no com.apple.security.cs.disable-library-validation, allow-unsigned-executable-memory or allow-dyld-environment-variables entitlement, and each helper (agentic-extract, the Python executable) carries exactly its AD-13 App Sandbox set."
+verify = "A release run lists every trust suite as passed on the signed macOS build; a seeded failing trust test stops publishing; tagging without the owner's real-model record for that commit is refused by the gate. A test file added to tests/trust/ without being listed anywhere runs in the gate; a seeded disable-library-validation entitlement on the main app stops publishing; the run lists `audit_hash_*` as passed on the signed build, and a seeded bare sha256 of a canary note in an `inbox.resolved` entry stops publishing."
 covers = ["R8"]
 after = [7, 17]
 hitl = false
@@ -156,8 +157,8 @@ risk = "medium"
 id = 12
 type = "story"
 title = "Public name applied everywhere"
-description = "Applies the chosen public name to the binary, bundle id, installers, update manifest, product strings (wizard, About, server-unreachable state) and the keychain service, with a one-time migration that moves stored keys, backup keys included, from the agentic-manager service and leaves none behind."
-verify = "A build carries the new name in every artefact and string (a CI grep finds the working name only in the migration); on a machine with keys under the old service, first launch moves them, Accounts still work and the old entries are gone."
+description = "Applies the chosen public name to the binary, bundle id, installers, update manifest, product strings (wizard, About, server-unreachable state) and the keychain service, with a one-time migration that moves stored keys, backup keys included, from the agentic-manager service and leaves none behind; the move runs before any store opens, so a writer open never creates a new backup key while the old service still holds one (arch AD-17, AD-32, 2026-11-24)."
+verify = "A build carries the new name in every artefact and string (a CI grep finds the working name only in the migration); on a machine with keys under the old service, first launch moves them, Accounts still work and the old entries are gone; a project's backup key under the old service is the one its first writer open after the move uses (its key id unchanged, no new key created), and its older backups still decrypt."
 covers = ["R11"]
 after = [11]
 hitl = false
