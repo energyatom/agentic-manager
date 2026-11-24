@@ -76,7 +76,16 @@ pub fn spike_workflow(steps: usize) -> LinearWorkflow {
             output_micro_per_mtok: 15_000_000,
             snapshot: "spike-2026-11-19".into(),
         },
+        system: Instruction::authored("You are a step in a test workflow."),
+        step_prompt: spike_step_prompt,
     }
+}
+
+/// The spike's fixed step prompt (am-engine authors no `Instruction`).
+fn spike_step_prompt(step_key: &str, workflow: &str) -> Instruction {
+    Instruction::authored(format!(
+        "Step {step_key} of workflow {workflow}. Reply with one short line."
+    ))
 }
 
 /// Start a new run, or with `resume` continue the first unfinished one.
@@ -401,7 +410,7 @@ pub async fn files_to_models(
                 messages: vec![Message {
                     role: Role::User,
                     parts: vec![
-                        Part::Untrusted(data.clone()),
+                        Part::from(data.clone()),
                         Part::Instruction(Instruction::authored(C4_QUESTION)),
                     ],
                 }],

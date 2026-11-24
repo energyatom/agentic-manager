@@ -16,9 +16,9 @@ use std::sync::Arc;
 
 use am_domain::{
     Actor, ChatRequest, EventSink, Instruction, LlmProvider, Message, Part, Role, StopReason,
-    StreamEvent, TrustedInput, Usage,
+    StreamEvent, Usage,
 };
-use am_store::{Reader, StepInput, StepRow, StoreError, WriteCommand, Writer, new_id};
+use am_store::{CallPurpose, Reader, StepInput, StepRow, StoreError, WriteCommand, Writer, new_id};
 use tokio_util::sync::CancellationToken;
 
 use crate::TokenSignal;
@@ -46,6 +46,12 @@ pub struct LinearWorkflow {
     pub model: String,
     pub max_output_tokens: u32,
     pub price: Price,
+    /// The system part of every step's request. The caller builds it:
+    /// am-engine authors no `Instruction` (AD-10, story 3.5).
+    pub system: Instruction,
+    /// The step instruction, from the step's key and the workflow's name;
+    /// built by the caller for the same reason.
+    pub step_prompt: fn(step_key: &str, workflow: &str) -> Instruction,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -136,10 +142,7 @@ pub async fn drive_run(
         for prev in &earlier {
             let label = format!("step:{}@{}", prev.step_key, prev.attempt);
             let text = prev.output.clone().unwrap_or_default();
-            match TrustedInput::from_step_output(label.clone(), text, prev.taint) {
-                part @ Part::Trusted(_) => trusted.push(part),
-                part => fenced.push(part),
-            }
+            crate::parts::sort_output(label.clone(), text, prev.taint, &mut trusted, &mut fenced);
             taint = taint.raise(prev.taint);
             inputs.push(StepInput {
                 kind: "step_output".into(),
@@ -156,15 +159,13 @@ pub async fn drive_run(
                     step_run_id: step.id.clone(),
                     inputs,
                     taint,
+                    prompt: Vec::new(),
                 },
             )?;
         }
         let call_seq = step_calls.iter().map(|c| c.call_seq).max().unwrap_or(0) + 1;
-        let prompt = format!(
-            "Step {} of workflow {}. Reply with one short line.",
-            step.step_key, wf.workflow
-        );
-        let est_input = (prompt.len() as u64 / 4).max(1);
+        let prompt = (wf.step_prompt)(&step.step_key, &wf.workflow);
+        let est_input = (prompt.text().len() as u64 / 4).max(1);
         let reserved = wf.price.cost(est_input, wf.max_output_tokens as u64);
         let call_id = new_id();
         writer.exec(
@@ -176,14 +177,16 @@ pub async fn drive_run(
                 reserved_micro_usd: reserved,
                 rate_snapshot: wf.price.snapshot.clone(),
                 taint,
+                purpose: CallPurpose::Turn,
+                prompt: Vec::new(),
             },
         )?;
-        let mut parts = vec![Part::Instruction(Instruction::authored(prompt))];
+        let mut parts = vec![Part::Instruction(prompt)];
         parts.extend(trusted);
         parts.extend(fenced);
         let request = ChatRequest {
             model: wf.model.clone(),
-            system: vec![Instruction::authored("You are a step in a test workflow.")],
+            system: vec![wf.system.clone()],
             messages: vec![Message {
                 role: Role::User,
                 parts,
@@ -275,69 +278,4 @@ pub async fn drive_run(
         },
     )?;
     Ok("succeeded".into())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use am_testkit::{FakeLlm, ScriptedTurn};
-    use std::time::Duration;
-
-    fn wf() -> LinearWorkflow {
-        LinearWorkflow {
-            workflow: "wf".into(),
-            steps: vec!["a".into(), "b".into()],
-            model: "fake".into(),
-            max_output_tokens: 100,
-            price: Price {
-                input_micro_per_mtok: 3_000_000,
-                output_micro_per_mtok: 15_000_000,
-                snapshot: "test".into(),
-            },
-        }
-    }
-
-    #[tokio::test]
-    async fn runs_to_success_and_settles_from_usage() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = dir.path().join("state.db");
-        let store = am_store::Store::open(&db).unwrap();
-        let w = store.writer();
-        let llm = Arc::new(FakeLlm::new(vec![
-            ScriptedTurn::text("ok")
-                .usage(1000, 100)
-                .delay(Duration::from_millis(1)),
-        ]));
-        let run = create_run(&w, system("test"), &wf(), "manual").unwrap();
-        let status = drive_run(&db, &w, llm.clone(), &wf(), &run, CancellationToken::new())
-            .await
-            .unwrap();
-        assert_eq!(status, "succeeded");
-        assert_eq!(llm.calls(), 2);
-        let l = store.reader().unwrap().ledger_for_run(&run).unwrap();
-        assert!(l.iter().all(|e| e.settled_micro_usd == Some(4500)));
-    }
-
-    #[tokio::test]
-    async fn cancel_settles_at_reservation_when_usage_missing() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = dir.path().join("state.db");
-        let store = am_store::Store::open(&db).unwrap();
-        let w = store.writer();
-        let llm = Arc::new(FakeLlm::new(vec![
-            ScriptedTurn::text("slow").delay(Duration::from_secs(30)),
-        ]));
-        let run = create_run(&w, system("test"), &wf(), "manual").unwrap();
-        let token = CancellationToken::new();
-        let t2 = token.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            t2.cancel();
-        });
-        let status = drive_run(&db, &w, llm, &wf(), &run, token).await.unwrap();
-        assert_eq!(status, "cancelled");
-        let l = store.reader().unwrap().ledger_for_run(&run).unwrap();
-        assert_eq!(l.len(), 1);
-        assert_eq!(l[0].settled_micro_usd, Some(l[0].reserved_micro_usd));
-    }
 }

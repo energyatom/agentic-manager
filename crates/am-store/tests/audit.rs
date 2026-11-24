@@ -80,6 +80,8 @@ fn populated(root: &Path) -> Store {
                 rate_snapshot: "rates-1".into(),
                 // Story 3.3: raised, never lowered (AD-10).
                 taint: Taint::Clean,
+                purpose: am_store::CallPurpose::Turn,
+                prompt: vec![],
             },
         )
         .unwrap();

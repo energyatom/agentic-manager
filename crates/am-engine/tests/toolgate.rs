@@ -150,7 +150,10 @@ async fn duplicate_manifest_ids_are_refused() {
             model: "example-local".into(),
             max_output_tokens: 64,
             provider: llm,
+            prompt: am_engine::prompt::StepPrompt::default(),
+            output_schema: None,
         }],
+        clock: am_testkit::FakeClock::at("2026-11-24T10:00:00Z"),
     };
     let owner = Actor::Human {
         person: "owner".into(),

@@ -445,6 +445,7 @@ fn tainted_waiting(env: &Env, root: &Path, output: &str) -> (String, String) {
                 taint: Taint::Tainted,
             }],
             taint: Taint::Tainted,
+            prompt: vec![],
         },
     )
     .unwrap();
@@ -457,6 +458,8 @@ fn tainted_waiting(env: &Env, root: &Path, output: &str) -> (String, String) {
             reserved_micro_usd: 0,
             rate_snapshot: "none".into(),
             taint: Taint::Clean,
+            purpose: am_store::CallPurpose::Turn,
+            prompt: vec![],
         },
     )
     .unwrap();
@@ -572,6 +575,7 @@ fn failed_run(env: &Env, root: &Path) -> (String, String) {
             step_run_id: draft.clone(),
             inputs: vec![],
             taint: Taint::Clean,
+            prompt: vec![],
         },
     )
     .unwrap();
@@ -1712,6 +1716,7 @@ fn stuck_run(env: &Env, root: &Path, how: Stuck) -> (String, String) {
             step_run_id: draft.clone(),
             inputs: vec![],
             taint: Taint::Clean,
+            prompt: vec![],
         },
     )
     .unwrap();
@@ -1732,6 +1737,8 @@ fn stuck_run(env: &Env, root: &Path, how: Stuck) -> (String, String) {
                     reserved_micro_usd: 0,
                     rate_snapshot: "none".into(),
                     taint: Taint::Clean,
+                    purpose: am_store::CallPurpose::Turn,
+                    prompt: vec![],
                 },
             )
             .unwrap();
@@ -2393,6 +2400,7 @@ async fn titles_and_bodies_are_shown_escaped() {
             step_run_id: draft.clone(),
             inputs: vec![],
             taint: Taint::Clean,
+            prompt: vec![],
         },
     )
     .unwrap();

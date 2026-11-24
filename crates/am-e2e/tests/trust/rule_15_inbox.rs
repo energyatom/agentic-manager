@@ -555,6 +555,7 @@ async fn an_inbox_event_carries_only_the_id_and_status() {
             step_run_id: draft.clone(),
             inputs: vec![],
             taint: Taint::Clean,
+            prompt: vec![],
         },
     )
     .unwrap();
@@ -567,6 +568,8 @@ async fn an_inbox_event_carries_only_the_id_and_status() {
             reserved_micro_usd: 0,
             rate_snapshot: "none".into(),
             taint: Taint::Clean,
+            purpose: am_store::CallPurpose::Turn,
+            prompt: vec![],
         },
     )
     .unwrap();
@@ -784,6 +787,7 @@ fn failed_run(rig: &Rig) -> String {
             step_run_id: draft.clone(),
             inputs: vec![],
             taint: Taint::Clean,
+            prompt: vec![],
         },
     )
     .unwrap();
@@ -922,6 +926,7 @@ fn stuck(rig: &Rig, how: Stuck) -> String {
             step_run_id: draft.clone(),
             inputs: vec![],
             taint: Taint::Clean,
+            prompt: vec![],
         },
     )
     .unwrap();
@@ -942,6 +947,8 @@ fn stuck(rig: &Rig, how: Stuck) -> String {
                     reserved_micro_usd: 0,
                     rate_snapshot: "none".into(),
                     taint: Taint::Clean,
+                    purpose: am_store::CallPurpose::Turn,
+                    prompt: vec![],
                 },
             )
             .unwrap();

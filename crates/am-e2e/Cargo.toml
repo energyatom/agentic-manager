@@ -165,6 +165,34 @@ path = "tests/trust/rule_15_inbox.rs"
 name = "taint_trusted_input_gate_note"
 path = "tests/trust/taint_trusted_input_gate_note.rs"
 
+# Story 3.5: labelled prompt assembly and schema repair (AD-10, AD-27,
+# AD-36). The assembler's journal and the repair loop are engine tests
+# (tests/engine/); the type wall, the fence, names only and the repair's
+# taint are trust tests (tests/trust/).
+[[test]]
+name = "prompt_assembly_journal"
+path = "tests/engine/prompt_assembly_journal.rs"
+
+[[test]]
+name = "schema_repair"
+path = "tests/engine/schema_repair.rs"
+
+[[test]]
+name = "taint_prompt_type_wall"
+path = "tests/trust/taint_prompt_type_wall.rs"
+
+[[test]]
+name = "taint_prompt_fence"
+path = "tests/trust/taint_prompt_fence.rs"
+
+[[test]]
+name = "taint_prompt_names_only"
+path = "tests/trust/taint_prompt_names_only.rs"
+
+[[test]]
+name = "taint_prompt_repair"
+path = "tests/trust/taint_prompt_repair.rs"
+
 [dev-dependencies]
 am-app.workspace = true
 # Story 3.2: the error envelope and the run and event DTOs (AD-14).

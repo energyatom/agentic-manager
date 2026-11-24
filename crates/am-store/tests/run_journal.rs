@@ -230,6 +230,8 @@ fn the_writer_stamps_step_and_run_times() {
             rate_snapshot: "none".into(),
             // Story 3.3: raised, never lowered (AD-10).
             taint: Taint::Clean,
+            purpose: am_store::CallPurpose::Turn,
+            prompt: vec![],
         },
     )
     .unwrap();
@@ -624,6 +626,7 @@ fn migration_0007_keeps_every_row_as_attempt_one_untainted() {
                 step_run_id: "old-b".into(),
                 inputs: vec![],
                 taint: Taint::Clean,
+                prompt: vec![],
             },
         )
         .unwrap();
@@ -653,6 +656,7 @@ fn run_step(store: &Store, id: &str, call: &str, output: &str) {
             step_run_id: id.into(),
             inputs: vec![],
             taint: Taint::Clean,
+            prompt: vec![],
         },
     )
     .unwrap();
@@ -665,6 +669,8 @@ fn run_step(store: &Store, id: &str, call: &str, output: &str) {
             reserved_micro_usd: 0,
             rate_snapshot: "none".into(),
             taint: Taint::Clean,
+            purpose: am_store::CallPurpose::Turn,
+            prompt: vec![],
         },
     )
     .unwrap();
@@ -716,6 +722,7 @@ fn a_loop_back_keeps_the_old_attempt_and_queues_new_ones() {
             step_run_id: ids[2].clone(),
             inputs: vec![],
             taint: Taint::Clean,
+            prompt: vec![],
         },
     )
     .unwrap();
@@ -728,6 +735,8 @@ fn a_loop_back_keeps_the_old_attempt_and_queues_new_ones() {
             reserved_micro_usd: 0,
             rate_snapshot: "none".into(),
             taint: Taint::Clean,
+            purpose: am_store::CallPurpose::Turn,
+            prompt: vec![],
         },
     )
     .unwrap();
@@ -868,6 +877,7 @@ fn the_loop_back_input_is_journaled_by_the_loop_back() {
             step_run_id: ids[2].clone(),
             inputs: vec![],
             taint: Taint::Tainted,
+            prompt: vec![],
         },
     )
     .unwrap();
@@ -880,6 +890,8 @@ fn the_loop_back_input_is_journaled_by_the_loop_back() {
             reserved_micro_usd: 0,
             rate_snapshot: "none".into(),
             taint: Taint::Tainted,
+            purpose: am_store::CallPurpose::Turn,
+            prompt: vec![],
         },
     )
     .unwrap();
@@ -1094,11 +1106,14 @@ fn migration_0008_keeps_every_item_open_with_its_taint() {
 
     let (store, report) = open_project(dir.path()).unwrap();
 
-    assert_eq!(
-        SCHEMA_VERSION,
-        BEFORE_RESOLUTION + 1,
-        "0008 is this story's"
-    );
+    // Story 3.5 (superseded): 0009 follows 0008, so the schema is no longer
+    // at 8; this test pins that the 7 to 8 step is applied.
+    const {
+        assert!(
+            SCHEMA_VERSION > BEFORE_RESOLUTION,
+            "the 7 to 8 step is applied"
+        )
+    };
     assert_eq!(report.version, SCHEMA_VERSION);
     let step = report
         .applied
@@ -1574,7 +1589,7 @@ fn migration_0008_loses_no_item_and_keeps_the_pre_migration_copy() {
         .expect("the 7 to 8 step is reported");
     let backup = step.backup.clone().expect("a pre-migration copy");
     let c = Connection::open(&path).unwrap();
-    assert_eq!(user_version(&c), BEFORE_RESOLUTION + 1);
+    assert_eq!(user_version(&c), SCHEMA_VERSION);
     let after = item_cells(&c, ITEM_COLUMNS_0007);
     assert_eq!(after.len(), before.len(), "no item lost");
     assert_eq!(after, before, "the same ids, every 0007 column equal");

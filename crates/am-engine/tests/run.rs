@@ -95,6 +95,8 @@ fn step(
         model: model.into(),
         max_output_tokens,
         provider,
+        prompt: am_engine::prompt::StepPrompt::default(),
+        output_schema: None,
     }
 }
 
@@ -103,6 +105,7 @@ fn plan(steps: Vec<StepPlan>) -> RunPlan {
         workflow: "wf".into(),
         config_hash: HASH.into(),
         steps,
+        clock: am_testkit::FakeClock::at("2026-11-24T10:00:00Z"),
     }
 }
 

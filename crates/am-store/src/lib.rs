@@ -65,6 +65,7 @@ mod fsx;
 pub mod legacy;
 mod migrations;
 pub mod project;
+mod prompt;
 pub mod user;
 
 pub use audit::{ChainBreak, ChainOk, ConfigNote, verify_jsonl};
@@ -73,6 +74,7 @@ pub use fsx::stream_copy;
 pub use migrations::{AppliedMigration, OpenReport, PRE_MIGRATION_KEPT, SCHEMA_VERSION};
 use project::ProjectLock;
 pub use project::{LockHolder, lock_holder, lock_is_held, open_runtime, open_runtime_unchanged};
+pub use prompt::{CallPurpose, NewPromptPart, PromptKind, PromptPartRow, PromptSlot};
 
 /// The project store's `application_id` (story 2.12, AD-7): stamped on
 /// every project database, so this Mac's user store
@@ -231,16 +233,34 @@ pub enum WriteCommand {
     /// and `loop_back` name one. Refused on a finished run, or while
     /// another step of the run waits for a person. Audited `step.started`
     /// with the taint and the number of inputs, never an input's text.
+    ///
+    /// Story 3.5 (AD-27): `prompt` is the attempt's assembled prompt, the
+    /// parts in AD-27's order, journaled in the same transaction (`call_seq`
+    /// 0). The writer refuses, in words and with nothing written, a part
+    /// out of order, in a slot that does not repeat or of a kind its slot
+    /// does not hold, an instruction or trusted part with taint set, an
+    /// untrusted part with taint clear, and an input part whose label no
+    /// input of the attempt holds; an untrusted part raises the attempt's
+    /// taint. Audited with the part count, never a part's text.
     StartAttempt {
         step_run_id: String,
         inputs: Vec<StepInput>,
         taint: Taint,
+        prompt: Vec<NewPromptPart>,
     },
     /// Journal the call and reserve its spend, before the call is made (AD-8, AD-9).
     /// The step must be `running`. `taint` raises the attempt's taint in the
     /// same transaction (a tool result the call carries, AD-10); a clean
     /// value never lowers it. Audited `model_call.reserved` with the taint
     /// the call goes out with (the attempt's, after the raise).
+    ///
+    /// Story 3.5 (AD-36): `purpose` is `Turn` (no parts) or `Repair`, the
+    /// step's one repair after a final message that did not match its
+    /// output schema: refused unless the attempt has made calls and every
+    /// one is settled, and refused a second time. A repair carries exactly
+    /// its two parts, the invalid reply (an `assistant` part with the
+    /// attempt's taint) and the schema's repair instruction, journaled
+    /// under this call's `call_seq`. Audited with the purpose.
     ReserveCall {
         step_run_id: String,
         call_id: String,
@@ -248,6 +268,8 @@ pub enum WriteCommand {
         reserved_micro_usd: i64,
         rate_snapshot: String,
         taint: Taint,
+        purpose: CallPurpose,
+        prompt: Vec<NewPromptPart>,
     },
     /// Settle from provider usage; missing usage settles at the reservation.
     SettleCall {
@@ -1084,7 +1106,7 @@ pub(crate) fn execute(
                 |r| r.get(0),
             )?;
             if known {
-                start_attempt(tx, step_run_id, &[], Taint::Clean, &now)?;
+                start_attempt(tx, step_run_id, &[], Taint::Clean, &[], &now)?;
             }
             built = Some(vec![(
                 "step.started".into(),
@@ -1096,8 +1118,16 @@ pub(crate) fn execute(
             step_run_id,
             inputs,
             taint,
+            prompt,
         } => {
-            built = Some(vec![start_attempt(tx, step_run_id, inputs, *taint, &now)?]);
+            built = Some(vec![start_attempt(
+                tx,
+                step_run_id,
+                inputs,
+                *taint,
+                prompt,
+                &now,
+            )?]);
         }
         WriteCommand::ReserveCall {
             step_run_id,
@@ -1106,6 +1136,8 @@ pub(crate) fn execute(
             reserved_micro_usd,
             rate_snapshot,
             taint,
+            purpose,
+            prompt,
         } => {
             let step = step_of(tx, step_run_id)?;
             require(&step, &[StepStatus::Running], "reserves a model call")?;
@@ -1113,11 +1145,13 @@ pub(crate) fn execute(
             // The taint the call goes out with: the attempt's, after the
             // raise (story 3.3, review P16).
             let carried = step.taint.raise(*taint);
+            check_repair(tx, step_run_id, *purpose, prompt, carried)?;
             let run_id = step.run_id;
             tx.execute(
-                "INSERT INTO model_calls (id, step_run_id, call_seq, status, settled, created_at) VALUES (?1, ?2, ?3, 'issued', 0, ?4)",
-                params![call_id, step_run_id, call_seq, now],
+                "INSERT INTO model_calls (id, step_run_id, call_seq, status, settled, purpose, created_at) VALUES (?1, ?2, ?3, 'issued', 0, ?4, ?5)",
+                params![call_id, step_run_id, call_seq, purpose.as_str(), now],
             )?;
+            insert_parts(tx, step_run_id, *call_seq, prompt, &now)?;
             tx.execute(
                 "INSERT INTO ledger (id, model_call_id, run_id, kind, reserved_micro_usd, state, rate_snapshot, created_at) VALUES (?1, ?2, ?3, 'model', ?4, 'reserved', ?5, ?6)",
                 params![new_id(), call_id, run_id, reserved_micro_usd, rate_snapshot, now],
@@ -1127,6 +1161,7 @@ pub(crate) fn execute(
                 call_id.clone(),
                 Some(json!({
                     "call_seq": call_seq,
+                    "purpose": purpose.as_str(),
                     "rate_snapshot": rate_snapshot,
                     "reserved_micro_usd": reserved_micro_usd,
                     "step_run_id": step_run_id,
@@ -1230,7 +1265,7 @@ pub(crate) fn execute(
             // step starts first (its inputs, taint and `started_at`), then
             // waits, in this one transaction (story 3.3, review P3).
             let journaled = if step.status == StepStatus::Queued {
-                entries.push(start_attempt(tx, step_run_id, inputs, *taint, &now)?);
+                entries.push(start_attempt(tx, step_run_id, inputs, *taint, &[], &now)?);
                 0
             } else {
                 let (raised, journaled) = journal_inputs(tx, &step, inputs, *taint, &now)?;
@@ -1468,6 +1503,18 @@ fn flag(taint: Taint) -> i64 {
 /// The journal column's 0 or 1 as a taint.
 fn taint_of(flag: i64) -> Taint {
     Taint::of_flag(flag != 0)
+}
+
+/// A call's purpose from its column; an unknown word is an error, never a
+/// guess (story 3.5, review R12).
+fn purpose_of(word: &str) -> rusqlite::Result<CallPurpose> {
+    CallPurpose::parse(word).ok_or_else(|| {
+        rusqlite::Error::FromSqlConversionFailure(
+            7,
+            rusqlite::types::Type::Text,
+            format!("a model call has the unknown purpose `{word}`").into(),
+        )
+    })
 }
 
 /// What the writer reads of one step attempt before it changes it.
@@ -1853,6 +1900,7 @@ fn start_attempt(
     step_run_id: &str,
     inputs: &[StepInput],
     taint: Taint,
+    prompt: &[NewPromptPart],
     now: &str,
 ) -> Result<Entry, StoreError> {
     let step = step_of(tx, step_run_id)?;
@@ -1865,15 +1913,247 @@ fn start_attempt(
     )?;
     let taint = taint.raise(taint_of(journaled_before));
     let (taint, journaled) = journal_inputs(tx, &step, inputs, taint, now)?;
+    // Story 3.5: the prompt's own checks, after the inputs it names are
+    // journaled; an untrusted part raises the attempt's taint.
+    let taint = check_attempt_prompt(tx, step_run_id, prompt, taint)?;
     tx.execute(
         "UPDATE step_runs SET status = 'running', taint = MAX(taint, ?3), started_at = COALESCE(started_at, ?2), updated_at = ?2 WHERE id = ?1",
         params![step_run_id, now, flag(taint)],
     )?;
+    insert_parts(tx, step_run_id, 0, prompt, now)?;
     Ok((
         "step.started".into(),
         step_run_id.to_string(),
-        Some(json!({"inputs": journaled, "taint": flag(taint)})),
+        Some(json!({"inputs": journaled, "prompt_parts": prompt.len(), "taint": flag(taint)})),
     ))
+}
+
+/// Story 3.5 (AD-27, AD-10): the checks on an attempt's own prompt (a
+/// `StartAttempt`'s); returns the attempt's taint, raised by an untrusted
+/// part. Each refusal names the offending part's label.
+fn check_attempt_prompt(
+    tx: &rusqlite::Transaction,
+    step_run_id: &str,
+    prompt: &[NewPromptPart],
+    taint: Taint,
+) -> Result<Taint, StoreError> {
+    let mut attempt = taint;
+    let mut last: Option<PromptSlot> = None;
+    let mut seen: Vec<(PromptSlot, &str)> = Vec::new();
+    let mut steps = 0;
+    for part in prompt {
+        let label = &part.label;
+        let refuse = |why: &str| {
+            Err(StoreError::Invalid(format!(
+                "refused: the prompt part `{label}` {why}; nothing was changed"
+            )))
+        };
+        if label.trim().is_empty() {
+            return refuse("has no label, and every part is named (AD-27)");
+        }
+        if seen.contains(&(part.slot, label.as_str())) {
+            return refuse(&format!(
+                "is a second part labelled so in the `{}` slot",
+                part.slot.as_str()
+            ));
+        }
+        seen.push((part.slot, label.as_str()));
+        if part.slot == PromptSlot::Step {
+            steps += 1;
+        }
+        if matches!(part.slot, PromptSlot::Reply | PromptSlot::Repair) {
+            return refuse("is in a repair slot, and an attempt's own prompt has none");
+        }
+        if let Some(prev) = last {
+            if part.slot < prev {
+                return refuse("is out of AD-27's order");
+            }
+            if part.slot == prev && !part.slot.repeats() {
+                return refuse(&format!(
+                    "repeats the `{}` slot, which holds one part",
+                    part.slot.as_str()
+                ));
+            }
+        }
+        last = Some(part.slot);
+        if part.kind != part.slot.kind() {
+            return refuse(&format!(
+                "is {} in the `{}` slot, which holds only {} parts",
+                part.kind.as_str(),
+                part.slot.as_str(),
+                part.slot.kind().as_str()
+            ));
+        }
+        match part.kind {
+            PromptKind::Instruction | PromptKind::Trusted if part.taint.is_tainted() => {
+                return refuse(&format!(
+                    "is a {} part with taint set; only data from outside is tainted",
+                    part.kind.as_str()
+                ));
+            }
+            PromptKind::Untrusted if !part.taint.is_tainted() => {
+                return refuse("is untrusted data with taint clear");
+            }
+            _ => {}
+        }
+        if matches!(part.kind, PromptKind::Trusted | PromptKind::Untrusted) {
+            // The input's journaled taint decides the kind: a clean input is
+            // a trusted part, a tainted one is fenced (AD-10).
+            let named: bool = tx.query_row(
+                "SELECT EXISTS (SELECT 1 FROM step_inputs WHERE step_run_id = ?1 AND label = ?2 AND taint = ?3)",
+                params![step_run_id, part.label, flag(part.taint)],
+                |r| r.get(0),
+            )?;
+            if !named {
+                return refuse(&format!(
+                    "names no {} input journaled for this attempt (a trusted part names a clean input, an untrusted part a tainted one)",
+                    if part.kind == PromptKind::Trusted {
+                        "clean"
+                    } else {
+                        "tainted"
+                    }
+                ));
+            }
+        }
+        if part.kind == PromptKind::Untrusted {
+            attempt = attempt.raise(Taint::Tainted);
+        }
+    }
+    // Story 3.5, review T6: every input the attempt journaled is a part of
+    // its prompt (the other half of the label check above).
+    if !prompt.is_empty() {
+        let mut st = tx.prepare("SELECT label FROM step_inputs WHERE step_run_id = ?1")?;
+        let journaled: Vec<String> = st
+            .query_map(params![step_run_id], |r| r.get(0))?
+            .collect::<Result<_, _>>()?;
+        for label in journaled {
+            let shown = prompt.iter().any(|p| {
+                matches!(p.kind, PromptKind::Trusted | PromptKind::Untrusted) && p.label == label
+            });
+            if !shown {
+                return Err(StoreError::Invalid(format!(
+                    "refused: the input `{label}` of this attempt is not a part of its prompt, and every journaled input is one (AD-27, AD-43); nothing was changed"
+                )));
+            }
+        }
+    }
+    if !prompt.is_empty() && steps != 1 {
+        return Err(StoreError::Invalid(format!(
+            "refused: the prompt part `{}` begins a prompt that has {steps} Step parts, and a prompt has exactly one (AD-27); nothing was changed",
+            prompt[0].label
+        )));
+    }
+    Ok(attempt)
+}
+
+/// Story 3.5 (AD-36): a repair call's checks, run when it is reserved. A
+/// plain turn carries no parts. A repair carries exactly its reply and its
+/// instruction, follows calls that are all settled, and is the attempt's
+/// only one. `attempt` is the taint the call goes out with.
+fn check_repair(
+    tx: &rusqlite::Transaction,
+    step_run_id: &str,
+    purpose: CallPurpose,
+    prompt: &[NewPromptPart],
+    attempt: Taint,
+) -> Result<(), StoreError> {
+    match purpose {
+        CallPurpose::Turn => {
+            if let Some(part) = prompt.first() {
+                return Err(StoreError::Invalid(format!(
+                    "refused: the prompt part `{}` is on a plain turn; only a repair call carries parts of its own; nothing was changed",
+                    part.label
+                )));
+            }
+            Ok(())
+        }
+        CallPurpose::Repair => {
+            let refuse = |why: &str| {
+                Err(StoreError::Invalid(format!(
+                    "refused: a repair call {why}; nothing was changed"
+                )))
+            };
+            let shape_ok = prompt.len() == 2
+                && prompt[0].slot == PromptSlot::Reply
+                && prompt[1].slot == PromptSlot::Repair;
+            if !shape_ok {
+                return refuse(
+                    "carries exactly two parts, the invalid reply and the schema's repair instruction, in that order",
+                );
+            }
+            for part in prompt {
+                if part.label.trim().is_empty() {
+                    return Err(StoreError::Invalid(
+                        "refused: a repair part has no label, and every part is named (AD-27); nothing was changed".into(),
+                    ));
+                }
+                if part.kind != part.slot.kind() {
+                    return Err(StoreError::Invalid(format!(
+                        "refused: the repair part `{}` is {} in the `{}` slot, which holds only {} parts; nothing was changed",
+                        part.label,
+                        part.kind.as_str(),
+                        part.slot.as_str(),
+                        part.slot.kind().as_str()
+                    )));
+                }
+            }
+            if prompt[1].taint.is_tainted() {
+                return Err(StoreError::Invalid(format!(
+                    "refused: the repair part `{}` is an instruction with taint set; nothing was changed",
+                    prompt[1].label
+                )));
+            }
+            if prompt[0].taint != attempt {
+                return Err(StoreError::Invalid(format!(
+                    "refused: the repair part `{}` carries a taint other than the attempt's (a repair neither adds nor clears taint); nothing was changed",
+                    prompt[0].label
+                )));
+            }
+            let (total, open, repairs): (i64, i64, i64) = tx.query_row(
+                "SELECT COUNT(*), COALESCE(SUM(settled = 0), 0), COALESCE(SUM(purpose = 'repair'), 0) FROM model_calls WHERE step_run_id = ?1",
+                params![step_run_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )?;
+            if repairs > 0 {
+                return refuse("is the attempt's second; a step gets one repair (AD-36)");
+            }
+            if total == 0 {
+                return refuse("needs a first turn, and the attempt has made none");
+            }
+            if open > 0 {
+                return refuse("needs the first turn settled, and a call of the attempt is not");
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Journals `prompt` under `call_seq`, `ord` 1..n in order.
+fn insert_parts(
+    tx: &rusqlite::Transaction,
+    step_run_id: &str,
+    call_seq: i64,
+    prompt: &[NewPromptPart],
+    now: &str,
+) -> Result<(), StoreError> {
+    for (i, part) in prompt.iter().enumerate() {
+        tx.execute(
+            "INSERT INTO prompt_parts (step_run_id, call_seq, ord, slot, kind, label, taint, text, bytes, sha256, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, ?10)",
+            params![
+                step_run_id,
+                call_seq,
+                i as i64 + 1,
+                part.slot.as_str(),
+                part.kind.as_str(),
+                part.label,
+                flag(part.taint),
+                part.text,
+                part.text.as_ref().map_or(0, |t| t.len() as i64),
+                now
+            ],
+        )?;
+    }
+    Ok(())
 }
 
 /// What the target's new attempt of a loop-back receives: the producer's
@@ -2522,6 +2802,8 @@ pub struct CallRow {
     pub settled: bool,
     pub input_tokens: Option<i64>,
     pub output_tokens: Option<i64>,
+    /// Story 3.5: a step's own turn or its one schema repair (AD-36).
+    pub purpose: CallPurpose,
 }
 
 /// One Inbox item (AD-28; stories 3.3 and 3.4).
@@ -2758,7 +3040,7 @@ impl Reader {
 
     fn calls_where(&self, filter: &str, id: &str) -> Result<Vec<CallRow>, StoreError> {
         let mut st = self.conn.prepare(&format!(
-            "SELECT c.id, c.step_run_id, c.call_seq, c.status, c.settled, c.input_tokens, c.output_tokens
+            "SELECT c.id, c.step_run_id, c.call_seq, c.status, c.settled, c.input_tokens, c.output_tokens, c.purpose
              FROM model_calls c JOIN step_runs s ON s.id = c.step_run_id WHERE {filter} ORDER BY s.seq, s.attempt, c.call_seq"
         ))?;
         let rows = st.query_map(params![id], |r| {
@@ -2770,9 +3052,54 @@ impl Reader {
                 settled: r.get::<_, i64>(4)? != 0,
                 input_tokens: r.get(5)?,
                 output_tokens: r.get(6)?,
+                purpose: purpose_of(&r.get::<_, String>(7)?)?,
             })
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Story 3.5: the parts of an attempt's prompt and of its repair call,
+    /// in order (`call_seq`, then `ord`); empty for an attempt that has
+    /// none recorded (one from before migration 0009, or a gate).
+    pub fn prompt_parts(&self, step_run_id: &str) -> Result<Vec<PromptPartRow>, StoreError> {
+        let mut st = self.conn.prepare(
+            "SELECT call_seq, ord, slot, kind, label, taint, text, bytes, sha256 FROM prompt_parts WHERE step_run_id = ?1 ORDER BY call_seq, ord",
+        )?;
+        let rows = st.query_map(params![step_run_id], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
+                r.get::<_, i64>(5)?,
+                r.get::<_, Option<String>>(6)?,
+                r.get::<_, i64>(7)?,
+                r.get::<_, Option<String>>(8)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (call_seq, ord, slot, kind, label, taint, text, bytes, sha256) = row?;
+            let (Some(slot), Some(kind)) = (PromptSlot::parse(&slot), PromptKind::parse(&kind))
+            else {
+                return Err(StoreError::Invalid(format!(
+                    "prompt part {ord} of step run {step_run_id} has the unknown slot `{slot}` or kind `{kind}`"
+                )));
+            };
+            out.push(PromptPartRow {
+                call_seq,
+                ord,
+                slot,
+                kind,
+                label,
+                taint: taint_of(taint),
+                text,
+                bytes,
+                sha256,
+            });
+        }
+        Ok(out)
     }
 
     /// The journaled inputs of one step attempt, in the order they were
@@ -2935,6 +3262,8 @@ mod tests {
                     reserved_micro_usd: 1000,
                     rate_snapshot: "test".into(),
                     taint: Taint::Clean,
+                    purpose: CallPurpose::Turn,
+                    prompt: vec![],
                 },
             )
             .unwrap();
@@ -3042,6 +3371,8 @@ mod tests {
                 reserved_micro_usd: 1000,
                 rate_snapshot: "t".into(),
                 taint: Taint::Clean,
+                purpose: CallPurpose::Turn,
+                prompt: vec![],
             },
         )
         .unwrap();
@@ -3104,6 +3435,8 @@ mod tests {
                 reserved_micro_usd: 1000,
                 rate_snapshot: "t".into(),
                 taint: Taint::Clean,
+                purpose: CallPurpose::Turn,
+                prompt: vec![],
             },
         )
         .unwrap();
@@ -3261,5 +3594,14 @@ mod tests {
             .unwrap();
         drop(c);
         assert!(matches!(Store::open(&path), Err(StoreError::TooNew { .. })));
+    }
+
+    /// Review R12: an unknown purpose is an error, not a turn.
+    #[test]
+    fn an_unknown_purpose_is_an_error() {
+        assert_eq!(purpose_of("turn").unwrap(), CallPurpose::Turn);
+        assert_eq!(purpose_of("repair").unwrap(), CallPurpose::Repair);
+        let err = purpose_of("other").unwrap_err().to_string();
+        assert!(err.contains("other"), "{err}");
     }
 }

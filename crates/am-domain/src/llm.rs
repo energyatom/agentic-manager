@@ -51,6 +51,15 @@ pub enum Part {
     },
 }
 
+/// Fenced data is a part of its own kind (story 3.5, review R3): code that
+/// may build an `Instruction` hands data on through this, without naming the
+/// untrusted types or `Part::Untrusted`.
+impl From<UntrustedData> for Part {
+    fn from(data: UntrustedData) -> Part {
+        Part::Untrusted(data)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Message {
     pub role: Role,

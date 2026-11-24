@@ -642,6 +642,7 @@ async fn continue_refuses_a_step_left_running() {
             step_run_id: draft.clone(),
             inputs: vec![],
             taint: Taint::Clean,
+            prompt: vec![],
         },
     )
     .unwrap();
@@ -654,6 +655,8 @@ async fn continue_refuses_a_step_left_running() {
             reserved_micro_usd: 0,
             rate_snapshot: "none".into(),
             taint: Taint::Clean,
+            purpose: am_store::CallPurpose::Turn,
+            prompt: vec![],
         },
     )
     .unwrap();

@@ -1,0 +1,9 @@
+schema_version: 2
+name: Hello
+team: core
+description: One step that answers in one line, checked against the schema `line`.
+steps:
+  - id: write
+    seat: alpha
+    instruction: Say hello in one line.
+    output_schema: line

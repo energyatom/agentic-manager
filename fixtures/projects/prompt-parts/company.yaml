@@ -1,0 +1,8 @@
+schema_version: 2
+name: Prompt Parts
+description: A synthetic project whose one seat has every part a step's prompt is made of (epic 3 story 5).
+timezone: UTC
+currency: EUR
+teams:
+  - id: core
+    name: Core team

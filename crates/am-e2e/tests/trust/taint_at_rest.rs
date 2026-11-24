@@ -69,6 +69,7 @@ fn tainted_first_step(dir: &std::path::Path, steps: &[&str]) -> (Store, String, 
             step_run_id: ids[0].clone(),
             inputs: vec![untrusted_input()],
             taint: Taint::Tainted,
+            prompt: vec![],
         },
     )
     .unwrap();
@@ -105,6 +106,8 @@ fn no_command_clears_a_step_or_item_taint() {
             reserved_micro_usd: 0,
             rate_snapshot: "none".into(),
             taint: Taint::Clean,
+            purpose: am_store::CallPurpose::Turn,
+            prompt: vec![],
         },
     )
     .unwrap();
@@ -144,6 +147,7 @@ fn no_command_clears_a_step_or_item_taint() {
             step_run_id: draft.clone(),
             inputs: vec![],
             taint: Taint::Clean,
+            prompt: vec![],
         },
     );
     assert!(again.is_err(), "a finished attempt does not start again");

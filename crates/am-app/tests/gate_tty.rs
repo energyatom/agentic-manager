@@ -541,6 +541,7 @@ fn item_by_system(e: &Env, kind: am_domain::InboxKind) -> String {
                 step_run_id: draft.clone(),
                 inputs: vec![],
                 taint: Taint::Clean,
+                prompt: vec![],
             },
         )
         .unwrap();

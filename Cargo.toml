@@ -113,9 +113,11 @@ tempfile = "=3.27.0"
 # docs/crate-notes/croner.md); the scheduler converts at that boundary only.
 jiff-croner = { package = "jiff", version = "=0.2.46" }
 keyring-core = "=1.0.1"
-# Config files (story 1.4, AD-16). jsonschema =0.61.2 (Stack; MIT-0 allowed
-# since the 2026-11-20 REPLAN) is added by epic 3 story 5; see
-# docs/crate-notes/jsonschema.md.
+# Step output schemas (story 3.5, AD-36): the Stack's jsonschema. Defaults off
+# so no retriever (`resolve-http`, `resolve-file`) is built; MIT-0 is allowed
+# since the 2026-11-20 REPLAN. See docs/crate-notes/jsonschema.md.
+jsonschema = { version = "=0.61.2", default-features = false }
+# Config files (story 1.4, AD-16).
 serde-saphyr = "=2.1.1"
 url = "=2.5.9"
 # Source scope include/exclude globs (story 1.12, owner decision d):

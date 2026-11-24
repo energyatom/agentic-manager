@@ -1,0 +1,10 @@
+{
+  "schema_version": 2,
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["line"],
+  "additionalProperties": false,
+  "properties": {
+    "line": { "type": "string" }
+  }
+}

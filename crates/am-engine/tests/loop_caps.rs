@@ -73,6 +73,8 @@ fn step(provider: Arc<dyn LlmProvider>, limits: Limits) -> StepPlan {
         model: "example-local".into(),
         max_output_tokens: 256,
         provider,
+        prompt: am_engine::prompt::StepPrompt::default(),
+        output_schema: None,
     }
 }
 
@@ -81,6 +83,7 @@ fn plan(steps: Vec<StepPlan>) -> RunPlan {
         workflow: "wf".into(),
         config_hash: HASH.into(),
         steps,
+        clock: am_testkit::FakeClock::at("2026-11-24T10:00:00Z"),
     }
 }
 
@@ -1082,4 +1085,435 @@ async fn an_unknown_tool_name_is_kept_as_unknown_and_its_hash() {
             "{what}: the run's words: {reason:.300}"
         );
     }
+}
+
+// ---------------------------------------------------------------- story 3.5
+//
+// Epic 3 story 5, row 22 (AD-36): a schema repair is a model call like any
+// other, so a passed wall clock leaves no time to repair. Written before
+// the schema check exists.
+
+/// A step whose final message must match the schema `line`, whose first
+/// reply (an invalid message) is ready exactly at the wall-clock deadline
+/// of 30 s, on tokio's paused time: the deadline wins (P7), so no repair
+/// call is reserved or made; the attempt fails at its cap with one Failure
+/// item, and the model is asked once.
+#[tokio::test(start_paused = true)]
+async fn a_passed_wall_clock_means_no_repair() {
+    let p = project();
+    let llm = Arc::new(FakeLlm::new(vec![
+        ScriptedTurn::text("not json at all").delay(Duration::from_secs(30)),
+        ScriptedTurn::text(r#"{"line":"hello"}"#),
+    ]));
+    let schema = am_engine::schema::OutputSchema::new(
+        "line",
+        serde_json::json!({
+            "type": "object",
+            "required": ["line"],
+            "properties": { "line": { "type": "string" } }
+        }),
+        Instruction::authored("Reply again with one JSON object."),
+    );
+    let checked = StepPlan {
+        output_schema: Some(schema),
+        ..step(llm.clone(), limits(8, 20, Duration::from_secs(30)))
+    };
+    let plan = plan(vec![checked]);
+
+    let outcome = run_plan(&p.store, owner(), "manual", &plan, CancellationToken::new())
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.status, "failed", "{outcome:?}");
+    let reason = outcome.reason.clone().expect("in words");
+    assert!(
+        reason.contains("wall_clock") && names_number(&reason, 30),
+        "{reason}"
+    );
+    assert_eq!(llm.calls(), 1, "no repair call");
+    let r = rows(&p.db);
+    assert_eq!(r.calls.len(), 1, "{:#?}", r.calls);
+    assert_eq!(r.ledger.len(), 1);
+    assert!(r.calls[0].settled);
+    assert_eq!(r.step.status, "failed");
+    assert_eq!(r.step.output, None, "an invalid message is not an output");
+    assert_failure_item(&r, "wall_clock", 30);
+}
+
+// ------------------------------------------------------- review round 1
+//
+// Story 3.5 review triage round 1 (manager, 2026-11-24): R9 (the repair
+// call sends no tools; a tool call in its reply is an invalid final message;
+// a provider error on it fails the step and settles its reservation) and
+// R10 (an invalid reply that arrives when the deadline has passed fails as
+// a schema failure with "no time left to repair", not as a bare wall-clock
+// stop). Written before the patches.
+
+/// The schema `line` as am-app hands it to the engine.
+fn line_schema() -> am_engine::schema::OutputSchema {
+    am_engine::schema::OutputSchema::new(
+        "line",
+        serde_json::json!({
+            "type": "object",
+            "required": ["line"],
+            "properties": { "line": { "type": "string" } }
+        }),
+        Instruction::authored("Reply again with one JSON object."),
+    )
+}
+
+fn checked(provider: Arc<dyn LlmProvider>, limits: Limits) -> StepPlan {
+    StepPlan {
+        output_schema: Some(line_schema()),
+        ..step(provider, limits)
+    }
+}
+
+const GOOD_LINE: &str = r#"{"line":"hello"}"#;
+
+/// R9: the repair call offers no tool, though the run has tools and the
+/// first call offered them.
+#[tokio::test]
+async fn the_repair_call_sends_no_tools() {
+    let p = project();
+    let tool = FixtureTool::new();
+    let llm = Arc::new(FakeLlm::new(vec![
+        ScriptedTurn::text("not json at all"),
+        ScriptedTurn::text(GOOD_LINE),
+    ]));
+    let plan = plan(vec![checked(llm.clone(), Limits::default())]);
+
+    let outcome = with_tools(&p, &plan, &tool).await;
+
+    assert_eq!(outcome.status, "succeeded", "{outcome:?}");
+    let requests = llm.requests();
+    assert_eq!(requests.len(), 2);
+    assert!(!requests[0].tools.is_empty(), "the first call offers tools");
+    assert!(requests[1].tools.is_empty(), "{:?}", requests[1].tools);
+}
+
+/// R9: a tool call in the repair's reply counts as an invalid final message:
+/// the step fails with the schema's Failure item (title and words), the tool
+/// never runs, no tool call is journaled, there is no third call, and both
+/// calls are settled.
+#[tokio::test]
+async fn a_tool_call_in_the_repair_reply_fails_the_step_with_the_schema_failure() {
+    let p = project();
+    let tool = FixtureTool::new();
+    let llm = Arc::new(FakeLlm::new(vec![
+        ScriptedTurn::text("not json at all"),
+        ScriptedTurn::text("let me look").tool_call(FixtureTool::NAME, "{}"),
+        ScriptedTurn::text(GOOD_LINE),
+    ]));
+    let plan = plan(vec![checked(llm.clone(), Limits::default())]);
+
+    let outcome = with_tools(&p, &plan, &tool).await;
+
+    assert_eq!(outcome.status, "failed", "{outcome:?}");
+    assert_eq!(llm.calls(), 2, "one repair, then fail");
+    assert_eq!(tool.calls(), 0, "the tool never ran");
+    let r = rows(&p.db);
+    assert_eq!(r.step.status, "failed");
+    assert!(r.tools.is_empty(), "{:#?}", r.tools);
+    assert_eq!(r.calls.len(), 2);
+    assert!(r.calls.iter().all(|c| c.settled), "{:#?}", r.calls);
+    assert_eq!(r.items.len(), 1, "{:#?}", r.items);
+    let words = format!(
+        "{} {} {}",
+        outcome.reason.clone().unwrap_or_default(),
+        r.items[0].title,
+        r.items[0].body
+    );
+    assert!(
+        r.items[0].title.contains("output schema"),
+        "{}",
+        r.items[0].title
+    );
+    for word in ["output schema", "`line`"] {
+        assert!(words.contains(word), "`{word}`: {words}");
+    }
+}
+
+/// R9: a provider error on the repair call fails the step (a Failure item
+/// naming the call's failure), settles the repair's reservation at its
+/// reservation, and makes no third call.
+#[tokio::test]
+async fn a_provider_error_on_the_repair_fails_the_step_and_settles_its_reservation() {
+    let p = project();
+    let tool = FixtureTool::new();
+    let llm = Arc::new(FakeLlm::new(vec![
+        ScriptedTurn::text("not json at all"),
+        ScriptedTurn::fail(ProviderError::Protocol("the stream broke".into())),
+        ScriptedTurn::text(GOOD_LINE),
+    ]));
+    let plan = plan(vec![checked(llm.clone(), Limits::default())]);
+
+    let outcome = with_tools(&p, &plan, &tool).await;
+
+    assert_eq!(outcome.status, "failed", "{outcome:?}");
+    assert_eq!(llm.calls(), 2);
+    let r = rows(&p.db);
+    assert_eq!(r.step.status, "failed");
+    assert_eq!(r.step.output, None);
+    assert_eq!(r.run_status, "failed");
+    assert_eq!(r.calls.len(), 2);
+    assert!(r.calls.iter().all(|c| c.settled), "{:#?}", r.calls);
+    assert_eq!(r.calls[1].purpose, am_store::CallPurpose::Repair);
+    assert_eq!(r.ledger.len(), 2);
+    assert!(
+        r.ledger.iter().all(|l| l.state == "settled"),
+        "{:#?}",
+        r.ledger
+    );
+    assert_eq!(
+        r.ledger[1].settled_micro_usd,
+        Some(r.ledger[1].reserved_micro_usd),
+        "settled at its reservation"
+    );
+    assert!(
+        outcome
+            .reason
+            .clone()
+            .unwrap_or_default()
+            .contains("the stream broke"),
+        "{outcome:?}"
+    );
+}
+
+/// A provider that does not stop when it is cancelled: it answers after
+/// `after` whatever happens, as a reply already on its way would.
+struct Deaf {
+    text: &'static str,
+    after: Duration,
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+impl LlmProvider for Deaf {
+    fn account_id(&self) -> String {
+        "deaf".into()
+    }
+    fn capabilities(&self, _model: &str) -> ModelCapabilities {
+        ModelCapabilities::default()
+    }
+    fn check_file_parts(&self, _request: &ChatRequest) -> Result<(), ProviderError> {
+        Ok(())
+    }
+    fn stream(
+        &self,
+        _request: ChatRequest,
+        _cancel: Arc<dyn CancelSignal>,
+        _sink: Arc<dyn EventSink>,
+    ) -> BoxFuture<Result<ChatOutcome, ProviderError>> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let (text, after) = (self.text, self.after);
+        Box::pin(async move {
+            tokio::time::sleep(after).await;
+            Ok(ChatOutcome {
+                text: text.to_string(),
+                tool_calls: vec![],
+                usage: None,
+                stop: am_domain::StopReason::EndTurn,
+            })
+        })
+    }
+}
+
+/// R10: an invalid final message that is in hand when the wall-clock
+/// deadline of 30 s has passed (a provider that does not stop on cancel
+/// answers at 30 s, inside the cancel grace) is a schema failure, not a
+/// bare wall-clock stop: the Failure item's title says the output did not
+/// match its schema and its words say no time was left to repair it; one
+/// call, no repair, the call settled.
+#[tokio::test(start_paused = true)]
+async fn an_invalid_reply_at_the_passed_deadline_fails_as_a_schema_failure() {
+    let p = project();
+    let deaf = Arc::new(Deaf {
+        text: "not json at all",
+        after: Duration::from_secs(30),
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let plan = plan(vec![checked(
+        deaf.clone(),
+        limits(8, 20, Duration::from_secs(30)),
+    )]);
+
+    let outcome = run_plan(&p.store, owner(), "manual", &plan, CancellationToken::new())
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.status, "failed", "{outcome:?}");
+    assert_eq!(deaf.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let r = rows(&p.db);
+    assert_eq!(r.calls.len(), 1, "no repair call: {:#?}", r.calls);
+    assert!(r.calls[0].settled);
+    assert_eq!(r.step.output, None, "an invalid message is not an output");
+    assert_eq!(r.items.len(), 1, "{:#?}", r.items);
+    let item = &r.items[0];
+    assert!(item.title.contains("output schema"), "{}", item.title);
+    for word in ["output schema", "`line`", "no time left", "repair"] {
+        assert!(item.body.contains(word), "`{word}`: {}", item.body);
+    }
+    assert!(
+        outcome
+            .reason
+            .clone()
+            .unwrap_or_default()
+            .contains("output schema"),
+        "{outcome:?}"
+    );
+    assert!(!item.body.contains("not json at all"), "{}", item.body);
+}
+
+// ------------------------------------------------------- review round 2
+
+/// T3: a step that used a tool and then ended on an invalid final message
+/// is repaired with the attempt's assembled system and first user message,
+/// then the invalid text as assistant text, then the repair instruction: no
+/// `ToolCall` or `ToolResult` part and no tools (a provider refuses tool
+/// blocks when no tool is defined).
+#[tokio::test]
+async fn the_repair_request_after_a_tool_turn_holds_no_tool_part_and_no_tools() {
+    let p = project();
+    let tool = FixtureTool::new();
+    let llm = Arc::new(FakeLlm::new(vec![
+        asks_for_tools(1),
+        ScriptedTurn::text("not json at all"),
+        ScriptedTurn::text(GOOD_LINE),
+    ]));
+    let plan = plan(vec![checked(llm.clone(), Limits::default())]);
+
+    let outcome = with_tools(&p, &plan, &tool).await;
+
+    assert_eq!(outcome.status, "succeeded", "{outcome:?}");
+    assert_eq!(tool.calls(), 1, "the tool ran in the first turns");
+    let requests = llm.requests();
+    assert_eq!(requests.len(), 3);
+    assert!(
+        requests[1]
+            .messages
+            .iter()
+            .flat_map(|m| m.parts.iter())
+            .any(|p| matches!(p, am_domain::Part::ToolResult { .. })),
+        "the second turn carries the tool's result"
+    );
+    let repair = &requests[2];
+    assert!(repair.tools.is_empty(), "{:?}", repair.tools);
+    assert!(
+        repair
+            .messages
+            .iter()
+            .flat_map(|m| m.parts.iter())
+            .all(|p| !matches!(
+                p,
+                am_domain::Part::ToolCall(_) | am_domain::Part::ToolResult { .. }
+            )),
+        "no tool part: {:#?}",
+        repair.messages
+    );
+    assert_eq!(
+        repair.system, requests[0].system,
+        "the assembled system parts"
+    );
+    assert_eq!(repair.messages.len(), 3, "{:#?}", repair.messages);
+    assert_eq!(
+        repair.messages[0], requests[0].messages[0],
+        "the assembled user message"
+    );
+    assert_eq!(
+        repair.messages[1],
+        am_domain::Message {
+            role: am_domain::Role::Assistant,
+            parts: vec![am_domain::Part::AssistantText("not json at all".into())],
+        }
+    );
+    assert_eq!(
+        repair.messages[2],
+        am_domain::Message {
+            role: am_domain::Role::User,
+            parts: vec![am_domain::Part::Instruction(Instruction::authored(
+                "Reply again with one JSON object."
+            ))],
+        }
+    );
+}
+
+/// A provider whose first call answers at once and whose later calls do not
+/// stop on cancel and answer after `later`.
+struct DeafAfterFirst {
+    first: &'static str,
+    later: &'static str,
+    after: Duration,
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+impl LlmProvider for DeafAfterFirst {
+    fn account_id(&self) -> String {
+        "deaf-after-first".into()
+    }
+    fn capabilities(&self, _model: &str) -> ModelCapabilities {
+        ModelCapabilities::default()
+    }
+    fn check_file_parts(&self, _request: &ChatRequest) -> Result<(), ProviderError> {
+        Ok(())
+    }
+    fn stream(
+        &self,
+        _request: ChatRequest,
+        _cancel: Arc<dyn CancelSignal>,
+        _sink: Arc<dyn EventSink>,
+    ) -> BoxFuture<Result<ChatOutcome, ProviderError>> {
+        let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let (text, after) = if n == 0 {
+            (self.first, Duration::ZERO)
+        } else {
+            (self.later, self.after)
+        };
+        Box::pin(async move {
+            tokio::time::sleep(after).await;
+            Ok(ChatOutcome {
+                text: text.to_string(),
+                tool_calls: vec![],
+                usage: None,
+                stop: am_domain::StopReason::EndTurn,
+            })
+        })
+    }
+}
+
+/// T4: the repair call's own invalid reply, in hand when the deadline has
+/// passed, fails with the schema words that say the one repair did not fix
+/// it; not "no time left to repair it", which is for a first reply.
+#[tokio::test(start_paused = true)]
+async fn the_repairs_own_invalid_reply_at_the_deadline_says_the_repair_did_not_fix_it() {
+    let p = project();
+    let provider = Arc::new(DeafAfterFirst {
+        first: "not json at all",
+        later: "still not json",
+        after: Duration::from_secs(30),
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let plan = plan(vec![checked(
+        provider.clone(),
+        limits(8, 20, Duration::from_secs(30)),
+    )]);
+
+    let outcome = run_plan(&p.store, owner(), "manual", &plan, CancellationToken::new())
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.status, "failed", "{outcome:?}");
+    let r = rows(&p.db);
+    assert_eq!(r.calls.len(), 2, "{:#?}", r.calls);
+    assert_eq!(r.calls[1].purpose, am_store::CallPurpose::Repair);
+    assert!(r.calls.iter().all(|c| c.settled));
+    assert_eq!(r.items.len(), 1);
+    let item = &r.items[0];
+    assert!(item.title.contains("output schema"), "{}", item.title);
+    assert!(
+        item.body.contains("one repair did not fix it"),
+        "{}",
+        item.body
+    );
+    assert!(!item.body.contains("no time left"), "{}", item.body);
+    assert!(!item.body.contains("still not json"), "{}", item.body);
 }
