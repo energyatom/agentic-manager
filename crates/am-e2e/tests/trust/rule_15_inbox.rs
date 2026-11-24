@@ -34,7 +34,7 @@ mod support;
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use am_api::{
@@ -43,10 +43,11 @@ use am_api::{
 };
 use am_domain::{Decision, HumanActor, InboxKind, LlmProvider, REVIEWER_HAT, Taint};
 use am_engine::run::{HandOff, RunOutcome, RunPlan, StepPlan, run_plan};
+use am_server::PinCheck;
 use am_store::{AttemptWrites, NewInboxItem, StepInput, Store, WriteCommand, new_id};
 use inbox::{
     FakePin, INBOX, OTHER, PINNED, events_until, item_path, resolve, resolve_path, with_pin,
-    with_project_writer,
+    with_pin_check, with_project_writer,
 };
 use server::{EVIL, Resp, Rig, TOKEN_HEADER, assert_no_cors, envelope};
 use support::{Journal, journal, never, owner, plan, poisoned, step, texts};
@@ -1120,4 +1121,343 @@ async fn a_resolve_whose_item_cannot_be_read_back_answers_200_unapplied() {
         )
         .unwrap();
     assert_eq!(status, "resolved", "the decision is recorded");
+}
+
+// ------------------------------------- post-merge fix, 2026-11-25
+//
+// The second-resolve race (owner, 2026-11-25): a request that read the
+// item open while another request's decision committed answered 409
+// `not-waiting` instead of `item-resolved` (`a_second_resolve_is_refused`
+// flaked on macOS CI). Under any interleaving of two resolves of one item,
+// exactly one resolution is recorded and applied, and the other request is
+// 409 `item-resolved`. The interleaving inside the pre-checks (the item
+// read, then the step's) is reproduced deterministically in am-server's
+// own tests (`inbox::tests`), at a test-only seam; here the orders are
+// held at the pin check, the port every approve and return reaches after
+// its other checks, and a stress loop sends the two at once.
+
+/// The body of `decision`'s resolve (a return carries [`NOTE`]).
+fn body_of(decision: Decision) -> String {
+    match decision {
+        Decision::Approve => APPROVE.to_string(),
+        Decision::Reject => REJECT.to_string(),
+        Decision::Return => return_with(NOTE),
+        other => panic!("not a Review's decision: {other:?}"),
+    }
+}
+
+/// The envelope's `code` (empty when the body is not one).
+fn code_of(r: &Resp) -> String {
+    serde_json::from_str::<serde_json::Value>(&r.body)
+        .ok()
+        .and_then(|v| v["code"].as_str().map(str::to_string))
+        .unwrap_or_default()
+}
+
+/// What the pin check does with the requests that reach it.
+#[derive(Default)]
+struct Held {
+    /// How many of the next callers it holds.
+    hold: usize,
+    /// How many it holds or held.
+    held: usize,
+    released: bool,
+}
+
+/// A pin check that finds the config the rig's runs pinned and holds the
+/// first `hold` requests that reach it (each has passed every check before
+/// the pin check) until the test releases them, 5 s at most.
+struct HeldPin {
+    state: Mutex<Held>,
+    cv: Condvar,
+}
+
+impl HeldPin {
+    fn new(hold: usize) -> Arc<HeldPin> {
+        Arc::new(HeldPin {
+            state: Mutex::new(Held {
+                hold,
+                ..Held::default()
+            }),
+            cv: Condvar::new(),
+        })
+    }
+
+    fn held(&self) -> usize {
+        self.state.lock().unwrap().held
+    }
+
+    fn release(&self) {
+        self.state.lock().unwrap().released = true;
+        self.cv.notify_all();
+    }
+
+    /// Waits (5 s at most) until `n` requests are held.
+    async fn until_held(&self, n: usize) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while self.held() < n {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "{} of {n} requests reached the pin check",
+                self.held()
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+}
+
+impl PinCheck for HeldPin {
+    fn current_snapshot(&self) -> Result<String, String> {
+        let mut state = self.state.lock().unwrap();
+        if state.hold > 0 {
+            state.hold -= 1;
+            state.held += 1;
+            self.cv.notify_all();
+            let _released = self
+                .cv
+                .wait_timeout_while(state, Duration::from_secs(5), |s| !s.released)
+                .unwrap();
+        }
+        Ok(PINNED.to_string())
+    }
+}
+
+/// A rig whose pin check is `pin`, with a run waiting at its gate: the
+/// rig, its session and the Review item's id.
+async fn held_rig(pin: &Arc<HeldPin>) -> (Rig, server::Session, String) {
+    let rig = with_pin_check(Some(pin.clone() as Arc<dyn PinCheck>)).await;
+    let run = waiting(&rig, &gated(texts(&[DRAFT_1]))).await;
+    let item = run.item.clone().unwrap();
+    let s = rig.sign_in().await;
+    (rig, s, item)
+}
+
+/// What breaks "exactly one resolution, `decision`'s" for `item`: the item
+/// holds the decision; one `inbox.resolved` entry on it, with that
+/// decision; its gate attempt moved once (one `step.finished` or
+/// `step.looped_back` entry on it) to what the decision gives; the run as
+/// the decision leaves it; no other item on the run. Empty when it holds.
+fn not_one_resolution(j: &Journal, item: &str, decision: Decision) -> Vec<String> {
+    let mut wrong = Vec::new();
+    let Some(row) = j.items.iter().find(|i| i.id == item) else {
+        return vec![format!("item {item} is gone")];
+    };
+    if row.status != "resolved" || row.decision != Some(decision) {
+        wrong.push(format!(
+            "item {item} is {} {:?}, not resolved {}",
+            row.status,
+            row.decision,
+            decision.as_str()
+        ));
+    }
+    let resolved: Vec<&serde_json::Value> = j
+        .audit
+        .iter()
+        .filter(|e| e["action"] == "inbox.resolved" && e["target"] == item)
+        .collect();
+    if resolved.len() != 1 || resolved[0]["args"]["decision"] != decision.as_str() {
+        wrong.push(format!(
+            "SECURITY: item {item} has {} inbox.resolved entries (one, `{}`, expected): {resolved:#?}",
+            resolved.len(),
+            decision.as_str()
+        ));
+    }
+    let gate = row.step_run_id.as_str();
+    let moves = j
+        .audit
+        .iter()
+        .filter(|e| {
+            e["target"] == gate
+                && (e["action"] == "step.finished" || e["action"] == "step.looped_back")
+        })
+        .count();
+    if moves != 1 {
+        wrong.push(format!(
+            "SECURITY: the gate {gate} of item {item} was applied {moves} times (once expected)"
+        ));
+    }
+    let want = match decision {
+        Decision::Approve => "succeeded",
+        Decision::Reject => "failed",
+        _ => "looped_back",
+    };
+    match j.steps.iter().find(|s| s.id == gate) {
+        Some(s) if s.status == want => {}
+        other => wrong.push(format!(
+            "the gate of item {item} is {:?}, not {want}",
+            other.map(|s| &s.status)
+        )),
+    }
+    let run_status = if decision == Decision::Reject {
+        "failed"
+    } else {
+        "running"
+    };
+    match j.runs.iter().find(|r| r.id == row.run_id) {
+        Some(r) if r.status == run_status => {}
+        other => wrong.push(format!(
+            "the run of item {item} is {:?}, not {run_status}",
+            other.map(|r| &r.status)
+        )),
+    }
+    let items = j.items.iter().filter(|i| i.run_id == row.run_id).count();
+    if items != 1 {
+        wrong.push(format!("the run of item {item} has {items} items, not 1"));
+    }
+    wrong
+}
+
+/// Owner, 2026-11-25 ("one fully before the other", "interleaved"):
+/// request H passed every check before the pin check and is held there;
+/// request O resolves the same item fully (recorded and applied); then H
+/// goes on. O is 200 and H 409 `item-resolved`; O's decision alone is
+/// recorded and applied, once. Approve vs reject, approve vs return,
+/// approve vs approve, and a held return vs approve.
+#[tokio::test]
+async fn a_resolve_held_after_its_checks_loses_to_one_that_committed() {
+    for (held, other) in [
+        (Decision::Approve, Decision::Reject),
+        (Decision::Approve, Decision::Return),
+        (Decision::Approve, Decision::Approve),
+        (Decision::Return, Decision::Approve),
+    ] {
+        let case = format!("{} held, {} commits", held.as_str(), other.as_str());
+        let pin = HeldPin::new(1);
+        let (rig, s, item) = held_rig(&pin).await;
+
+        let (held_body, other_body) = (body_of(held), body_of(other));
+        let (h, o) = tokio::join!(resolve(&rig, &s, &item, &held_body), async {
+            pin.until_held(1).await;
+            let o = resolve(&rig, &s, &item, &other_body).await;
+            pin.release();
+            o
+        });
+
+        assert_eq!(o.status, 200, "{case}: {}", o.text());
+        assert_eq!(
+            (h.status, code_of(&h).as_str()),
+            (409, "item-resolved"),
+            "{case}: {}",
+            h.text()
+        );
+        envelope(&h, 409, "item-resolved");
+        let wrong = not_one_resolution(&journal(&db(&rig)), &item, other);
+        assert!(wrong.is_empty(), "{case}:\n{}", wrong.join("\n"));
+    }
+}
+
+/// Owner, 2026-11-25 ("both resolves' prechecks before either commit"):
+/// two requests pass every check before the pin check and are both held
+/// there, then go on at once; approve vs approve, approve vs return and
+/// return vs return, five rounds each. One is 200, the other 409
+/// `item-resolved`; the winner's decision alone is recorded and applied,
+/// once.
+#[tokio::test]
+async fn two_resolves_held_after_their_checks_record_one_decision() {
+    for (a, b) in [
+        (Decision::Approve, Decision::Approve),
+        (Decision::Approve, Decision::Return),
+        (Decision::Return, Decision::Return),
+    ] {
+        for round in 0..5 {
+            let case = format!("{} and {}, round {round}", a.as_str(), b.as_str());
+            let pin = HeldPin::new(2);
+            let (rig, s, item) = held_rig(&pin).await;
+
+            let (body_a, body_b) = (body_of(a), body_of(b));
+            let (x, y, ()) = tokio::join!(
+                resolve(&rig, &s, &item, &body_a),
+                resolve(&rig, &s, &item, &body_b),
+                async {
+                    pin.until_held(2).await;
+                    pin.release();
+                }
+            );
+
+            let mut statuses = [x.status, y.status];
+            statuses.sort_unstable();
+            assert_eq!(statuses, [200, 409], "{case}:\n{}\n{}", x.text(), y.text());
+            let (winner, lost) = if x.status == 200 { (a, &y) } else { (b, &x) };
+            envelope(lost, 409, "item-resolved");
+            let wrong = not_one_resolution(&journal(&db(&rig)), &item, winner);
+            assert!(wrong.is_empty(), "{case}:\n{}", wrong.join("\n"));
+        }
+    }
+}
+
+/// Owner, 2026-11-25: 200 rounds of two resolves of one item sent at once
+/// over HTTP (approve vs reject, approve vs return, approve vs approve, in
+/// turn) on a multi-threaded runtime, as `a_second_resolve_is_refused`
+/// sends them. Every round: exactly one resolution is recorded and applied
+/// (the 200's decision; checked first, its findings marked SECURITY), and
+/// the requests are one 200 and one 409 `item-resolved`. Every failing
+/// round is reported.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_resolves_over_http_record_one_decision_every_round() {
+    const ROUNDS: usize = 200;
+    let rig = with_project_writer().await;
+    let s = rig.sign_in().await;
+    let pairs = [
+        (Decision::Approve, Decision::Reject),
+        (Decision::Approve, Decision::Return),
+        (Decision::Approve, Decision::Approve),
+    ];
+    let mut rounds = Vec::new();
+    for n in 0..ROUNDS {
+        let (a, b) = pairs[n % pairs.len()];
+        let run = waiting(&rig, &gated(texts(&[DRAFT_1]))).await;
+        let item = run.item.clone().unwrap();
+        let (body_a, body_b) = (body_of(a), body_of(b));
+        let (x, y) = tokio::join!(
+            resolve(&rig, &s, &item, &body_a),
+            resolve(&rig, &s, &item, &body_b)
+        );
+        rounds.push((n, item, (a, x), (b, y)));
+    }
+
+    let j = journal(&db(&rig));
+    let mut security = Vec::new();
+    let mut answers = Vec::new();
+    for (n, item, (a, x), (b, y)) in &rounds {
+        let said = |r: &Resp| format!("{} {}", r.status, code_of(r));
+        let case = format!(
+            "round {n} ({} vs {}): {} / {}",
+            a.as_str(),
+            b.as_str(),
+            said(x),
+            said(y)
+        );
+        let winner = match (x.status, y.status) {
+            (200, 200) => {
+                security.push(format!("SECURITY: {case}: both requests were 200"));
+                continue;
+            }
+            (200, _) => *a,
+            (_, 200) => *b,
+            _ => {
+                answers.push(format!("{case}: no request was 200"));
+                continue;
+            }
+        };
+        let wrong = not_one_resolution(&j, item, winner);
+        if !wrong.is_empty() {
+            security.push(format!("{case}:\n  {}", wrong.join("\n  ")));
+        }
+        let lost = if x.status == 200 { y } else { x };
+        if (lost.status, code_of(lost).as_str()) != (409, "item-resolved") {
+            answers.push(case);
+        }
+    }
+    assert!(
+        security.is_empty(),
+        "{} of {ROUNDS} rounds did not record and apply exactly one resolution:\n{}",
+        security.len(),
+        security.join("\n")
+    );
+    assert!(
+        answers.is_empty(),
+        "{} of {ROUNDS} rounds did not answer one 200 and one 409 item-resolved:\n{}",
+        answers.len(),
+        answers.join("\n")
+    );
 }

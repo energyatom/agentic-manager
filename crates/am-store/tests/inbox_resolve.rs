@@ -1722,3 +1722,174 @@ fn a_note_with_a_default_ignorable_character_is_refused() {
         }
     }
 }
+
+// ------------------------------------- post-merge fix, 2026-11-25
+//
+// The second-resolve race (story 3.4; owner, 2026-11-25): under any
+// interleaving of two people's resolves of one item, exactly one
+// resolution is recorded and applied. At the store, every write goes
+// through the one writer thread, so two handlers' writes reach it in one
+// of the orders below; together they are every order.
+
+/// One step of a side of the race: record its decision, or apply what
+/// committed (as the server's handler does after its own resolve).
+#[derive(Debug, Clone, Copy)]
+enum Step {
+    Resolve(usize),
+    Apply(usize),
+}
+
+/// The six orders of two sides' resolve and apply, each side's resolve
+/// before its own apply.
+const ORDERS: [[Step; 4]; 6] = [
+    [
+        Step::Resolve(0),
+        Step::Apply(0),
+        Step::Resolve(1),
+        Step::Apply(1),
+    ],
+    [
+        Step::Resolve(0),
+        Step::Resolve(1),
+        Step::Apply(0),
+        Step::Apply(1),
+    ],
+    [
+        Step::Resolve(0),
+        Step::Resolve(1),
+        Step::Apply(1),
+        Step::Apply(0),
+    ],
+    [
+        Step::Resolve(1),
+        Step::Resolve(0),
+        Step::Apply(0),
+        Step::Apply(1),
+    ],
+    [
+        Step::Resolve(1),
+        Step::Resolve(0),
+        Step::Apply(1),
+        Step::Apply(0),
+    ],
+    [
+        Step::Resolve(1),
+        Step::Apply(1),
+        Step::Resolve(0),
+        Step::Apply(0),
+    ],
+];
+
+/// Every pair of a Review's decisions (approve vs reject, approve vs
+/// return and approve vs approve among them); each order above puts
+/// either side first.
+const PAIRS: [(Decision, Decision); 6] = [
+    (Decision::Approve, Decision::Reject),
+    (Decision::Approve, Decision::Return),
+    (Decision::Approve, Decision::Approve),
+    (Decision::Return, Decision::Reject),
+    (Decision::Return, Decision::Return),
+    (Decision::Reject, Decision::Reject),
+];
+
+fn note_for(decision: Decision) -> Option<&'static str> {
+    (decision == Decision::Return).then_some(NOTE)
+}
+
+/// Owner, 2026-11-25: two resolves of one item, in every order of their
+/// writes and with every pair of decisions. Each side applies after its
+/// own resolve, and tries even when its resolve lost (a handler that
+/// applied after losing could not apply twice either). Exactly one
+/// resolve commits; one `inbox.resolved` entry, the winner's; the item
+/// holds the winner's decision; exactly one apply commits and the gate
+/// attempt is moved once (one `step.finished` or `step.looped_back` entry
+/// on it) to what the winner's decision gives; no other item.
+#[test]
+fn two_resolves_in_any_order_record_and_apply_one_decision() {
+    for (a, b) in PAIRS {
+        let decisions = [a, b];
+        for order in ORDERS {
+            let case = format!("{} vs {}, {order:?}", a.as_str(), b.as_str());
+            let r = rig();
+            let gate = r.latest("approve").id;
+            let mut resolved: [Option<Result<(), StoreError>>; 2] = [None, None];
+            let mut applied: [Option<Result<(), StoreError>>; 2] = [None, None];
+            for step in order {
+                match step {
+                    Step::Resolve(i) => {
+                        resolved[i] =
+                            Some(r.resolve(&r.item, decisions[i], note_for(decisions[i])));
+                    }
+                    Step::Apply(i) => applied[i] = Some(r.apply(&r.item, None)),
+                }
+            }
+
+            let won: Vec<usize> = (0..2)
+                .filter(|i| matches!(resolved[*i], Some(Ok(()))))
+                .collect();
+            assert_eq!(won.len(), 1, "one resolve commits ({case}): {resolved:?}");
+            let winner = decisions[won[0]];
+            let item = r.item_row(&r.item);
+            assert_eq!(item.status, "resolved", "{case}");
+            assert_eq!(item.decision, Some(winner), "{case}");
+            assert_eq!(item.note.as_deref(), note_for(winner), "{case}");
+            let entries = r.entries("inbox.resolved");
+            assert_eq!(
+                entries.len(),
+                1,
+                "one inbox.resolved ({case}): {entries:#?}"
+            );
+            assert_eq!(entries[0]["args"]["decision"], winner.as_str(), "{case}");
+            let applies = applied.iter().filter(|a| matches!(a, Some(Ok(())))).count();
+            assert_eq!(applies, 1, "one apply commits ({case}): {applied:?}");
+            let moves: Vec<Value> = r
+                .audit()
+                .into_iter()
+                .filter(|e| {
+                    e["target"] == gate.as_str()
+                        && (e["action"] == "step.finished" || e["action"] == "step.looped_back")
+                })
+                .collect();
+            assert_eq!(moves.len(), 1, "the gate moved once ({case}): {moves:#?}");
+            let shape: Vec<(String, i64, String)> = r
+                .steps()
+                .into_iter()
+                .map(|s| (s.step_key, s.attempt, s.status))
+                .collect();
+            let want: &[(&str, i64, &str)] = match winner {
+                Decision::Approve => &[
+                    ("draft", 1, "succeeded"),
+                    ("approve", 1, "succeeded"),
+                    ("publish", 1, "queued"),
+                ],
+                Decision::Reject => &[
+                    ("draft", 1, "succeeded"),
+                    ("approve", 1, "failed"),
+                    ("publish", 1, "queued"),
+                ],
+                _ => &[
+                    ("draft", 1, "succeeded"),
+                    ("draft", 2, "queued"),
+                    ("approve", 1, "looped_back"),
+                    ("approve", 2, "queued"),
+                    ("publish", 1, "queued"),
+                ],
+            };
+            let want: Vec<(String, i64, String)> = want
+                .iter()
+                .map(|(k, n, s)| (k.to_string(), *n, s.to_string()))
+                .collect();
+            assert_eq!(shape, want, "{case}");
+            let run_status = if winner == Decision::Reject {
+                "failed"
+            } else {
+                "running"
+            };
+            assert_eq!(r.run_row().status, run_status, "{case}");
+            assert_eq!(r.items().len(), 1, "no other item ({case})");
+            if winner == Decision::Return {
+                assert_eq!(gate_notes(&r).len(), 1, "one gate note ({case})");
+            }
+        }
+    }
+}

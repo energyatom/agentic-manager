@@ -73,6 +73,12 @@ pub async fn with_project_writer() -> Rig {
 /// server has no way to check the config, so approve and return fail
 /// closed).
 pub async fn with_pin(pin: Option<Arc<FakePin>>) -> Rig {
+    with_pin_check(pin.map(|p| p as Arc<dyn PinCheck>)).await
+}
+
+/// [`with_pin`] with any pin check (the second-resolve race tests, 2026-11-25,
+/// hand one that holds the requests reaching it).
+pub async fn with_pin_check(pin: Option<Arc<dyn PinCheck>>) -> Rig {
     let dir = tempfile::tempdir().unwrap();
     let clock = FakeClock::at(T0);
     let (listener, port) = bind(0).await.unwrap();
@@ -85,7 +91,7 @@ pub async fn with_pin(pin: Option<Arc<FakePin>>) -> Rig {
         .project_db(layout.state_db())
         .project_writer(store.writer());
     if let Some(pin) = pin {
-        builder = builder.pin_check(pin as Arc<dyn PinCheck>);
+        builder = builder.pin_check(pin);
     }
     let state = builder.build();
     let fixture = FixtureRoute::new();

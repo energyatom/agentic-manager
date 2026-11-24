@@ -1024,3 +1024,83 @@ S1–S7 are fixed; D5 is left as accepted. The work stayed in this checkout, wit
 - **Additions beyond the plan:** the System-only `WriteCommand::FailBeforeStart` (a Failure item on an attempt that never started, for a forged note); the writer also refuses starting, pausing or finishing anything in a run whose decision is recorded but not applied; reject is applied without continuing the run, so it works after a config change; serve releases the store and the pin check when it stops; end of input after a partial line now writes nothing in `agentic accounts`' three reads too (only narrower).
 - **Residuals:** a terminal narrower than 76 columns can still soft-wrap a prefixed payload segment; after the first interrupt, further signals wait for the cancelled step to stop (bounded by its wall-clock cap); a run left ready by an API resolve, or stopped between resolve and apply, waits for story 3.9's resume; raw SQL by the same user remains AD-13's accepted residual.
 - **Interim risk carried from 3.3:** until epic 4 story 17, a hand edit can weaken a gate unchecked; `max_returns` raising a cap is also 4.17's to classify.
+
+## Post-merge fix: second-resolve race (2026-11-25)
+
+**The bug:** `POST /api/v1/inbox/{id}/resolve` (`crates/am-server/src/inbox.rs`, `resolve`) reads the item, then, in `check`, the run's steps in a separate read. A first resolve that commits between the two makes the second request see the item still open but its step already `running` (or moved on by the apply), and answer 409 `not-waiting` instead of 409 `item-resolved`. `rule_15_inbox::a_second_resolve_is_refused` flaked on this on macOS CI (PR #38 push runs).
+
+**Owner (2026-11-25):** fix it in its own small PR, tests first; read the item and the step status in one transaction rather than re-reading; a deterministic test for the stale read, and a test that under any interleaving exactly one resolution is applied (two applied would be a security bug: stop and report); no change to who can resolve, the typed id or the config check.
+
+### API the tests fix (tester, 2026-11-25)
+
+- **One test-only seam in `crates/am-server/src/inbox.rs`.** It is the only way to put another request's write between the item read and the later pre-check reads without timing. `resolve`'s blocking work calls the test module's hook right after it first reads the item, inside the read transaction its pre-checks share:
+  ```rust
+  #[cfg(test)]
+  tests::after_item_read(&id);
+  ```
+  The hook, its registry and every test using it are in the file's `#[cfg(test)] mod tests` (written by the tester); the implementer adds only that call, which compiles away outside tests. Until it is added, `cargo clippy -p am-server --lib --tests -- -D warnings` reports `after_item_read` as never used.
+- **Outcomes, not mechanism:** the tests pin answers and rows, not how the one read transaction is built. Whatever the fix, a request that read the item open while another request's decision was written answers 409 `item-resolved` (never `not-waiting`, `not-continuable`, or a 400 from a read left inside a stale snapshot after its own write was refused), and exactly one decision is recorded and applied.
+- **Unchanged:** who can resolve (`HumanActor`, `resolve_inbox_item`), the typed `confirmItemId`, the pin check, the envelope codes and `a_second_resolve_is_refused`.
+- **Test support:** `crates/am-e2e/tests/trust/support/inbox.rs` gains `with_pin_check(Option<Arc<dyn PinCheck>>) -> Rig`; `with_pin` now delegates to it (no behaviour change).
+
+**Tests added** (all test code; no `src/` change outside the listed `#[cfg(test)]` module):
+
+| File | Test | What it pins |
+|---|---|---|
+| `crates/am-server/src/inbox.rs`, `#[cfg(test)] mod tests` (test code inside a src file) | `a_resolve_that_read_the_item_before_another_committed_answers_item_resolved` | The stale read, deterministic: B reads the item open; at the seam, A's decision is written (recorded only, or recorded and applied); B goes on. B is 409 `item-resolved`, never `not-waiting`; A's decision alone is recorded and applied once. Pairs (A, B): approve/reject, reject/approve, approve/return, return/approve, approve/approve; 10 cases. |
+| same | `two_resolves_that_both_read_the_item_open_record_one_decision` | Both requests read the item open (they meet at the seam), then go on at once: one 200, one 409 `item-resolved`; one decision, the winner's, applied once. approve/reject, approve/return, approve/approve; 10 rounds each. |
+| `crates/am-store/tests/inbox_resolve.rs` | `two_resolves_in_any_order_record_and_apply_one_decision` | At the writer, every order of two sides' resolve and apply (6 orders, each side's resolve before its apply; every side tries its apply, even after losing) for 6 decision pairs (36 cases): one resolve succeeds, one `inbox.resolved` entry, one apply succeeds, the gate moved once (one `step.finished` or `step.looped_back` on it) to the winner's result, no other item, one gate note for a return. |
+| `crates/am-e2e/tests/trust/rule_15_inbox.rs` | `a_resolve_held_after_its_checks_loses_to_one_that_committed` | Over HTTP: request H passes every check before the pin check and is held there (`HeldPin`, on the existing `PinCheck` port); request O resolves fully; H goes on: O 200, H 409 `item-resolved`, O's decision recorded and applied once. approve held vs reject, return, approve; return held vs approve. |
+| same | `two_resolves_held_after_their_checks_record_one_decision` | Both requests held at the pin check, released together: one 200, one 409 `item-resolved`, one decision applied once. approve/approve, approve/return, return/return; 5 rounds each. |
+| same | `concurrent_resolves_over_http_record_one_decision_every_round` | Stress: 200 rounds of two resolves sent at once (`tokio::join!`, multi-threaded runtime), approve vs reject, return and approve in turn. For every round, first the security property (one `inbox.resolved`, one gate move, the 200's decision; findings marked SECURITY), then the answers (one 200, one 409 `item-resolved`); every failing round is listed. |
+
+### Red run
+
+Shared `CARGO_TARGET_DIR` (`/Users/hiteshmamgain/cargo-target/agentic-manager`); no `cargo clean`, no copy of the workspace, no new dependency. `git diff` of `crates/am-server/src/inbox.rs` is one hunk after line 379, the `#[cfg(test)]` module; no other `src/` file changed. `cargo fmt --all` run.
+
+Commands:
+- `cargo nextest run -p am-server --lib --no-fail-fast`
+- `cargo nextest run -p am-store --test inbox_resolve --no-fail-fast`
+- `cargo nextest run -p am-e2e --test rule_15_inbox --no-fail-fast`
+- under load: the `rule_15_inbox` test binary run 8 times at once, `<binary> concurrent_resolves_over_http_record_one_decision_every_round --exact --test-threads 1`; and 8 × 3 runs at once of `<binary> held_after_their_checks held_after_its_checks a_second_resolve --test-threads 4`
+- `cargo clippy -p am-e2e --test rule_15_inbox -- -D warnings`, `cargo clippy -p am-store --test inbox_resolve -- -D warnings`, `cargo clippy -p am-server --lib --tests -- -D warnings`
+- `cargo xtask denylist`, `check-deps`, `check-forbid`, `seam-guard`, `runtime-paths`, `fixed-hosts`: all clean.
+
+| Test | Observed |
+|---|---|
+| am-server `a_resolve_that_read_the_item_before_another_committed_answers_item_resolved` | **Red**, assertion: `the seam is missing: resolve must call tests::after_item_read(&id) …` (left 0, right 1; first case "A approve (recorded), then B reject"). The hook never runs, so B resolves unopposed. |
+| am-server `two_resolves_that_both_read_the_item_open_record_one_decision` | **Red**, the same seam assertion (left 0, right 2; "approve and reject, round 0"). |
+| am-server, clippy `-D warnings` | **Red**: `function after_item_read is never used` (the seam's call is missing). |
+| Probe (a temporary test in the same module, run once and removed): today's `check`, given the item row read before A's write, after A's write | **409 `not-waiting`** in all 10 cases (each pair above, A recorded or recorded and applied): the bug, reproduced without timing. A second temporary probe sent B after A with no hook: 409 `item-resolved` and the one-resolution checks held in all 10 cases, so the rig and the checks are right. |
+| am-store `two_resolves_in_any_order_record_and_apply_one_decision` | Green, 36 of 36: the writer refuses the second resolve inside its own transaction, and the second apply once the gate has left `running`. Guard. |
+| am-e2e `a_resolve_held_after_its_checks_loses_to_one_that_committed` | Green: a write landing after the pre-checks is already answered `item-resolved` (the writer refuses, the handler reads the item back). Guard. Green in all 24 runs under load. |
+| am-e2e `two_resolves_held_after_their_checks_record_one_decision` | Green, for the same reason. Guard. Green in all 24 runs under load. |
+| am-e2e `concurrent_resolves_over_http_record_one_decision_every_round` | Green alone (200 of 200; the race depends on timing). **Red under load in 6 of 8 parallel runs:** 10 of 1,600 rounds answered `409 not-waiting` (8 approve vs reject, 2 approve vs return; the loser was the approve 9 times and the return once), e.g. `round 84 (approve vs reject): 409 not-waiting / 200`. No SECURITY finding in any run. |
+| am-e2e `a_second_resolve_is_refused` (unchanged) | Under the same load: red in 2 of 24 runs, `left: "not-waiting"`, `right: "item-resolved"`: the CI flake, reproduced locally. |
+
+**Two resolutions applied?** No ordering observed did. Each item had exactly one `inbox.resolved` entry, one decision and one gate move:
+- the 36 writer orders;
+- the 4 + 15 cases held at the pin check;
+- all 1,800 stress rounds (200 alone, 1,600 under load), the 10 `not-waiting` rounds included.
+
+In the 10 probe cases the stale request was refused before it wrote. The writer serialises resolves and refuses the second in its own transaction, so the race changes only the loser's answer. Not a security bug. The two seam tests are still to be seen green or red past the seam assertion, once the seam's call exists.
+
+### Implementation (2026-11-25)
+
+**Lines changed** (no test file edited; no new dependency; shared `CARGO_TARGET_DIR`, no `cargo clean`):
+- `crates/am-store/src/lib.rs` (+23, `impl Reader`, after `open`): `Reader::snapshot<T>(&self, f: impl FnOnce(&Reader) -> Result<T, StoreError>) -> Result<T, StoreError>`. It runs `f` inside one deferred read transaction on the reader's own connection (`Transaction::new_unchecked`, `Deferred`), so every read `f` makes sees the WAL snapshot its first read took. The transaction ends (rolled back; it wrote nothing) when `f` returns, whatever `f` returns. A failure to end it is returned as an error, because a reader left inside it would read stale rows. No raw SQL outside am-store.
+- `crates/am-server/src/inbox.rs`, `resolve` (old lines 287-302, now 288-314): the pre-checks run in `reader.snapshot(..)`. These are the item read, the run read (`run_before`), `check` (the step status) and, for a Review's approve or return, `ready_to_go_on` (pin check and `am_engine::run::ready_to_go_on`). The tester's seam `#[cfg(test)] tests::after_item_read(&id);` sits right after the item read, inside that transaction. The transaction ends before `Writer::resolve_inbox_item`. The read-back after a refused write, `apply_resolution` and the final reads all see what committed since. A request that read the item open while another committed therefore gets the writer's refusal and reads the item back `resolved`: 409 `item-resolved`.
+- `check`'s doc comment (line 158) now says it checks one committed state.
+- Unchanged: `HumanActor` and the writer's resolve, which still refuses a resolved item inside its write transaction; `confirmItemId`; the pin check; the apply; every error code; the order of the refusals.
+
+**Two resolutions applied?** None found. The writer's `Immediate` transaction refuses a second resolve. The tester's 36 writer orders still pass.
+
+**Verification:**
+- The two seam tests pass. With the snapshot disabled as a temporary probe (reverted), `a_resolve_that_read_the_item_before_another_committed_answers_item_resolved` fails `not-waiting` again.
+- `just check`: green. fmt; clippy `-D warnings`; nextest 1,470 passed, 8 skipped; doctests; check-deps, check-forbid, denylist, runtime-paths, fixed-hosts and seam-guard clean; `agentic validate` 0 errors.
+- `cargo test --doc -p am-store -p am-server`: ok.
+- Stress, every run with zero `not-waiting` answers and no SECURITY finding:
+  - `cargo nextest run -p am-e2e --test rule_15_inbox --stress-count 20`: 20/20.
+  - Four of those (`--stress-count 10`) in parallel: 40/40.
+  - The tester's load pattern, three times: 8 × `concurrent_resolves_over_http_record_one_decision_every_round` and 8 × the held and second-resolve tests at once. 48/48 runs ok, 4,800 concurrent rounds.
+  - `cargo nextest run -p am-server --lib inbox --stress-count 20`: 20/20.
