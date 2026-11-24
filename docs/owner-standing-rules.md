@@ -18,6 +18,7 @@
 - A tests-first breach (no logged red run before src/ changes).
 
 ## Always (unchanged)
+- Plan size estimates report code lines and test lines separately. The overrun stop is about 4,000 lines of code (owner, 2026-11-24): a story whose code estimate or actual code nears or passes that stops and is reported, never split without the owner.
 - Tests first: the red run (command + failing output) is logged before any src/ change.
 - One story = one squash commit. Planning documents are never edited to fit the code.
 - Owner-level deviations are asked, never decided silently. Exceptions so far: 1.1, 1.13.

@@ -2,6 +2,7 @@
 # `covers` cites this epic's own requirement ids (its epic file's Requirements), not the initiative's: per BMad, every container numbers its own R<n>
 # and each epic line names its source as 'parent R<m>'. Outside the initiative file, write initiative ids as 'init R<m>' (final review coverage F8).
 # Store lane (1, 2, 4, 5) shares am-store migrations; grid lane (6–9) shares web/src tables code; 10–11 share the Team sheet and org chart.
+# 2026-11-24 owner decision (re-slice of epic 3 story 6): 2 now waits on 3.22 (a step reading rows, through the row-input slot) and 3.21 (a granted document's version) instead of 3.6; 1 keeps 3.6 (the row store it lists).
 # Definition of Done for every UI story (final review UX M3), whether or not its verify repeats it: axe clean in light and dark,
 # the story's path completed keyboard-only, and reduced motion honoured.
 
@@ -21,10 +22,10 @@ references = ["ux-agentic-manager/mockups/key-tables-dashboards.html §1"]
 id = 2
 type = "story"
 title = "Grants read as of run start"
-description = "Grants in table config (team, table or document, read-only) are validated across files; every run records start_seq, the row_history high-water mark at start; a step input naming a granted table reads it as of start_seq and a granted document at the version current at run start; table_write through a grant is refused with the error in words; adding a grant through the API is privilege-widening and needs the confirm token. The fixture in story 3 builds on this."
+description = "Grants in table config (team, table or document, read-only) are validated across files; every run records start_seq, the row_history high-water mark at start; a step input naming a granted table reads it as of start_seq and a granted document at the version current at run start; table_write through a grant is refused with the error in words; adding a grant through the API is privilege-widening and needs the confirm token. The fixture in story 3 builds on this. (2026-11-24, re-slice of epic 3 story 6) A granted table read reaches the step through epic 3 story 22's row-input slot, pinned at start_seq, and a granted document input is an epic 3 story 21 version."
 verify = "On FakeLlm: a run of team B reads team A's granted table and sees exactly the rows as of its start even when team A writes rows mid-run; a re-run sees the new rows; a granted document input is the version current at start; team B's table_write to the granted table is refused; a grant to an unknown table fails `agentic validate` with file, line and fix; adding a grant without the confirm token is refused."
 covers = ["R7"]
-after = [1, "3.6"]
+after = [1, "3.22", "3.21"]
 hitl = false
 risk = "high"
 

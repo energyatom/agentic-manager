@@ -78,7 +78,7 @@ description = "The owner edits a workflow, sees each seat's tasks on its Agent c
 covers = ["R31", "R32", "R33", "R34", "R35", "R36", "R63", "R73", "R74", "R75", "R76", "R77"]
 risk = "medium"
 after = [
-  { epic = 3, needs = "Human resolve command, journal events, stored document versions, cancellation (3.2, 3.4, 3.6, 3.9, 3.11)" },
+  { epic = 3, needs = "Human resolve command, journal events, rows reaching steps and document versions, cancellation (3.2, 3.4, 3.21, 3.22, 3.9, 3.11)" },
   { epic = 4, needs = "schedule read-back, run-start, Budget asks, Approval items, the Proposal shape and confirm token (4.3, 4.5, 4.8, 4.10)" },
   { epic = 5, needs = "app shell, sidebar, toolbar, ⌘K, design tokens, estimate line, privilege-widening dialog and the Agent card's section layout (5.17)" },
 ]
@@ -91,7 +91,7 @@ description = "Any table's rows live in a grid with reasons on every status chan
 covers = ["R37", "R39", "R40", "R41", "R42"]
 risk = "medium"
 after = [
-  { epic = 3, needs = "generic row store, table_write and row history with provenance" },
+  { epic = 3, needs = "generic row store and row history with provenance (3.6), table_write (3.23), rows reaching later steps (3.22), document versions (3.21)" },
   { epic = 5, needs = "shell routes and ⌘K (5.13), estimate line and Run now (5.7), privilege-widening dialog (5.9), org chart (5.2)" },
   { epic = 6, needs = "run view for row-history links (6.1), document pages the Team sheet opens (6.9)" },
 ]
