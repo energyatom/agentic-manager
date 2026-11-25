@@ -259,8 +259,12 @@ impl Rig {
             step_run_id: a.id.clone(),
             call_id: call.clone(),
             call_seq: seq,
-            reserved_micro_usd: 0,
-            rate_snapshot: "none".into(),
+            price: am_domain::money::CallPrice::local(),
+            rate: am_domain::money::Rate::none("EUR"),
+            counted_input_tokens: 0,
+            max_output_tokens: 0,
+            week: "2026-11-23".into(),
+            team: "core".into(),
             taint: Taint::Clean,
             purpose: CallPurpose::Turn,
             prompt: vec![],
@@ -277,7 +281,6 @@ impl Rig {
         self.exec(WriteCommand::SettleAndLoopBack {
             call_id: call,
             usage: None,
-            cost_micro_usd: None,
             step_run_id: a.id,
             output: r#"{"reasons":["once more"]}"#.into(),
             to: to.into(),
@@ -329,7 +332,6 @@ impl Rig {
         self.exec(WriteCommand::SettleAndFinishDocumentStep {
             call_id: call.into(),
             usage: None,
-            cost_micro_usd: None,
             step_run_id: a.id.clone(),
             output: markdown.into(),
             version_id: version.clone(),
@@ -552,7 +554,6 @@ fn a_document_version_and_its_draft_commit_with_the_step() {
         WriteCommand::SettleAndFinishDocumentStep {
             call_id: declared_call.clone(),
             usage: None,
-            cost_micro_usd: None,
             step_run_id: declared.id.clone(),
             output: md.clone(),
             version_id: new_id(),
@@ -840,7 +841,6 @@ fn a_document_attempt_succeeds_only_with_its_version() {
     r.exec(WriteCommand::SettleAndFinishStep {
         call_id: first_call,
         usage: None,
-        cost_micro_usd: None,
         step_run_id: first.id.clone(),
         status: "succeeded".into(),
         output: Some("first done".into()),
@@ -864,7 +864,6 @@ fn a_document_attempt_succeeds_only_with_its_version() {
             WriteCommand::SettleAndFinishStep {
                 call_id: call.clone(),
                 usage: None,
-                cost_micro_usd: None,
                 step_run_id: a.id.clone(),
                 status: "succeeded".into(),
                 output: Some(md.clone()),
@@ -875,7 +874,6 @@ fn a_document_attempt_succeeds_only_with_its_version() {
             WriteCommand::SettleAndLoopBack {
                 call_id: call.clone(),
                 usage: None,
-                cost_micro_usd: None,
                 step_run_id: a.id.clone(),
                 output: r#"{"reasons":["once more"]}"#.into(),
                 to: "first".into(),
@@ -911,7 +909,6 @@ fn a_document_attempt_succeeds_only_with_its_version() {
         settle: Some(CallSettlement {
             call_id: b_call,
             usage: None,
-            cost_micro_usd: None,
         }),
         output: None,
         item: failure_item(&failure, &b),
@@ -954,7 +951,6 @@ fn a_draft_is_raised_only_with_its_version() {
                     settle: Some(CallSettlement {
                         call_id: call.clone(),
                         usage: None,
-                        cost_micro_usd: None,
                     }),
                     output: None,
                     item: draft_item(&new_id(), a, DOCUMENT, Taint::Clean),

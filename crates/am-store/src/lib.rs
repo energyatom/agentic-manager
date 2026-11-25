@@ -73,6 +73,14 @@
 //! item, in one transaction (see `documents`). `document_versions` is
 //! append-only; a version and its Draft carry the attempt's taint. Only a
 //! person dismisses a Draft, through [`Writer::resolve_inbox_item`].
+//!
+//! Epic 3 story 7, "Cost settles per call and rolls up" (AD-8, AD-9,
+//! AD-25; migration 0013): a reservation carries its terms, never an
+//! amount; the writer prices it and its settlement in USD and the company
+//! currency with `am_domain::money::cost`, stamps `settled_at`, and the
+//! ledger's triggers keep what was reserved and settle a row once (see
+//! `ledger`). [`Reader::spend`] is the per-call spend `agentic status` rolls
+//! up.
 #![forbid(unsafe_code)]
 
 use std::collections::BTreeMap;
@@ -80,6 +88,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, mpsc};
 use std::thread;
 
+use am_domain::money::{CallPrice, Rate};
 use am_domain::rows::RowWrite;
 use am_domain::{Actor, Decision, HumanActor, InboxKind, NewIntent, StepStatus, Taint, Usage};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
@@ -89,6 +98,7 @@ pub mod audit;
 mod config_history;
 mod documents;
 mod fsx;
+mod ledger;
 pub mod legacy;
 mod migrations;
 pub mod project;
@@ -326,23 +336,42 @@ pub enum WriteCommand {
     /// its two parts, the invalid reply (an `assistant` part with the
     /// attempt's taint) and the schema's repair instruction, journaled
     /// under this call's `call_seq`. Audited with the purpose.
+    ///
+    /// Story 3.7 (AD-9; owner Q1, Q4, Q11, Q15): the call's terms, not its
+    /// amount. `price` and `rate` (with its snapshot id and date) come from
+    /// the run's pinned snapshot; the writer computes the reservation in
+    /// USD and in the company currency from them, `counted_input_tokens`
+    /// and `max_output_tokens` ([`am_domain::money::cost`]) and journals
+    /// all of it with the budget `week` (the company-local start date) and
+    /// the seat's `team`. A cost the function refuses (an overflow, a cloud
+    /// price with no rate) refuses the command, with nothing written. No
+    /// cap is checked (epic 4). Audited with the amounts and terms.
     ReserveCall {
         step_run_id: String,
         call_id: String,
         call_seq: i64,
-        reserved_micro_usd: i64,
-        rate_snapshot: String,
+        price: CallPrice,
+        rate: Rate,
+        counted_input_tokens: u64,
+        max_output_tokens: u32,
+        week: String,
+        team: String,
         taint: Taint,
         purpose: CallPurpose,
         prompt: Vec<NewPromptPart>,
     },
-    /// Settle from provider usage; missing usage settles at the reservation.
+    /// Settle from provider usage at the terms the reservation journaled,
+    /// in both currencies; missing usage settles at the reservation. Stamps
+    /// the call's `settled_at` (story 3.7). A call that is not open is
+    /// refused. Audited `model_call.settled` with the amounts, the
+    /// currency, the tokens and the `at_reservation` and
+    /// `over_reservation` flags.
     SettleCall {
         call_id: String,
         usage: Option<Usage>,
-        cost_micro_usd: Option<i64>,
     },
-    /// A call that never settled (crash): marked lost, settled at the reservation.
+    /// A call that never settled (crash): marked lost, settled at the
+    /// reservation in both currencies, `settled_at` stamped.
     MarkLost {
         call_id: String,
     },
@@ -358,7 +387,6 @@ pub enum WriteCommand {
     SettleAndFinishStep {
         call_id: String,
         usage: Option<Usage>,
-        cost_micro_usd: Option<i64>,
         step_run_id: String,
         status: String,
         output: Option<String>,
@@ -384,7 +412,6 @@ pub enum WriteCommand {
     SettleAndFinishDocumentStep {
         call_id: String,
         usage: Option<Usage>,
-        cost_micro_usd: Option<i64>,
         step_run_id: String,
         output: String,
         version_id: String,
@@ -404,7 +431,6 @@ pub enum WriteCommand {
     SettleAndLoopBack {
         call_id: String,
         usage: Option<Usage>,
-        cost_micro_usd: Option<i64>,
         step_run_id: String,
         output: String,
         to: String,
@@ -551,12 +577,6 @@ impl WriteCommand {
     /// whose entries carry a committed taint ([`execute`] builds those).
     fn audit_entry(&self) -> Option<(String, String, Option<Value>)> {
         let output_sha256 = |o: &Option<String>| o.as_deref().map(audit::sha256_hex);
-        let tokens = |u: &Option<Usage>| {
-            (
-                u.map(|u| u.input_tokens as i64),
-                u.map(|u| u.output_tokens as i64),
-            )
-        };
         Some(match self {
             WriteCommand::CreateRun {
                 run_id,
@@ -606,27 +626,12 @@ impl WriteCommand {
                 tool_call_id.clone(),
                 Some(json!({"status": status})),
             ),
-            // Built in `execute`, with the taint the call goes out with.
-            WriteCommand::ReserveCall { .. } => return None,
-            WriteCommand::SettleCall {
-                call_id,
-                usage,
-                cost_micro_usd,
-            } => {
-                let (input, output) = tokens(usage);
-                (
-                    "model_call.settled".into(),
-                    call_id.clone(),
-                    Some(json!({
-                        "cost_micro_usd": cost_micro_usd,
-                        "input_tokens": input,
-                        "output_tokens": output,
-                    })),
-                )
-            }
-            WriteCommand::MarkLost { call_id } => {
-                ("model_call.lost".into(), call_id.clone(), Some(json!({})))
-            }
+            // Built in `execute`: with the taint the call goes out with,
+            // and with the amounts the writer computed (story 3.7).
+            WriteCommand::ReserveCall { .. }
+            | WriteCommand::SettleCall { .. }
+            | WriteCommand::MarkLost { .. }
+            | WriteCommand::SettleAndFinishStep { .. } => return None,
             WriteCommand::FinishStep {
                 step_run_id,
                 status,
@@ -636,28 +641,6 @@ impl WriteCommand {
                 step_run_id.clone(),
                 Some(json!({"output_sha256": output_sha256(output), "status": status})),
             ),
-            WriteCommand::SettleAndFinishStep {
-                call_id,
-                usage,
-                cost_micro_usd,
-                step_run_id,
-                status,
-                output,
-            } => {
-                let (input, output_tokens) = tokens(usage);
-                (
-                    "model_call.settled+step.finished".into(),
-                    call_id.clone(),
-                    Some(json!({
-                        "cost_micro_usd": cost_micro_usd,
-                        "input_tokens": input,
-                        "output_sha256": output_sha256(output),
-                        "output_tokens": output_tokens,
-                        "status": status,
-                        "step_run_id": step_run_id,
-                    })),
-                )
-            }
             WriteCommand::FinishRun { run_id, status } => (
                 "run.finished".into(),
                 run_id.clone(),
@@ -786,7 +769,6 @@ pub struct NewInboxItem {
 pub struct CallSettlement {
     pub call_id: String,
     pub usage: Option<Usage>,
-    pub cost_micro_usd: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1314,8 +1296,12 @@ pub(crate) fn execute(
             step_run_id,
             call_id,
             call_seq,
-            reserved_micro_usd,
-            rate_snapshot,
+            price,
+            rate,
+            counted_input_tokens,
+            max_output_tokens,
+            week,
+            team,
             taint,
             purpose,
             prompt,
@@ -1333,40 +1319,46 @@ pub(crate) fn execute(
                 params![call_id, step_run_id, call_seq, purpose.as_str(), now],
             )?;
             insert_parts(tx, step_run_id, *call_seq, prompt, &now)?;
-            tx.execute(
-                "INSERT INTO ledger (id, model_call_id, run_id, kind, reserved_micro_usd, state, rate_snapshot, created_at) VALUES (?1, ?2, ?3, 'model', ?4, 'reserved', ?5, ?6)",
-                params![new_id(), call_id, run_id, reserved_micro_usd, rate_snapshot, now],
+            let mut args = ledger::reserve(
+                tx,
+                &ledger::Reservation {
+                    call_id,
+                    run_id: &run_id,
+                    price,
+                    rate,
+                    counted_input_tokens: *counted_input_tokens,
+                    max_output_tokens: *max_output_tokens,
+                    week,
+                    team,
+                },
+                &now,
             )?;
+            args.insert("call_seq".into(), json!(call_seq));
+            args.insert("purpose".into(), json!(purpose.as_str()));
+            args.insert("step_run_id".into(), json!(step_run_id));
+            args.insert("taint".into(), json!(flag(carried)));
             built = Some(vec![(
                 "model_call.reserved".into(),
                 call_id.clone(),
-                Some(json!({
-                    "call_seq": call_seq,
-                    "purpose": purpose.as_str(),
-                    "rate_snapshot": rate_snapshot,
-                    "reserved_micro_usd": reserved_micro_usd,
-                    "step_run_id": step_run_id,
-                    "taint": flag(carried),
-                })),
+                Some(Value::Object(args)),
             )]);
         }
-        WriteCommand::SettleCall {
-            call_id,
-            usage,
-            cost_micro_usd,
-        } => settle(tx, call_id, *usage, *cost_micro_usd)?,
+        WriteCommand::SettleCall { call_id, usage } => {
+            let settled = settle(tx, call_id, *usage, &now)?;
+            built = Some(vec![(
+                "model_call.settled".into(),
+                call_id.clone(),
+                Some(Value::Object(settled.args())),
+            )]);
+        }
         WriteCommand::MarkLost { call_id } => {
-            let n = tx.execute(
-                "UPDATE model_calls SET status = 'lost', settled = 1 WHERE id = ?1 AND settled = 0",
-                params![call_id],
-            )?;
             // Only an open call is marked lost; a settled call keeps its cost.
-            if n == 1 {
-                tx.execute(
-                    "UPDATE ledger SET settled_micro_usd = reserved_micro_usd, state = 'settled' WHERE model_call_id = ?1",
-                    params![call_id],
-                )?;
-            }
+            let args = ledger::mark_lost(tx, call_id, &now)?;
+            built = Some(vec![(
+                "model_call.lost".into(),
+                call_id.clone(),
+                Some(Value::Object(args)),
+            )]);
         }
         WriteCommand::FinishStep {
             step_run_id,
@@ -1381,7 +1373,6 @@ pub(crate) fn execute(
         WriteCommand::SettleAndFinishStep {
             call_id,
             usage,
-            cost_micro_usd,
             step_run_id,
             status,
             output,
@@ -1390,13 +1381,19 @@ pub(crate) fn execute(
             require(&step, &[StepStatus::Running], "finishes")?;
             documents::refuse_other_success(tx, &step, status)?;
             call_of_step(tx, call_id, step_run_id)?;
-            settle(tx, call_id, *usage, *cost_micro_usd)?;
+            let settled = settle(tx, call_id, *usage, &now)?;
             finish_step(tx, step_run_id, status, output, &now)?;
+            built = Some(vec![settled_and_finished(
+                call_id,
+                &settled,
+                step_run_id,
+                status,
+                output,
+            )]);
         }
         WriteCommand::SettleAndFinishDocumentStep {
             call_id,
             usage,
-            cost_micro_usd,
             step_run_id,
             output,
             version_id,
@@ -1409,7 +1406,6 @@ pub(crate) fn execute(
                 &documents::DocumentFinish {
                     call_id,
                     usage: *usage,
-                    cost_micro_usd: *cost_micro_usd,
                     step_run_id,
                     output,
                     version_id,
@@ -1423,7 +1419,6 @@ pub(crate) fn execute(
         WriteCommand::SettleAndLoopBack {
             call_id,
             usage,
-            cost_micro_usd,
             step_run_id,
             output,
             to,
@@ -1431,24 +1426,17 @@ pub(crate) fn execute(
             let step = step_of(tx, step_run_id)?;
             require(&step, &[StepStatus::Running], "loops back")?;
             call_of_step(tx, call_id, step_run_id)?;
-            settle(tx, call_id, *usage, *cost_micro_usd)?;
+            let settled = settle(tx, call_id, *usage, &now)?;
             let queued = loop_back(tx, &step, Some(output), to, Back::LoopBack, &now)?;
-            let (input, output_tokens) = (
-                usage.map(|u| u.input_tokens as i64),
-                usage.map(|u| u.output_tokens as i64),
-            );
+            let mut args = settled.args();
+            args.insert("output_sha256".into(), json!(audit::sha256_hex(output)));
+            args.insert("queued".into(), json!(queued));
+            args.insert("step_run_id".into(), json!(step_run_id));
+            args.insert("to".into(), json!(to));
             built = Some(vec![(
                 "model_call.settled+step.looped_back".into(),
                 call_id.clone(),
-                Some(json!({
-                    "cost_micro_usd": cost_micro_usd,
-                    "input_tokens": input,
-                    "output_sha256": audit::sha256_hex(output),
-                    "output_tokens": output_tokens,
-                    "queued": queued,
-                    "step_run_id": step_run_id,
-                    "to": to,
-                })),
+                Some(Value::Object(args)),
             )]);
         }
         WriteCommand::PauseStep {
@@ -1515,16 +1503,15 @@ pub(crate) fn execute(
             let first = match settlement {
                 Some(c) => {
                     call_of_step(tx, &c.call_id, step_run_id)?;
-                    settle(tx, &c.call_id, c.usage, c.cost_micro_usd)?;
+                    let settled = settle(tx, &c.call_id, c.usage, &now)?;
                     finish_step(tx, step_run_id, "failed", output, &now)?;
-                    WriteCommand::SettleAndFinishStep {
-                        call_id: c.call_id.clone(),
-                        usage: c.usage,
-                        cost_micro_usd: c.cost_micro_usd,
-                        step_run_id: step_run_id.clone(),
-                        status: "failed".into(),
-                        output: output.clone(),
-                    }
+                    Some(settled_and_finished(
+                        &c.call_id,
+                        &settled,
+                        step_run_id,
+                        "failed",
+                        output,
+                    ))
                 }
                 None => {
                     finish_step(tx, step_run_id, "failed", output, &now)?;
@@ -1533,6 +1520,7 @@ pub(crate) fn execute(
                         status: "failed".into(),
                         output: output.clone(),
                     }
+                    .audit_entry()
                 }
             };
             let created = create_item(tx, &step, item, &now)?;
@@ -1542,7 +1530,7 @@ pub(crate) fn execute(
             };
             finish_run(tx, &step.run_id, "failed", &now)?;
             built = Some(
-                [first.audit_entry(), Some(created), finished.audit_entry()]
+                [first, Some(created), finished.audit_entry()]
                     .into_iter()
                     .flatten()
                     .collect(),
@@ -1677,34 +1665,29 @@ pub(crate) fn execute(
     Ok(())
 }
 
-fn settle(
-    tx: &rusqlite::Transaction,
+use ledger::settle;
+
+/// `model_call.settled+step.finished` (story 3.7, row 26): the
+/// settlement's arguments, and the step's status, id and output hash.
+fn settled_and_finished(
     call_id: &str,
-    usage: Option<Usage>,
-    cost_micro_usd: Option<i64>,
-) -> Result<(), StoreError> {
-    let n = tx.execute(
-        "UPDATE model_calls SET status = 'settled', settled = 1, input_tokens = ?2, output_tokens = ?3 WHERE id = ?1 AND settled = 0",
-        params![
-            call_id,
-            usage.map(|u| u.input_tokens as i64),
-            usage.map(|u| u.output_tokens as i64)
-        ],
-    )?;
-    if n != 1 {
-        return Err(StoreError::Invalid(format!("call {call_id} is not open")));
-    }
-    match cost_micro_usd {
-        Some(c) => tx.execute(
-            "UPDATE ledger SET settled_micro_usd = ?2, state = 'settled' WHERE model_call_id = ?1",
-            params![call_id, c],
-        )?,
-        None => tx.execute(
-            "UPDATE ledger SET settled_micro_usd = reserved_micro_usd, state = 'settled' WHERE model_call_id = ?1",
-            params![call_id],
-        )?,
-    };
-    Ok(())
+    settled: &ledger::Settled,
+    step_run_id: &str,
+    status: &str,
+    output: &Option<String>,
+) -> Entry {
+    let mut args = settled.args();
+    args.insert(
+        "output_sha256".into(),
+        json!(output.as_deref().map(audit::sha256_hex)),
+    );
+    args.insert("status".into(), json!(status));
+    args.insert("step_run_id".into(), json!(step_run_id));
+    (
+        "model_call.settled+step.finished".into(),
+        call_id.to_string(),
+        Some(Value::Object(args)),
+    )
 }
 
 /// One audit entry: action, target and redacted `args`.
@@ -3171,6 +3154,10 @@ pub struct CallRow {
     pub output_tokens: Option<i64>,
     /// Story 3.5: a step's own turn or its one schema repair (AD-36).
     pub purpose: CallPurpose,
+    /// Story 3.7: when the call was reserved, and when it settled (or was
+    /// marked lost; `None` while open and on a call from before 0013).
+    pub created_at: String,
+    pub settled_at: Option<String>,
 }
 
 /// One Inbox item (AD-28; stories 3.3 and 3.4).
@@ -3332,12 +3319,64 @@ pub struct ToolCallRow {
     pub result_label: Option<String>,
 }
 
+/// One ledger entry. Story 3.7 (migration 0013): the company currency and
+/// amounts, the terms and the week and team it was reserved with; each is
+/// `None` on an entry from before 0013.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LedgerRow {
     pub model_call_id: String,
     pub reserved_micro_usd: i64,
     pub settled_micro_usd: Option<i64>,
+    /// `reserved` or `settled`.
     pub state: String,
+    /// The price file's sha256 hex, or `none` (or an older label).
+    pub rate_snapshot: String,
+    pub currency: Option<String>,
+    pub prices_updated: Option<String>,
+    /// The company-local date the budget week starts (owner Q11).
+    pub week: Option<String>,
+    pub team: Option<String>,
+    pub reserved_micro_company: Option<i64>,
+    pub settled_micro_company: Option<i64>,
+    pub input_micro_usd_per_mtok: Option<i64>,
+    pub output_micro_usd_per_mtok: Option<i64>,
+    pub company_micro_per_usd: Option<i64>,
+    pub counted_input_tokens: Option<i64>,
+    pub max_output_tokens: Option<i64>,
+    /// A call on this Mac (0 in both currencies).
+    pub local: Option<bool>,
+    pub created_at: String,
+}
+
+/// One model call's spend (story 3.7, [`Reader::spend`]): where it ran, its
+/// ledger entry and its tokens and times.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpendRow {
+    pub model_call_id: String,
+    pub run_id: String,
+    pub workflow: String,
+    pub step_run_id: String,
+    pub step_key: String,
+    pub attempt: i64,
+    /// The seat the attempt journaled when it started.
+    pub seat: Option<String>,
+    pub team: Option<String>,
+    pub week: Option<String>,
+    pub local: Option<bool>,
+    /// `reserved` or `settled`.
+    pub state: String,
+    pub currency: Option<String>,
+    pub reserved_micro_usd: i64,
+    pub settled_micro_usd: Option<i64>,
+    pub reserved_micro_company: Option<i64>,
+    pub settled_micro_company: Option<i64>,
+    pub rate_snapshot: String,
+    pub prices_updated: Option<String>,
+    pub company_micro_per_usd: Option<i64>,
+    pub input_tokens: Option<i64>,
+    pub output_tokens: Option<i64>,
+    pub created_at: String,
+    pub settled_at: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3456,7 +3495,8 @@ impl Reader {
 
     fn calls_where(&self, filter: &str, id: &str) -> Result<Vec<CallRow>, StoreError> {
         let mut st = self.conn.prepare(&format!(
-            "SELECT c.id, c.step_run_id, c.call_seq, c.status, c.settled, c.input_tokens, c.output_tokens, c.purpose
+            "SELECT c.id, c.step_run_id, c.call_seq, c.status, c.settled, c.input_tokens, c.output_tokens, c.purpose,
+                    c.created_at, c.settled_at
              FROM model_calls c JOIN step_runs s ON s.id = c.step_run_id WHERE {filter} ORDER BY s.seq, s.attempt, c.call_seq"
         ))?;
         let rows = st.query_map(params![id], |r| {
@@ -3469,6 +3509,8 @@ impl Reader {
                 input_tokens: r.get(5)?,
                 output_tokens: r.get(6)?,
                 purpose: purpose_of(&r.get::<_, String>(7)?)?,
+                created_at: r.get(8)?,
+                settled_at: r.get(9)?,
             })
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
@@ -3586,7 +3628,11 @@ impl Reader {
 
     pub fn ledger_for_run(&self, run_id: &str) -> Result<Vec<LedgerRow>, StoreError> {
         let mut st = self.conn.prepare(
-            "SELECT model_call_id, reserved_micro_usd, settled_micro_usd, state FROM ledger WHERE run_id = ?1 ORDER BY created_at",
+            "SELECT model_call_id, reserved_micro_usd, settled_micro_usd, state, rate_snapshot, currency,
+                    prices_updated, week, team, reserved_micro_company, settled_micro_company,
+                    input_micro_usd_per_mtok, output_micro_usd_per_mtok, company_micro_per_usd,
+                    counted_input_tokens, max_output_tokens, local, created_at
+             FROM ledger WHERE run_id = ?1 ORDER BY created_at, rowid",
         )?;
         let rows = st.query_map(params![run_id], |r| {
             Ok(LedgerRow {
@@ -3594,6 +3640,66 @@ impl Reader {
                 reserved_micro_usd: r.get(1)?,
                 settled_micro_usd: r.get(2)?,
                 state: r.get(3)?,
+                rate_snapshot: r.get(4)?,
+                currency: r.get(5)?,
+                prices_updated: r.get(6)?,
+                week: r.get(7)?,
+                team: r.get(8)?,
+                reserved_micro_company: r.get(9)?,
+                settled_micro_company: r.get(10)?,
+                input_micro_usd_per_mtok: r.get(11)?,
+                output_micro_usd_per_mtok: r.get(12)?,
+                company_micro_per_usd: r.get(13)?,
+                counted_input_tokens: r.get(14)?,
+                max_output_tokens: r.get(15)?,
+                local: r.get::<_, Option<i64>>(16)?.map(|l| l != 0),
+                created_at: r.get(17)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Story 3.7 (owner Q12): one row per model call of every run, oldest
+    /// run first, then step order, attempt and call: the spend `agentic
+    /// status` rolls up by step, run, seat, team and week.
+    pub fn spend(&self) -> Result<Vec<SpendRow>, StoreError> {
+        let mut st = self.conn.prepare(
+            "SELECT c.id, s.run_id, r.workflow, s.id, s.step_key, s.attempt, s.seat,
+                    l.team, l.week, l.local, l.state, l.currency, l.reserved_micro_usd,
+                    l.settled_micro_usd, l.reserved_micro_company, l.settled_micro_company,
+                    l.rate_snapshot, l.prices_updated, l.company_micro_per_usd,
+                    c.input_tokens, c.output_tokens, c.created_at, c.settled_at
+             FROM model_calls c
+             JOIN step_runs s ON s.id = c.step_run_id
+             JOIN runs r ON r.id = s.run_id
+             JOIN ledger l ON l.model_call_id = c.id
+             ORDER BY r.created_at, r.rowid, s.seq, s.attempt, c.call_seq",
+        )?;
+        let rows = st.query_map([], |r| {
+            Ok(SpendRow {
+                model_call_id: r.get(0)?,
+                run_id: r.get(1)?,
+                workflow: r.get(2)?,
+                step_run_id: r.get(3)?,
+                step_key: r.get(4)?,
+                attempt: r.get(5)?,
+                seat: r.get(6)?,
+                team: r.get(7)?,
+                week: r.get(8)?,
+                local: r.get::<_, Option<i64>>(9)?.map(|l| l != 0),
+                state: r.get(10)?,
+                currency: r.get(11)?,
+                reserved_micro_usd: r.get(12)?,
+                settled_micro_usd: r.get(13)?,
+                reserved_micro_company: r.get(14)?,
+                settled_micro_company: r.get(15)?,
+                rate_snapshot: r.get(16)?,
+                prices_updated: r.get(17)?,
+                company_micro_per_usd: r.get(18)?,
+                input_tokens: r.get(19)?,
+                output_tokens: r.get(20)?,
+                created_at: r.get(21)?,
+                settled_at: r.get(22)?,
             })
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
@@ -3646,6 +3752,43 @@ mod tests {
         }
     }
 
+    /// Story 3.7: the writer prices a call from its terms. These reserve
+    /// 1,000 micro-USD (50 output tokens at 20 USD per million) and settle
+    /// usage 1/2 at 40 micro-USD, in a USD company.
+    fn reserve(step: &str, call: &str, seq: i64) -> WriteCommand {
+        WriteCommand::ReserveCall {
+            step_run_id: step.into(),
+            call_id: call.into(),
+            call_seq: seq,
+            price: CallPrice {
+                input_micro_usd_per_mtok: 0,
+                output_micro_usd_per_mtok: 20_000_000,
+                local: false,
+            },
+            rate: Rate {
+                currency: "USD".into(),
+                company_micro_per_usd: Some(1_000_000),
+                snapshot: "test".into(),
+                prices_updated: None,
+            },
+            counted_input_tokens: 0,
+            max_output_tokens: 50,
+            week: "2026-11-23".into(),
+            team: "core".into(),
+            taint: Taint::Clean,
+            purpose: CallPurpose::Turn,
+            prompt: vec![],
+        }
+    }
+
+    /// The usage that settles at 40 micro-USD on [`reserve`]'s terms.
+    fn usage_40() -> Option<Usage> {
+        Some(Usage {
+            input_tokens: 1,
+            output_tokens: 2,
+        })
+    }
+
     #[test]
     fn reserve_settle_and_lost() {
         let dir = tempfile::tempdir().unwrap();
@@ -3672,30 +3815,13 @@ mod tests {
         )
         .unwrap();
         for (call, seq) in [("c1", 1), ("c2", 2), ("c3", 3)] {
-            w.exec(
-                sys(),
-                WriteCommand::ReserveCall {
-                    step_run_id: step.clone(),
-                    call_id: call.into(),
-                    call_seq: seq,
-                    reserved_micro_usd: 1000,
-                    rate_snapshot: "test".into(),
-                    taint: Taint::Clean,
-                    purpose: CallPurpose::Turn,
-                    prompt: vec![],
-                },
-            )
-            .unwrap();
+            w.exec(sys(), reserve(&step, call, seq)).unwrap();
         }
         w.exec(
             sys(),
             WriteCommand::SettleCall {
                 call_id: "c1".into(),
-                usage: Some(Usage {
-                    input_tokens: 1,
-                    output_tokens: 2,
-                }),
-                cost_micro_usd: Some(40),
+                usage: usage_40(),
             },
         )
         .unwrap();
@@ -3704,7 +3830,6 @@ mod tests {
             WriteCommand::SettleCall {
                 call_id: "c2".into(),
                 usage: None,
-                cost_micro_usd: None,
             },
         )
         .unwrap();
@@ -3727,7 +3852,6 @@ mod tests {
                 WriteCommand::SettleCall {
                     call_id: "c1".into(),
                     usage: None,
-                    cost_micro_usd: None
                 }
             )
             .is_err()
@@ -3781,26 +3905,12 @@ mod tests {
             },
         )
         .unwrap();
-        w.exec(
-            sys(),
-            WriteCommand::ReserveCall {
-                step_run_id: step,
-                call_id: "c1".into(),
-                call_seq: 1,
-                reserved_micro_usd: 1000,
-                rate_snapshot: "t".into(),
-                taint: Taint::Clean,
-                purpose: CallPurpose::Turn,
-                prompt: vec![],
-            },
-        )
-        .unwrap();
+        w.exec(sys(), reserve(&step, "c1", 1)).unwrap();
         w.exec(
             sys(),
             WriteCommand::SettleCall {
                 call_id: "c1".into(),
-                usage: None,
-                cost_micro_usd: Some(40),
+                usage: usage_40(),
             },
         )
         .unwrap();
@@ -3845,25 +3955,11 @@ mod tests {
             },
         )
         .unwrap();
-        w.exec(
-            sys(),
-            WriteCommand::ReserveCall {
-                step_run_id: step.clone(),
-                call_id: "c1".into(),
-                call_seq: 1,
-                reserved_micro_usd: 1000,
-                rate_snapshot: "t".into(),
-                taint: Taint::Clean,
-                purpose: CallPurpose::Turn,
-                prompt: vec![],
-            },
-        )
-        .unwrap();
+        w.exec(sys(), reserve(&step, "c1", 1)).unwrap();
         // The step half fails: the settle half must roll back with it.
         let bad = WriteCommand::SettleAndFinishStep {
             call_id: "c1".into(),
-            usage: None,
-            cost_micro_usd: Some(40),
+            usage: usage_40(),
             step_run_id: "no-such-step".into(),
             status: "succeeded".into(),
             output: Some("x".into()),
@@ -3873,8 +3969,7 @@ mod tests {
         assert_eq!(r.ledger_for_run("r1").unwrap()[0].state, "reserved");
         let good = WriteCommand::SettleAndFinishStep {
             call_id: "c1".into(),
-            usage: None,
-            cost_micro_usd: Some(40),
+            usage: usage_40(),
             step_run_id: step,
             status: "succeeded".into(),
             output: Some("x".into()),
@@ -4046,26 +4141,12 @@ mod tests {
             },
         )
         .unwrap();
-        w.exec(
-            engine.clone(),
-            WriteCommand::ReserveCall {
-                step_run_id: step.clone(),
-                call_id: "c1".into(),
-                call_seq: 1,
-                reserved_micro_usd: 0,
-                rate_snapshot: "none".into(),
-                taint: Taint::Clean,
-                purpose: CallPurpose::Turn,
-                prompt: vec![],
-            },
-        )
-        .unwrap();
+        w.exec(engine.clone(), reserve(&step, "c1", 1)).unwrap();
         w.exec(
             engine.clone(),
             WriteCommand::SettleAndFinishDocumentStep {
                 call_id: "c1".into(),
                 usage: None,
-                cost_micro_usd: None,
                 step_run_id: step.clone(),
                 output: "# Note\n\nOne line.\n".into(),
                 version_id: new_id(),

@@ -37,8 +37,8 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde_json::json;
 
 use crate::{
-    Entry, NewInboxItem, Reader, StepState, StoreError, WriteCommand, call_of_step, create_item,
-    finish_step, flag, require, settle, step_of, taint_of,
+    Entry, NewInboxItem, Reader, StepState, StoreError, call_of_step, create_item, finish_step,
+    flag, require, settle, settled_and_finished, step_of, taint_of,
 };
 
 /// The most bytes a document version's Markdown may hold: 1 MiB.
@@ -89,7 +89,6 @@ pub struct DocumentVersionRecord {
 pub(crate) struct DocumentFinish<'a> {
     pub call_id: &'a str,
     pub usage: Option<am_domain::Usage>,
-    pub cost_micro_usd: Option<i64>,
     pub step_run_id: &'a str,
     pub output: &'a str,
     pub version_id: &'a str,
@@ -230,7 +229,7 @@ pub(crate) fn settle_and_finish(
         ));
     }
     call_of_step(tx, f.call_id, f.step_run_id)?;
-    settle(tx, f.call_id, f.usage, f.cost_micro_usd)?;
+    let settled = settle(tx, f.call_id, f.usage, now)?;
     let output = Some(f.output.to_string());
     finish_step(tx, f.step_run_id, "succeeded", &output, now)?;
     // The attempt's taint at its finish, as committed (AD-10 (c)).
@@ -257,15 +256,13 @@ pub(crate) fn settle_and_finish(
         taint: f.item.taint.raise(finished.taint),
         ..f.item.clone()
     };
-    let finish = WriteCommand::SettleAndFinishStep {
-        call_id: f.call_id.to_string(),
-        usage: f.usage,
-        cost_micro_usd: f.cost_micro_usd,
-        step_run_id: f.step_run_id.to_string(),
-        status: "succeeded".into(),
-        output,
-    };
-    let mut entries: Vec<Entry> = finish.audit_entry().into_iter().collect();
+    let mut entries: Vec<Entry> = vec![settled_and_finished(
+        f.call_id,
+        &settled,
+        f.step_run_id,
+        "succeeded",
+        &output,
+    )];
     entries.push((
         "document.versioned".into(),
         format!("document:{}", f.document_id),

@@ -692,8 +692,10 @@ impl Gate<'_> {
                 run.config_hash.as_deref().unwrap_or("no snapshot")
             ));
         }
+        let accounts = crate::prices::this_macs_accounts(&self.ctx.places);
         let plan = plan_of(
             &snapshot,
+            &accounts,
             &run.workflow,
             &self.ctx.providers,
             self.ctx.clock.clone(),

@@ -61,7 +61,8 @@ pub(crate) const ACCOUNTS_KEYS: &[&str] = &["schema_version", "accounts"];
 
 /// The top-level keys of `models/prices.yaml`, in schema order: the loader's allow-list
 /// and the writer's canonical order (story 1.8).
-pub(crate) const PRICES_KEYS: &[&str] = &["schema_version", "updated", "models", "services"];
+pub(crate) const PRICES_KEYS: &[&str] =
+    &["schema_version", "updated", "models", "services", "rates"];
 
 /// The top-level keys of `models/capabilities.yaml`, in schema order: the loader's allow-list
 /// and the writer's canonical order (story 1.8).
@@ -655,6 +656,20 @@ pub(crate) fn prices(rep: &mut Report, root: &Node) -> Prices {
                 );
             }
         }
+        // Story 3.7, review M4: one price per (provider, model); a repeat is
+        // an error at its entry and the first is kept.
+        if let Some((provider, model)) = &pm
+            && models
+                .iter()
+                .any(|p: &ModelPrice| &p.provider == provider && &p.model == model)
+        {
+            rep.error(
+                m.line,
+                format!("the model `{model}` of the provider `{provider}` is priced twice"),
+                "keep one price per provider and model, and remove this entry",
+            );
+            continue;
+        }
         if let (Some((provider, model)), Some(i), Some(o)) = (pm, input, output) {
             models.push(ModelPrice {
                 provider,
@@ -688,11 +703,88 @@ pub(crate) fn prices(rep: &mut Report, root: &Node) -> Prices {
             });
         }
     }
+    let rates = rates(rep, &f);
+    if updated.is_none() && !models.is_empty() {
+        rep.warning(
+            1,
+            "these prices have no `updated:` date, so status cannot say when they were checked",
+            "add `updated: YYYY-MM-DD`, the date you last checked the prices against the providers' pages",
+        );
+    }
     Prices {
         updated: value(updated),
         models,
         services,
+        rates,
+        sha256: None,
     }
+}
+
+/// `rates:` in `models/prices.yaml` (story 3.7, owner Q6): company-currency
+/// units per USD, one entry per currency, never USD (prices are USD
+/// already). A bad entry is reported at its line and not loaded.
+fn rates(rep: &mut Report, f: &Fields) -> Vec<CurrencyRate> {
+    let mut rates: Vec<CurrencyRate> = Vec::new();
+    for item in f.list(rep, "rates") {
+        let Some(r) = fields(rep, item, "rate") else {
+            continue;
+        };
+        r.allow(rep, &["currency", "per_usd"]);
+        let currency = r.req_text(rep, "currency", "<ISO 4217 code>").filter(|t| {
+            let three = t.value.len() == 3 && t.value.chars().all(|c| c.is_ascii_uppercase());
+            if !three {
+                rep.error(
+                    t.line,
+                    format!("currency '{}' is not a three-letter ISO 4217 code", t.value),
+                    "write the code in capitals, as in company.yaml's `currency:`",
+                );
+                return false;
+            }
+            if t.value == "USD" {
+                rep.error(
+                    t.line,
+                    "a rate for USD is not needed: prices are in USD already",
+                    "remove this entry; a USD company needs no rate",
+                );
+                return false;
+            }
+            if rates.iter().any(|known| known.currency == t.value) {
+                rep.error(
+                    t.line,
+                    format!("currency '{}' has a rate already", t.value),
+                    "keep one entry per currency and remove this one",
+                );
+                return false;
+            }
+            true
+        });
+        let per_usd = r.micros(rep, "per_usd").filter(|micros| {
+            if *micros > 0 {
+                return true;
+            }
+            let line = r.get("per_usd").map_or(r.line, |n| n.line);
+            rep.error(
+                line,
+                "'per_usd' must be above 0",
+                "set `per_usd:` to how many units of the currency one USD buys, such as 0.92",
+            );
+            false
+        });
+        if per_usd.is_none() && r.absent("per_usd") {
+            rep.error(
+                r.line,
+                "rate is missing 'per_usd'",
+                "add `per_usd:`, how many units of the currency one USD buys, such as 0.92",
+            );
+        }
+        if let (Some(currency), Some(micros_per_usd)) = (currency, per_usd) {
+            rates.push(CurrencyRate {
+                currency: currency.value,
+                micros_per_usd,
+            });
+        }
+    }
+    rates
 }
 
 /// `models/capabilities.yaml`.

@@ -194,6 +194,19 @@ impl LoadOptions {
     }
 }
 
+/// Reads one `models/prices.yaml` text on its own (story 3.7): the prices,
+/// with the text's sha256 as their snapshot id, and the findings, named
+/// `models/prices.yaml`. For a shipped price file outside a project.
+pub fn parse_prices(text: &str) -> (Prices, Vec<Finding>) {
+    let mut rep = Report::new("models/prices.yaml");
+    let mut prices = match kinds::yaml(&mut rep, text, 0) {
+        Some(node) => kinds::prices(&mut rep, &node),
+        None => Prices::default(),
+    };
+    prices.sha256 = Some(sha256_hex(text.as_bytes()));
+    (prices, rep.findings)
+}
+
 /// Reads and checks the project at `root` (no reference-file check).
 pub fn load(root: &Path) -> Result<Loaded, LoadError> {
     load_in(root, LoadOptions::default())
@@ -527,7 +540,10 @@ impl Loader {
             let mut rep = Report::new(&rel);
             if let Some(node) = kinds::yaml(&mut rep, &text, 0) {
                 match *stem {
-                    "prices" => self.prices = kinds::prices(&mut rep, &node),
+                    "prices" => {
+                        self.prices = kinds::prices(&mut rep, &node);
+                        self.prices.sha256 = Some(sha256_hex(text.as_bytes()));
+                    }
                     _ => self.capabilities = kinds::capabilities(&mut rep, &node),
                 }
             }

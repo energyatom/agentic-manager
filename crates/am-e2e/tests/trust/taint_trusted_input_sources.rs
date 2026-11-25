@@ -22,12 +22,13 @@ mod support;
 use std::path::Path;
 use std::sync::Arc;
 
+use am_domain::money::{CallPrice, Rate};
 use am_domain::{
     Actor, BoxFuture, CancelSignal, ChatOutcome, ChatRequest, EventSink, Instruction, LlmProvider,
     ModelCapabilities, Part, ProviderError, StopReason, Taint, TrustedInput, UntrustedContent,
     Usage,
 };
-use am_engine::journal::{LinearWorkflow, Price, create_run, drive_run};
+use am_engine::journal::{LinearWorkflow, create_run, drive_run};
 use am_engine::run::run_plan;
 use am_providers::{AnthropicProvider, OpenAiCompatProvider};
 use am_store::{AttemptWrites, Reader, Store, WriteCommand};
@@ -169,10 +170,18 @@ fn linear() -> LinearWorkflow {
         steps: vec!["a".into(), "b".into()],
         model: "fake".into(),
         max_output_tokens: 64,
-        price: Price {
-            input_micro_per_mtok: 0,
-            output_micro_per_mtok: 0,
+        // Story 3.7: the spike's price is am-domain's `CallPrice`, with a
+        // USD rate (free calls, as before).
+        price: CallPrice {
+            input_micro_usd_per_mtok: 0,
+            output_micro_usd_per_mtok: 0,
+            local: false,
+        },
+        rate: Rate {
+            currency: "USD".into(),
+            company_micro_per_usd: Some(1_000_000),
             snapshot: "test".into(),
+            prices_updated: None,
         },
         system: Instruction::authored("You are a step in a test workflow."),
         step_prompt: |step_key, workflow| {

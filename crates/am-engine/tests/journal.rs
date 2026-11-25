@@ -8,8 +8,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use am_domain::money::{CallPrice, Rate};
 use am_domain::{Actor, Instruction};
-use am_engine::journal::{LinearWorkflow, Price, create_run, drive_run};
+use am_engine::journal::{LinearWorkflow, create_run, drive_run};
 use am_testkit::{FakeLlm, ScriptedTurn};
 use tokio_util::sync::CancellationToken;
 
@@ -31,10 +32,18 @@ fn wf() -> LinearWorkflow {
         steps: vec!["a".into(), "b".into()],
         model: "fake".into(),
         max_output_tokens: 100,
-        price: Price {
-            input_micro_per_mtok: 3_000_000,
-            output_micro_per_mtok: 15_000_000,
+        // Story 3.7: the spike's price is am-domain's `CallPrice`, with a
+        // USD rate (the spike's company is in USD).
+        price: CallPrice {
+            input_micro_usd_per_mtok: 3_000_000,
+            output_micro_usd_per_mtok: 15_000_000,
+            local: false,
+        },
+        rate: Rate {
+            currency: "USD".into(),
+            company_micro_per_usd: Some(1_000_000),
             snapshot: "test".into(),
+            prices_updated: None,
         },
         system: Instruction::authored("You are a step in a test workflow."),
         step_prompt,

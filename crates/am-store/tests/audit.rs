@@ -76,8 +76,23 @@ fn populated(root: &Path) -> Store {
                 step_run_id: a.clone(),
                 call_id: call.into(),
                 call_seq: seq,
-                reserved_micro_usd: 5000,
-                rate_snapshot: "rates-1".into(),
+                // Story 3.7: the writer prices the call from its terms (fake:
+                // 3.00 and 15.00 USD per million tokens, 0.92 EUR per USD).
+                price: am_domain::money::CallPrice {
+                    input_micro_usd_per_mtok: 3_000_000,
+                    output_micro_usd_per_mtok: 15_000_000,
+                    local: false,
+                },
+                rate: am_domain::money::Rate {
+                    currency: "EUR".into(),
+                    company_micro_per_usd: Some(920_000),
+                    snapshot: "rates-1".into(),
+                    prices_updated: Some("2026-11-01".into()),
+                },
+                counted_input_tokens: 1_000,
+                max_output_tokens: 4_096,
+                week: "2026-11-23".into(),
+                team: "core".into(),
                 // Story 3.3: raised, never lowered (AD-10).
                 taint: Taint::Clean,
                 purpose: am_store::CallPurpose::Turn,
@@ -94,7 +109,6 @@ fn populated(root: &Path) -> Store {
                 input_tokens: 11,
                 output_tokens: 7,
             }),
-            cost_micro_usd: Some(420),
         },
     )
     .unwrap();
@@ -253,13 +267,29 @@ fn args_are_redacted_ids_hashes_counts_and_statuses() {
         entry(&all, "run.created")["args"],
         json!({"config_hash": config_hash(), "origin": "manual", "steps": 2, "workflow": "wf-1"})
     );
+    // Story 3.7 (row 26, owner Q4): the writer's amounts, in both
+    // currencies, with the flags; never a caller's `cost_micro_usd`. Usage
+    // 11/7 at 3.00 and 15.00 per million is 138 micro-USD, x 0.92 = 126.96,
+    // rounded up to 127 micro-EUR.
     assert_eq!(
         entry(&all, "model_call.settled")["args"],
-        json!({"cost_micro_usd": 420, "input_tokens": 11, "output_tokens": 7})
+        json!({
+            "at_reservation": false,
+            "currency": "EUR",
+            "input_tokens": 11,
+            "output_tokens": 7,
+            "over_reservation": false,
+            "settled_micro_company": 127,
+            "settled_micro_usd": 138,
+        })
     );
     assert_eq!(
         entry(&all, "model_call.reserved")["args"]["reserved_micro_usd"],
-        5000
+        64_440
+    );
+    assert_eq!(
+        entry(&all, "model_call.reserved")["args"]["reserved_micro_company"],
+        59_285
     );
     let finished: Vec<&Value> = all
         .iter()

@@ -65,6 +65,61 @@ accounts:
 A seat's `model` and `fallback` name model Accounts; `tools.yaml`
 `search.provider` is `builtin` or a search Account.
 
+## Prices and rates: `models/prices.yaml` (story 3.7)
+
+```yaml
+schema_version: 2
+updated: 2026-11-25
+models:
+  - provider: anthropic
+    model: example-large
+    input_usd_per_mtok: 3.0
+    output_usd_per_mtok: 15.0
+services:
+  - id: crawl-credits
+    unit: credit
+    usd_per_unit: 0.001
+rates:
+  - currency: EUR
+    per_usd: 0.92
+```
+
+| Field | Required | Meaning |
+|---|---|---|
+| `updated` | no, but a warning without it once the file prices a model | the date the prices and rates were checked, `YYYY-MM-DD`; `agentic status` names it, or says "prices date not given" |
+| `models` | no | one price per (provider, model): USD per million input and output tokens, from 0 up |
+| `services` | no | a paid service's USD per unit |
+| `rates` | no | the company currency's rate: `currency` (three capitals, as in `company.yaml`) and `per_usd`, how many units of it one USD buys, above 0. One entry per currency; never `USD` (prices are USD already) |
+
+Each bad `rates` entry is an error at its line, with its fix, and is not
+loaded: a code that is not three capitals, a `per_usd` that is missing, 0,
+negative or not a number, a currency listed twice (at the second), a `USD`
+entry or an unknown key.
+
+How a run uses the file (AD-9, AD-16): `agentic run` reads it once, from the
+snapshot the run pins, and the file's sha256 is each ledger entry's rate
+snapshot id (`none` without a file). A call on this Mac (a reserved local
+Account, or an Account whose `base_url` is `http://127.0.0.1:<port>`) costs 0
+whatever the file says: where the server is decides, never the provider's
+name. Every other call is priced under its Account's provider and its model;
+a model the file does not price, a company currency other than USD with no
+`rates` entry, or an error in this Mac's Accounts file (such as an id listed
+twice) refuses the run before anything is written, naming the fix. A model
+priced twice is an error at the second entry. A USD company needs no
+rate. Each call is reserved before it is made from its request's counted
+prompt tokens (UTF-8 bytes / 3, rounded up) and its `max_tokens`, and settled
+from the provider's usage at the reserved terms (or at the reservation when
+the provider gives no usage, or only part of it, or a count that is not a
+whole number from 0 up), in USD and the company currency, each rounded up to the
+micro-unit. Cached prompt tokens are priced at the full input price and
+reasoning tokens as output. No cap is checked yet (epic 4).
+
+`templates/prices.yaml` is the shipped starting copy (the providers'
+published prices, with its `updated:` date and its sources in comments); it
+is never read under a project's own file. The sample company's
+`models/prices.yaml` prices its cloud fallback models and carries its INR
+rate.
+
 ## Seats: `seats/<id>.md`
 
 YAML frontmatter between two `---` lines, then the seat's instructions in

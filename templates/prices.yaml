@@ -1,0 +1,40 @@
+# Shipped default prices (story 3.7, owner Q10): the providers' published
+# prices, checked on 2026-11-25, the `updated:` date below. A new project
+# starts from a copy of this file; it is never layered under a project's own
+# models/prices.yaml. Prices are USD per million tokens.
+#
+# Sources, read on 2026-11-25:
+# - anthropic: https://platform.claude.com/docs/en/about-claude/pricing
+#   claude-haiku-5-5 is at its base price, for prompts up to 100,000 tokens.
+#   A longer prompt costs 0.50 input and 2.50 output USD per million tokens;
+#   this file has one price per model, so such a call is under-stated
+#   (recorded in docs/deferred-register.md).
+# - openai: https://developers.openai.com/api/docs/pricing (Standard tier)
+# Not priced: cache reads and writes, batch, fast mode, priority and
+# US-only inference (none is sent in v1).
+#
+# No `rates:` here: the company currency is the owner's. The sample company's
+# INR rate, in templates/samples/company-a/models/prices.yaml, is 95.0 INR per
+# USD: the x-rates.com mid-market rate at 12:34 UTC on 25 Nov 2026 was
+# 92.292247, deliberately rounded up by the owner (2026-11-25) so INR spend is
+# never under-stated. That file names its sources here because a comment in a
+# project's config file is a validate warning.
+schema_version: 2
+updated: 2026-11-25
+models:
+  - provider: anthropic
+    model: claude-opus-5-5
+    input_usd_per_mtok: 4.0
+    output_usd_per_mtok: 20.0
+  - provider: anthropic
+    model: claude-sonnet-5-5
+    input_usd_per_mtok: 2.0
+    output_usd_per_mtok: 10.0
+  - provider: anthropic
+    model: claude-haiku-5-5
+    input_usd_per_mtok: 0.1
+    output_usd_per_mtok: 0.5
+  - provider: openai
+    model: gpt-5-mini
+    input_usd_per_mtok: 0.25
+    output_usd_per_mtok: 2.0
