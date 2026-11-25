@@ -18,7 +18,7 @@ mod support;
 use std::sync::Arc;
 
 use am_domain::{Part, Taint};
-use am_engine::run::{run_plan, run_plan_with_tools};
+use am_engine::run::{StepPlan, run_plan, run_plan_with_tools};
 use am_store::StepInput;
 use am_testkit::{FakeLlm, FixtureTool, ScriptedTurn};
 use support::*;
@@ -335,7 +335,13 @@ async fn a_tool_result_taints_its_step_before_the_next_call() {
         ])),
     );
     let b = texts(&[B_OUT]);
-    let plan = plan(vec![step("a", a.clone()), step("b", b.clone())]);
+    // Story 3.6 (AD-11, AD-46): ToolGate checks the seat's grants, so the
+    // fixture tool is granted to step a's seat by name.
+    let granted = StepPlan {
+        grants: [FixtureTool::NAME.to_string()].into_iter().collect(),
+        ..step("a", a.clone())
+    };
+    let plan = plan(vec![granted, step("b", b.clone())]);
 
     let outcome = run_plan_with_tools(
         &p.store,

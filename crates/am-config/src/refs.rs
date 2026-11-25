@@ -89,11 +89,39 @@ pub(crate) struct Edge {
     pub line: u32,
 }
 
+/// What a workflow step declares it writes (story 3.6, AD-21), checked once
+/// every seat and table is read: a single-seat step's `table:` against its
+/// seat's team and Tables capability; a fan-out step that would write a
+/// table is warned about (it cannot until story 3.14).
+#[derive(Debug, Clone)]
+pub(crate) struct StepWrites {
+    /// The step's id.
+    pub step: String,
+    /// The line of the step's mapping (its `- id:` item).
+    pub line: u32,
+    /// `table:`, with its line.
+    pub table: Option<crate::fields::Text>,
+    /// A single-seat step's `seat:`.
+    pub seat: Option<String>,
+    /// A fan-out step's `seats:`.
+    pub seats: Vec<String>,
+    /// Whether the step fans out (`seats:` or `over_folder:`).
+    pub fan_out: bool,
+}
+
+/// A [`StepWrites`] and the file that holds it.
+#[derive(Debug, Clone)]
+pub(crate) struct PendingWrites {
+    pub file: String,
+    pub writes: StepWrites,
+}
+
 #[derive(Default)]
 pub(crate) struct Refs {
     pub pending: Vec<PendingRef>,
     pub edges: Vec<Edge>,
     pub hosts: Vec<HostCheck>,
+    pub step_writes: Vec<PendingWrites>,
 }
 
 impl Refs {
@@ -103,6 +131,14 @@ impl Refs {
             line,
             kind,
             id: id.to_string(),
+        });
+    }
+
+    /// Records what a step declares it writes (story 3.6).
+    pub fn step_write(&mut self, rep: &Report, writes: StepWrites) {
+        self.step_writes.push(PendingWrites {
+            file: rep.file.clone(),
+            writes,
         });
     }
 
@@ -160,6 +196,14 @@ pub(crate) struct Known {
     pub crawl_seats: BTreeSet<String>,
     /// Each declared seat's `allowed_hosts` (the entries that parse).
     pub seat_hosts: BTreeMap<String, Vec<am_domain::HostPattern>>,
+    /// Story 3.6: each seat's team, for the seats that read cleanly.
+    pub seat_teams: BTreeMap<String, String>,
+    /// Story 3.6: the seats whose grants hold `table_write` (their Tables
+    /// capability is on, AD-46).
+    pub table_writers: BTreeSet<String>,
+    /// Story 3.6: each table's owning team, for the tables that read
+    /// cleanly.
+    pub table_teams: BTreeMap<String, String>,
 }
 
 fn list<'a>(ids: impl Iterator<Item = &'a String>) -> String {
@@ -213,6 +257,12 @@ pub(crate) fn resolve(refs: &Refs, known: &Known, reports: &mut BTreeMap<String,
                 crate::kinds::allow_host_fix(&h.seat, &host, &format!("change the {}", h.what)),
             );
         }
+    }
+    for pending in &refs.step_writes {
+        let rep = reports
+            .entry(pending.file.clone())
+            .or_insert_with(|| Report::new(&pending.file));
+        step_writes(&pending.writes, known, rep);
     }
     for tree in [Tree::ReportsTo, Tree::TeamParent] {
         let edges: Vec<&Edge> = refs.edges.iter().filter(|e| e.tree == tree).collect();
@@ -279,6 +329,58 @@ fn cycles<'e>(edges: &[&'e Edge]) -> Vec<(Vec<String>, &'e Edge)> {
         }
     }
     found
+}
+
+/// Story 3.6 (AD-21, AD-46; owner Q3 and the fan-out decision of
+/// 2026-11-24): what a step declares it writes, against its seat. A
+/// fan-out step that declares `table:`, or lists a seat whose grants hold
+/// `table_write`, gets one warning at its line (the words `agentic run`
+/// refuses it in). A single-seat step's table must belong to its seat's
+/// team, and its seat must have the Tables capability on: declaring a
+/// table grants nothing. An unknown table, seat or team is reported by its
+/// own reference, so it is skipped here.
+fn step_writes(w: &StepWrites, known: &Known, rep: &mut Report) {
+    if w.fan_out {
+        let holds = |seat: &str| known.table_writers.contains(seat);
+        if crate::writes::fan_out_writes_table(w.table.is_some(), &w.seats, holds) {
+            let (message, fix) = crate::writes::fan_out_table_words(&w.step);
+            rep.warning(w.line, message, fix);
+        }
+        return;
+    }
+    let (Some(table), Some(seat)) = (&w.table, &w.seat) else {
+        return;
+    };
+    let (Some(owner), Some(team)) = (
+        known.table_teams.get(&table.value),
+        known.seat_teams.get(seat),
+    ) else {
+        return;
+    };
+    if owner != team {
+        rep.error(
+            table.line,
+            format!(
+                "step '{}' declares the table '{}' of team '{owner}', and its seat '{seat}' is in team '{team}'; a seat writes only its own team's tables (AD-21)",
+                w.step, table.value
+            ),
+            format!(
+                "declare a table of team '{team}' in `table:`, or run the step on a seat of team '{owner}'"
+            ),
+        );
+    }
+    if !known.table_writers.contains(seat) {
+        rep.error(
+            table.line,
+            format!(
+                "step '{}' declares the table '{}', and its seat '{seat}' has the Tables capability off, so it is not granted table_write; declaring a table grants nothing (AD-46)",
+                w.step, table.value
+            ),
+            format!(
+                "switch on tables in seats/{seat}.md (`capabilities: {{ tables: {{ on: true }} }}`), or remove `table:` from the step"
+            ),
+        );
+    }
 }
 
 /// An Account id this Mac's user list lacks (story 2.12, AD-17): a

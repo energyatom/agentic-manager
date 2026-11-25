@@ -49,11 +49,34 @@
 //! as` alias of the store's `Reader` is still seen (review round 1, R4):
 //!
 //! - the store's row command, `apply_row_write`, stands in shipped code
-//!   only in `crates/am-store/src/` ([`ROW_HOME`]): nothing else calls it
-//!   until the ToolGate slice adds its one caller;
+//!   only in `crates/am-store/src/` ([`ROW_HOME`]) and, since the ToolGate
+//!   slice, the engine's implementation of the row-writer port
+//!   ([`ROW_WRITER_IMPL`], its one caller);
 //! - the readers of row content on the store's `Reader` ([`ROW_READERS`])
 //!   stand there only too; the data-free receipt (`row_receipt`) is not
 //!   one of them.
+//!
+//! Story 3.6, the ToolGate slice (AD-10 and AD-21 as amended 2026-11-24;
+//! owner conditions Q1, Q4 and b; matrix rows 33, 37 and 43), over whole
+//! files, so spacing around `.` and `::`, line breaks and qualified paths
+//! are seen:
+//!
+//! - the port's method `write_row` stands only as the one method call in
+//!   ToolGate ([`TOOLGATE`]), inside its `fn write`, and as the `fn
+//!   write_row` of its trait
+//!   ([`ROWS_PORT`]) and of the engine's implementation
+//!   ([`ROW_WRITER_IMPL`]);
+//! - `EngineResult::row_written`, the engine result's one constructor, is
+//!   called by path only in ToolGate (its definition, `fn row_written`, is
+//!   am-domain's);
+//! - no file in `crates/` makes an alias (`use … as`, `type`) of
+//!   `RowWriter` or `EngineResult`, and no file outside am-domain imports
+//!   `am_domain::rows::*` or `am_domain::content::*`;
+//! - the records that carry a row's data ([`ROW_RECORDS`]) stand only in
+//!   am-store's source, and only am-store depends on `rusqlite` (normal,
+//!   build or target-specific edges; dev-dependencies are tests), so no
+//!   other crate reads a row and no engine path can pass row content to a
+//!   model call.
 
 use crate::Failure;
 use crate::forbid::{strip_comments_and_strings, unterminated_finding};
@@ -143,6 +166,35 @@ const ROW_READERS: [&str; 4] = [
 /// The one place in shipped code that names them: am-store's own source.
 const ROW_HOME: &str = "crates/am-store/src/";
 
+/// The engine's implementation of the row-writer port: the one shipped
+/// file outside am-store that names the row command (story 3.6, the
+/// ToolGate slice), and the second home of `fn write_row`.
+const ROW_WRITER_IMPL: &str = "crates/am-engine/src/row_writer.rs";
+
+/// The one caller of the port's method and builder of an engine result.
+const TOOLGATE: &str = "crates/am-engine/src/toolgate.rs";
+
+/// The port's definition.
+const ROWS_PORT: &str = "crates/am-domain/src/rows.rs";
+
+/// The port's method and the engine result's constructor.
+const PORT_METHOD: &str = "write_row";
+const ENGINE_CONSTRUCTOR: &str = "row_written";
+
+/// The types no file in `crates/` may rename (story 3.6): an alias would
+/// carry them past the two rules above.
+const PORT_TYPES: [&str; 2] = ["RowWriter", "EngineResult"];
+
+/// The am-domain modules no other crate may glob-import.
+const GLOBBED_MODULES: [&str; 2] = ["rows", "content"];
+
+/// The records that carry a row's data (story 3.6, row 43).
+const ROW_RECORDS: [&str; 2] = ["RowRecord", "RowHistoryRecord"];
+
+/// The one SQLite library, and the one crate that may depend on it.
+const SQLITE: &str = "rusqlite";
+const SQLITE_HOME: &str = "am-store";
+
 /// Every finding of the call-site rules on the shipped source under
 /// `root`.
 fn call_site_findings(root: &Path) -> Vec<String> {
@@ -201,6 +253,8 @@ fn call_site_findings(root: &Path) -> Vec<String> {
         findings.extend(resolve_findings(&source.name, &code, &tests));
         findings.extend(row_findings(&source.name, &code));
         findings.extend(alias_findings(&source.name, &code, &ALIASED_TYPES));
+        findings.extend(port_findings(&source.name, &code));
+        findings.extend(record_findings(&source.name, &code));
     }
     findings
 }
@@ -248,7 +302,20 @@ fn site_findings(name: &str, code: &str, earlier: &[String]) -> Vec<String> {
 /// Story 3.5, review R3 (AD-10): a `type X = …Token…;` or a `use … Token
 /// as X` of an untrusted type or `TrustedInput`, anywhere in shipped code.
 fn alias_findings(name: &str, code: &str, types: &[&'static str]) -> Vec<String> {
-    let mut lines: BTreeSet<(usize, &str)> = BTreeSet::new();
+    alias_lines(code, types)
+        .into_iter()
+        .map(|(line, token)| {
+            format!(
+                "{name}:{line}: makes an alias of {token} (`type` or `use … as`); the types are named as themselves so the call-site rules see every use of them (AD-10: no path from untrusted text to an Instruction)"
+            )
+        })
+        .collect()
+}
+
+/// The lines (and the type) of every `type X = …Token…;` or `use … Token as
+/// X` of one of `types` in `code`.
+fn alias_lines(code: &str, types: &[&'static str]) -> BTreeSet<(usize, &'static str)> {
+    let mut lines: BTreeSet<(usize, &'static str)> = BTreeSet::new();
     for token in types.iter().copied() {
         for at in token_offsets(code, token) {
             let after = code[at + token.len()..].trim_start();
@@ -269,10 +336,200 @@ fn alias_findings(name: &str, code: &str, types: &[&'static str]) -> Vec<String>
         }
     }
     lines
+}
+
+/// What stands right before the byte offset `at` in `code`, past
+/// whitespace and line breaks: `.` (a method call), `::` (a path) or the
+/// keyword `fn` (a definition).
+#[derive(PartialEq, Eq)]
+enum Before {
+    Dot,
+    Path,
+    Fn,
+    Other,
+}
+
+fn before(code: &str, at: usize) -> Before {
+    let head = code[..at].trim_end();
+    if head.ends_with("::") {
+        Before::Path
+    } else if head.ends_with('.') {
+        Before::Dot
+    } else if head.ends_with("fn")
+        && !head[..head.len() - 2]
+            .chars()
+            .next_back()
+            .is_some_and(is_word)
+    {
+        Before::Fn
+    } else {
+        Before::Other
+    }
+}
+
+/// Story 3.6, the ToolGate slice (AD-10, AD-21 as amended; rows 33 and
+/// 37): the row-writer port's method and the engine result's constructor
+/// at their sites only, no alias of either type, and no glob import of the
+/// am-domain modules that define them outside am-domain.
+fn port_findings(name: &str, code: &str) -> Vec<String> {
+    let mut findings = Vec::new();
+    let mut lines: BTreeSet<usize> = BTreeSet::new();
+    // Review round 1, R2, and round 2, T1: ToolGate calls the port once,
+    // inside its `fn write`.
+    let offsets = token_offsets(code, PORT_METHOD);
+    let calls = offsets
+        .iter()
+        .filter(|at| before(code, **at) == Before::Dot)
+        .count();
+    let write_path = fn_body(code, "write");
+    for at in offsets {
+        let allowed = match before(code, at) {
+            Before::Dot => {
+                name == TOOLGATE
+                    && calls == 1
+                    && write_path.is_some_and(|(from, to)| (from..to).contains(&at))
+            }
+            Before::Fn => name == ROWS_PORT || name == ROW_WRITER_IMPL,
+            Before::Path | Before::Other => false,
+        };
+        if !allowed {
+            lines.insert(line_at(code, at));
+        }
+    }
+    for line in lines {
+        findings.push(format!(
+            "{name}:{line}: names {PORT_METHOD}, the row-writer port's method; only ToolGate (am-engine's toolgate module) calls it, once, inside its `fn write`, and it is defined only by the port in am-domain's rows module and implemented only in am-engine's row_writer module (AD-21 as amended 2026-11-24, owner Q1: one path writes a row)"
+        ));
+    }
+    let mut lines: BTreeSet<usize> = BTreeSet::new();
+    for at in token_offsets(code, ENGINE_CONSTRUCTOR) {
+        if before(code, at) == Before::Path && name != TOOLGATE {
+            lines.insert(line_at(code, at));
+        }
+    }
+    for line in lines {
+        findings.push(format!(
+            "{name}:{line}: names EngineResult::{ENGINE_CONSTRUCTOR}, the engine result's one constructor; only ToolGate (am-engine's toolgate module) builds an EngineResult, from engine values only, and am-domain's content module defines it (AD-10 as amended 2026-11-24, owner Q4)"
+        ));
+    }
+    for (line, token) in alias_lines(code, &PORT_TYPES) {
+        findings.push(format!(
+            "{name}:{line}: makes an alias of {token} (`type` or `use … as`); the row-writer port and the engine result are named as themselves so check-deps sees every use of them (AD-21, AD-10)"
+        ));
+    }
+    if name == ROW_WRITER_IMPL {
+        findings.extend(public_items(name, code));
+    }
+    if !name.starts_with("crates/am-domain/") {
+        let flat = flat_paths(code);
+        for module in GLOBBED_MODULES {
+            if globs(&flat, module) {
+                findings.push(format!(
+                    "{name}: imports am_domain::{module}::* (a glob); outside am-domain the row-writer port, its types and the engine result are imported by name, so check-deps sees every use of them (AD-21, AD-10)"
+                ));
+            }
+        }
+    }
+    findings
+}
+
+/// The byte span of the body of `fn <function>` in `code` (its braces
+/// matched; comments and literals are blanked already).
+fn fn_body(code: &str, function: &str) -> Option<(usize, usize)> {
+    let at = token_offsets(code, function)
         .into_iter()
-        .map(|(line, token)| {
+        .find(|at| before(code, *at) == Before::Fn)?;
+    let open = at + code[at..].find('{')?;
+    let mut depth = 0usize;
+    for (i, c) in code[open..].char_indices() {
+        match c {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some((open, open + i));
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Review round 1, R2: the port's implementation has two public items,
+/// `pub struct StoreRowWriter` and its `pub fn new`; any other (a method,
+/// a field, a `pub(crate)` item) would hand the row command on.
+fn public_items(name: &str, code: &str) -> Vec<String> {
+    let mut lines: BTreeSet<usize> = BTreeSet::new();
+    for at in token_offsets(code, "pub") {
+        let item = code[at + 3..]
+            .split(['(', '{', ';', ':', '<'])
+            .next()
+            .unwrap_or("")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        if item != "struct StoreRowWriter" && item != "fn new" {
+            lines.insert(line_at(code, at));
+        }
+    }
+    lines
+        .into_iter()
+        .map(|line| {
             format!(
-                "{name}:{line}: makes an alias of {token} (`type` or `use … as`); the types are named as themselves so the call-site rules see every use of them (AD-10: no path from untrusted text to an Instruction)"
+                "{name}:{line}: makes a public item on StoreRowWriter other than the struct and its `new`; the row-writer port's implementation hands the store's row command to no one but through the port (story 3.6, review round 1, R2; AD-21)"
+            )
+        })
+        .collect()
+}
+
+/// `code` on one line, whitespace dropped around `::`, `{`, `}` and `,`.
+fn flat_paths(code: &str) -> String {
+    let mut flat = String::new();
+    for word in code.split_whitespace() {
+        let joins = flat.ends_with("::")
+            || flat.ends_with(['{', ',', '}'])
+            || word.starts_with("::")
+            || word.starts_with(['{', '}', ',']);
+        if !flat.is_empty() && !joins {
+            flat.push(' ');
+        }
+        flat.push_str(word);
+    }
+    flat
+}
+
+/// Whether the flattened `flat` glob-imports `am_domain::<module>::*`,
+/// directly or inside an `am_domain::{…}` group.
+fn globs(flat: &str, module: &str) -> bool {
+    let glob = format!("{module}::*");
+    if flat.contains(&format!("am_domain::{glob}")) {
+        return true;
+    }
+    flat.match_indices("am_domain::{").any(|(at, open)| {
+        let inner = &flat[at + open.len()..];
+        let end = inner.find('}').unwrap_or(inner.len());
+        inner[..end].split(',').any(|item| item.trim() == glob)
+    })
+}
+
+/// Story 3.6, row 43 (owner condition b): the records that carry a row's
+/// data stand in shipped code only in am-store's source.
+fn record_findings(name: &str, code: &str) -> Vec<String> {
+    if name.starts_with(ROW_HOME) {
+        return Vec::new();
+    }
+    let mut named: BTreeSet<(usize, &str)> = BTreeSet::new();
+    for record in ROW_RECORDS {
+        for at in token_offsets(code, record) {
+            named.insert((line_at(code, at), record));
+        }
+    }
+    named
+        .into_iter()
+        .map(|(line, record)| {
+            format!(
+                "{name}:{line}: names {record}, a record that carries a row's data; it stands in shipped code only in {ROW_HOME} (story 3.6, owner condition b: no engine path passes row content to a model call; AD-21)"
             )
         })
         .collect()
@@ -370,21 +627,30 @@ fn resolve_findings(name: &str, code: &str, tests: &[(usize, usize)]) -> Vec<Str
 }
 
 /// Story 3.6, the store slice (AD-21; rows 48 and 49): outside
-/// [`ROW_HOME`], the token `apply_row_write` or a [`ROW_READERS`] name
-/// anywhere in a file's code (comments and literals left out). Each finding
-/// names its line and the exact name.
+/// [`ROW_HOME`], the token `apply_row_write` (but in [`ROW_WRITER_IMPL`],
+/// the ToolGate slice's one caller) or a [`ROW_READERS`] name anywhere in a
+/// file's code (comments and literals left out). Each finding names its
+/// line and the exact name.
 fn row_findings(name: &str, code: &str) -> Vec<String> {
     if name.starts_with(ROW_HOME) {
         return Vec::new();
     }
     let mut findings = Vec::new();
-    let lines: BTreeSet<usize> = token_offsets(code, ROW_COMMAND)
+    // Review round 1, R2: in the port's implementation, one call only,
+    // inside its `fn write_row`.
+    let calls = token_offsets(code, ROW_COMMAND);
+    let the_one = name == ROW_WRITER_IMPL
+        && calls.len() == 1
+        && before(code, calls[0]) == Before::Dot
+        && fn_body(code, PORT_METHOD).is_some_and(|(from, to)| (from..to).contains(&calls[0]));
+    let lines: BTreeSet<usize> = calls
         .into_iter()
+        .filter(|_| !the_one)
         .map(|at| line_at(code, at))
         .collect();
     for line in lines {
         findings.push(format!(
-            "{name}:{line}: names {ROW_COMMAND}, the store's row command; until the ToolGate slice adds its one caller, it stands in shipped code only in {ROW_HOME} (the owner's condition for story 3.6: no engine, app, server or tool path writes a row yet; AD-21)"
+            "{name}:{line}: names {ROW_COMMAND}, the store's row command; it stands in shipped code only in {ROW_HOME} and in am-engine's row_writer module, the row-writer port's implementation and its one caller (the owner's condition for story 3.6: no other engine, app, server or tool path writes a row; AD-21)"
         ));
     }
     let mut named: BTreeSet<(usize, &str)> = BTreeSet::new();
@@ -532,7 +798,7 @@ pub fn run(metadata: Option<&Path>, root: &Path) -> Result<String, Failure> {
     let calls = call_site_findings(root);
     match check(&doc) {
         Ok(summary) if calls.is_empty() => Ok(format!(
-            "{summary}; only am-engine builds a TrustedInput, and Instruction::authored is called only at its listed sites (AD-10); only the two command handlers name the Inbox resolve and HumanActor outside am-domain and am-store (AD-15); no shipped code outside am-store writes or reads a row (AD-21)"
+            "{summary}; only am-engine builds a TrustedInput, and Instruction::authored is called only at its listed sites (AD-10); only the two command handlers name the Inbox resolve and HumanActor outside am-domain and am-store (AD-15); only ToolGate calls the row-writer port and builds an engine result, only the engine's port implementation names the store's row command, and no shipped code outside am-store reads a row (AD-10, AD-21)"
         )),
         Ok(_) => Err(Failure::Findings(calls)),
         Err(Failure::Findings(mut findings)) => {
@@ -584,6 +850,19 @@ fn check(doc: &Value) -> Result<String, Failure> {
     let mut findings = Vec::new();
     for pkg in &packages {
         let name = pkg["name"].as_str().unwrap_or("?");
+        // Story 3.6 (row 43): only am-store opens the database, whatever
+        // layer a crate is in; a dev-dependency is test scaffolding.
+        let sqlite = pkg["dependencies"]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+            .iter()
+            .any(|d| d["kind"].as_str() != Some("dev") && d["name"].as_str() == Some(SQLITE));
+        if sqlite && name != SQLITE_HOME {
+            findings.push(format!(
+                "{name} -> {SQLITE}: only am-store may depend on rusqlite, the one SQLite library, so no other crate opens the database or reads a row (AD-4, AD-21; story 3.6, owner condition b)"
+            ));
+        }
         let Some(layer) = layer(name) else {
             findings.push(format!(
                 "{name}: not in the AD-4 matrix; classify it in xtask/src/deps.rs before it lands"
@@ -619,6 +898,9 @@ fn check(doc: &Value) -> Result<String, Failure> {
                 continue;
             }
             let dep_name = dep["name"].as_str().unwrap_or("?");
+            if dep_name == SQLITE {
+                continue; // reported above
+            }
             let internal = names.contains(dep_name);
             let ok = if internal {
                 list.contains(&dep_name)

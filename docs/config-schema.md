@@ -318,6 +318,18 @@ Besides `id`, `seat`, `instruction`, `description`, `output_schema` and
 They are accepted and not yet checked; a step with `seats` or `over_folder`
 may leave out `seat`.
 
+A step may declare `table: <id>`, the one table it writes rows of with the
+built-in `table_write` (story 3.6). The table must exist, belong to the
+step's seat's team, and the seat must have the Tables capability on:
+declaring a table binds a write and grants nothing. A gate step declares no
+table. Each of these is an error at the `table:` line, with its fix. Until
+story 3.14 a fan-out step (`seats:` or `over_folder:`) cannot write a
+table: one that declares `table:` (checked only to exist), or lists a seat
+that holds `table_write`, gets a warning at the step saying so, and
+`agentic run` refuses it in the same words. Until epic 4 story 17 classifies
+it, adding or changing `table:` takes effect at Reload or startup without
+the two-step confirmation (the owner's accepted interim risk).
+
 ## Templates
 
 Every template under `templates/` is a minimal project, so `agentic validate

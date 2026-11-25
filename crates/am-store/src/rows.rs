@@ -11,7 +11,9 @@
 //!   `row.written` (ids, op, version, call sequence, taint and a column
 //!   count; never the row's data, nor a hash of it).
 //! - A key that already holds its after-image writes nothing and is `Ok`
-//!   (the replay, checked first). Everything else is checked against the
+//!   (the replay, checked first), but only for the same write again: the
+//!   same tool call id, actor, table and op kind (the ToolGate slice's
+//!   review round 1, R4); anything else at the key is refused in words. Everything else is checked against the
 //!   journal and refused in words with nothing written: the actor must be
 //!   the attempt's own `Actor::Seat` (its run, its step and the seat
 //!   journaled when it started), the attempt `running`, the call at the key
@@ -166,10 +168,12 @@ pub(crate) fn apply_row_write(
 ) -> Result<(), StoreError> {
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     // AD-8: a key that holds its write is answered by it; nothing more is
-    // written, whoever asks and whatever the attempt's state (story 3.9's
-    // resume replays a call of a finished attempt). It is a replay only when
-    // the row command wrote it: the call at the key finished with its
-    // `engine` result in the same transaction (review T5).
+    // written, whatever the attempt's state (story 3.9's resume replays a
+    // call of a finished attempt). It is a replay only when the row command
+    // wrote it (the call at the key finished with its `engine` result in
+    // the same transaction, review T5) and only for the same write again:
+    // the same tool call id, actor, table and op kind (the ToolGate slice's
+    // review round 1, R4).
     let replay: bool = tx.query_row(
         "SELECT EXISTS (SELECT 1 FROM row_history WHERE step_run_id = ?1 AND call_seq = ?2)",
         params![write.step_run_id, write.call_seq],
@@ -183,16 +187,16 @@ pub(crate) fn apply_row_write(
                 |r| r.get(0),
             )
             .optional()?;
-        if kind.flatten().as_deref() == Some("engine") {
-            return Ok(());
+        if kind.flatten().as_deref() != Some("engine") {
+            return Err(refused(format!(
+                "call {} of step run {} holds an after-image that the row command did not write (its tool call has no engine result), so it is no replay",
+                write.call_seq, write.step_run_id
+            )));
         }
-        return Err(refused(format!(
-            "call {} of step run {} holds an after-image that the row command did not write (its tool call has no engine result), so it is no replay",
-            write.call_seq, write.step_run_id
-        )));
+        return same_write(&tx, actor, write);
     }
     let now = now_ts();
-    let (target, args) = write_row(&tx, actor, write, &now)?;
+    let (target, args) = checked_write(&tx, actor, write, &now)?;
     audit::append(&tx, actor, "row.written", &target, "ok", Some(&args), &now)?;
     tx.commit()?;
     Ok(())
@@ -202,9 +206,40 @@ fn refused(words: String) -> StoreError {
     StoreError::Invalid(format!("refused: {words}; nothing was changed"))
 }
 
+/// A refusal of the data a seat wrote (a repeated key, a row or patch past
+/// a cap; the ToolGate slice's review round 1, R1): words the model may act
+/// on, so the step goes on. The guards are the store slice's, unchanged.
+fn data_refused(words: String) -> StoreError {
+    StoreError::RowRefused(format!("refused: {words}; nothing was changed"))
+}
+
+/// A replay (R4): the write at the key must be this one again, its tool
+/// call id, its actor, its table and its op kind; the row id and the data
+/// may differ (a re-run mints a new row id). Anything else is refused in
+/// words that name neither data nor the write's table.
+fn same_write(tx: &Transaction, actor: &Actor, write: &RowWrite) -> Result<(), StoreError> {
+    let (tool_call_id, by, table, op): (String, String, String, String) = tx.query_row(
+        "SELECT tool_call_id, actor, table_id, op FROM row_history WHERE step_run_id = ?1 AND call_seq = ?2",
+        params![write.step_run_id, write.call_seq],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+    )?;
+    let by = serde_json::from_str::<Actor>(&by).map_err(|e| StoreError::Invalid(e.to_string()))?;
+    let kind = match write.op {
+        RowOp::Insert { .. } => "insert",
+        RowOp::Update { .. } => "update",
+    };
+    if tool_call_id == write.tool_call_id && by == *actor && table == write.table_id && op == kind {
+        return Ok(());
+    }
+    Err(refused(format!(
+        "call {} of step run {} holds the {op} of tool call {tool_call_id}, and this write is not that write again (another tool call, actor, table or op), so it is no replay of it",
+        write.call_seq, write.step_run_id
+    )))
+}
+
 /// Checks the write against the journal, then writes its after-image, its
 /// row and its call's finish; the audit entry's target and arguments.
-fn write_row(
+fn checked_write(
     tx: &Transaction,
     actor: &Actor,
     write: &RowWrite,
@@ -261,7 +296,7 @@ fn write_row(
             let row_id = row_id.to_string();
             let Some((data, version, row_taint)) = current(tx, &table, &row_id)? else {
                 return Err(StoreError::RowRefused(format!(
-                    "refused: table `{table}` does not hold the row this update names; nothing was changed"
+                    "refused: the update names a row this table does not hold (table `{table}`); nothing was changed"
                 )));
             };
             if version != *expected_version {
@@ -272,7 +307,7 @@ fn write_row(
             // Review T3: a patch past either cap is refused before it is
             // parsed further or merged, on the one writer thread.
             if patch_json.len() > ROW_MAX_BYTES {
-                return Err(refused(format!(
+                return Err(data_refused(format!(
                     "the update's patch holds {} bytes, over the cap of {ROW_MAX_BYTES} bytes a row",
                     patch_json.len()
                 )));
@@ -280,7 +315,7 @@ fn write_row(
             let patch = object(tx, patch_json, "the update's patch")?;
             let keys = columns_of(tx, &patch)?;
             if usize::try_from(keys).map_or(true, |n| n > ROW_MAX_COLUMNS) {
-                return Err(refused(format!(
+                return Err(data_refused(format!(
                     "the update's patch names {keys} columns, over the cap of {ROW_MAX_COLUMNS} columns a row"
                 )));
             }
@@ -289,7 +324,11 @@ fn write_row(
             (row_id, "update", data, version + 1, taint)
         }
     };
-    let columns = within_caps(tx, &data)?;
+    let patch = match &write.op {
+        RowOp::Insert { .. } => None,
+        RowOp::Update { patch_json, .. } => Some(patch_json.len()),
+    };
+    let columns = within_caps(tx, &data, patch)?;
     let actor_json =
         serde_json::to_string(actor).map_err(|e| StoreError::Invalid(e.to_string()))?;
     // The after-image first: the row's triggers need it (AD-21, AD-24).
@@ -465,7 +504,7 @@ fn object(conn: &Connection, text: &str, what: &str) -> Result<String, StoreErro
         |r| r.get(0),
     )?;
     if repeated {
-        return Err(refused(format!(
+        return Err(data_refused(format!(
             "{what} holds a duplicate key, and a key appears once in a row"
         )));
     }
@@ -507,21 +546,35 @@ fn merged(conn: &Connection, data: String, patch: &str) -> Result<String, StoreE
 
 /// The row's column count, once its text and columns are within
 /// [`ROW_MAX_BYTES`] and [`ROW_MAX_COLUMNS`] (review R10); refused in
-/// words with sizes only.
-fn within_caps(conn: &Connection, data: &str) -> Result<i64, StoreError> {
-    if data.len() > ROW_MAX_BYTES {
-        return Err(refused(format!(
+/// words with sizes only. An insert's words name its own size. An update's
+/// (`patch`: its patch's byte length) name the caps and the patch's own
+/// size, never a size of the merged or the stored row, which the seat
+/// cannot read (the ToolGate slice's review round 2, T3).
+fn within_caps(conn: &Connection, data: &str, patch: Option<usize>) -> Result<i64, StoreError> {
+    let over_bytes = data.len() > ROW_MAX_BYTES;
+    let columns = if over_bytes {
+        0
+    } else {
+        columns_of(conn, data)?
+    };
+    let over_columns = usize::try_from(columns).map_or(true, |n| n > ROW_MAX_COLUMNS);
+    let words = match (patch, over_bytes, over_columns) {
+        (_, false, false) => return Ok(columns),
+        (None, true, _) => format!(
             "the row would hold {} bytes of JSON, over the cap of {ROW_MAX_BYTES} bytes a row",
             data.len()
-        )));
-    }
-    let columns = columns_of(conn, data)?;
-    if usize::try_from(columns).map_or(true, |n| n > ROW_MAX_COLUMNS) {
-        return Err(refused(format!(
+        ),
+        (None, false, true) => format!(
             "the row would hold {columns} columns, over the cap of {ROW_MAX_COLUMNS} columns a row"
-        )));
-    }
-    Ok(columns)
+        ),
+        (Some(bytes), true, _) => format!(
+            "this update (its patch holds {bytes} bytes) would take the row past the cap of {ROW_MAX_BYTES} bytes a row; write a smaller patch, or clear columns with null"
+        ),
+        (Some(_), false, true) => format!(
+            "this update would take the row past the cap of {ROW_MAX_COLUMNS} columns a row; set fewer new columns, or clear columns with null"
+        ),
+    };
+    Err(data_refused(words))
 }
 
 const ROW_COLUMNS: &str = "table_id, row_id, data, version, taint, created_at, updated_at";

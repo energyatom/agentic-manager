@@ -1157,7 +1157,12 @@ fn templates_and_fixtures_validate_with_their_accounts_variant() {
         let sample = e.unwrap().path();
         let (code, out) = nobody.validate(&["--template", sample.to_str().unwrap()]);
         assert_eq!(code, 0, "{out}");
-        assert!(out.contains("0 errors, 0 warnings"), "{out}");
+        // Story 3.6's ToolGate slice (matrix row 40, owner 2026-11-24): the
+        // sample's one warning is that its chained flow's fan-out step
+        // cannot write a table until story 3.14 (crates/am-e2e/tests/
+        // cli_validate.rs pins it); no Account warning.
+        assert!(out.contains("0 errors, 1 warning"), "{out}");
+        assert!(out.contains("3.14"), "{out}");
     }
 
     for (project, variant) in [

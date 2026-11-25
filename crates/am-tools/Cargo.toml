@@ -1,6 +1,6 @@
 [package]
 name = "am-tools"
-description = "Agent-facing tools: folder access list_files, read_file, write_file (AD-30)."
+description = "Agent-facing tools: folder access list_files, read_file, write_file (AD-30); the row tool table_write (AD-21)."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -15,6 +15,10 @@ am-domain.workspace = true
 sha2.workspace = true
 hex.workspace = true
 thiserror.workspace = true
+# Story 3.6 (the ToolGate slice): `table_write` checks a call's JSON
+# arguments against the declared table; workspace-pinned, already in the
+# graph.
+serde_json.workspace = true
 
 [dev-dependencies]
 am-testkit.workspace = true

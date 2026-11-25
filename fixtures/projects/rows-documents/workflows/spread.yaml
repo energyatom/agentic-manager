@@ -1,0 +1,9 @@
+schema_version: 2
+name: Spread
+team: core
+description: A fan-out step whose seat holds table_write; it cannot run until a fan-out step may write a table.
+steps:
+  - id: share
+    seats:
+      - writer
+    instruction: Record your share of the entries with table_write.

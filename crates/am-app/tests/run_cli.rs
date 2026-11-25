@@ -1097,10 +1097,13 @@ async fn a_provider_failure_fails_the_run_and_prints_the_reason() {
     env.assert_closed(&root);
 }
 
-/// Tool request: a turn that asks for a tool fails the step, because tools
-/// are not available in this version, and the command says so.
+/// Tool request, superseded by story 3.6 (AD-11, AD-46): every tool request
+/// goes through ToolGate. The fixture's seat is granted no `web_search`, so
+/// a turn that asks for it is refused in ToolGate's words (the tool, "was
+/// refused", "not granted"); the step and the run fail, and the command
+/// says so.
 #[tokio::test]
-async fn a_tool_request_fails_the_run_because_no_tools_exist_yet() {
+async fn a_tool_request_the_seat_is_not_granted_fails_the_run_in_toolgates_words() {
     let env = env();
     let root = env.copy_of("one-step");
     let llm = fake(ScriptedTurn::text("").tool_call("web_search", "{\"query\":\"x\"}"));
@@ -1110,13 +1113,14 @@ async fn a_tool_request_fails_the_run_because_no_tools_exist_yet() {
     assert_eq!(ran.code, 1, "{}", ran.all());
     let (id, status) = ran.run_line();
     assert_eq!(status, "failed");
-    let said = ran.all().to_lowercase();
+    let said = ran.all();
     assert!(
-        said.contains("tool") && said.contains("not available"),
-        "{}",
-        ran.all()
+        said.contains("web_search") && said.contains("was refused") && said.contains("not granted"),
+        "{said}"
     );
+    assert!(!said.contains("tools are not available"), "{said}");
     assert_eq!(llm.calls(), 1, "one turn, no tool loop");
+    assert!(llm.requests()[0].tools.is_empty(), "no tool offered");
     assert_eq!(env.steps(&root, &id)[0].status, "failed");
     assert_eq!(env.runs(&root)[0].status, "failed");
 }

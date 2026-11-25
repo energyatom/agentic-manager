@@ -62,14 +62,23 @@
 //! `TrustedInput::from_owner_note` from the resolver the journal holds (no
 //! person, no note, and the attempt does not start).
 //!
-//! **Tools.** [`run_plan`] takes none: a tool request fails the step in
-//! story 3.1's words. Tools run only through [`run_plan_with_tools`]'s
-//! runner, a constructor parameter shipped code never passes (owner
-//! condition 2, `cargo xtask seam-guard`), and only ToolGate calls it, for
-//! a call it admitted (read tools only in this story); the driver holds the
-//! gate, never the runner (review R7). A tool name the model chose and no
-//! manifest holds is labelled by ToolGate and journaled, audited and
-//! reported only as `unknown:<sha256 of the name>` (review P15, R9).
+//! **Tools.** Every run has a ToolGate, and every tool request goes through
+//! it (story 3.6, AD-11). [`run_plan`] builds the shipped gate: the
+//! built-in tools' manifests and `table_write`, which writes through the
+//! engine's row-writer port with the plan's row tool (am-app hands in
+//! am-tools'). A step is offered only what its seat is granted (AD-46) and
+//! `table_write` only when it declares a table of its seat's team. Runner
+//! tools run only through [`run_plan_with_tools`]'s runner, a constructor
+//! parameter shipped code never passes (owner condition 2, `cargo xtask
+//! seam-guard`), and only ToolGate calls it, for a call it admitted; the
+//! driver holds the gate, never the runner (review R7). A tool name the
+//! model chose and no manifest holds is labelled by ToolGate and journaled,
+//! audited and reported only as `unknown:<sha256 of the name>` (review P15,
+//! R9). A ToolGate refusal fails the step (no Failure item); a call it
+//! admitted that errs is an untrusted error result the model reads, and
+//! taints the attempt from its next call; a successful `table_write` is
+//! the engine's own result (`Part::EngineResult`), which leaves the
+//! attempt's taint as it was (AD-10 as amended 2026-11-24).
 //!
 //! A provider error, a reply cut off at its output limit or a cancelled
 //! call fails the step and the run with the reason in words and no item
@@ -80,14 +89,15 @@
 //! reservation is zero), retries and fallback (story 8), resume (story 9).
 //! The spike's resumable driver stays in [`crate::journal`].
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use am_domain::rows::{DeclaredTable, RowTool};
 use am_domain::{
     Actor, AuditEvent, AuditSink, ChatOutcome, ChatRequest, Clock, EventSink, InboxKind,
     Instruction, LlmProvider, Message, Part, ProviderError, Role, StepStatus, StopReason,
-    StreamEvent, Taint, ToolCall, ToolRunner, ToolSpec, TrustedInput, UntrustedData,
+    StreamEvent, Taint, ToolCall, ToolRunner, TrustedInput, UntrustedData,
 };
 use am_store::{
     AttemptWrites, CallPurpose, CallSettlement, NewInboxItem, NewPromptPart, PromptKind,
@@ -97,8 +107,9 @@ use tokio_util::sync::CancellationToken;
 
 use crate::TokenSignal;
 use crate::prompt::{self, Slots, StepPrompt};
+use crate::row_writer::StoreRowWriter;
 use crate::schema::{self, Compiled, OutputSchema};
-use crate::toolgate::{ToolGate, builtin_names, label_of};
+use crate::toolgate::{CallPlace, GateError, GateOutput, StepTools, TABLE_WRITE, ToolGate};
 
 /// The rate-snapshot id of a zero reservation: no price was read (amounts
 /// arrive with the cost ledger, story 7).
@@ -146,6 +157,20 @@ impl Default for Limits {
 
 /// One step: a bounded loop of model turns on `provider`, or, for a gate,
 /// a wait for a person (its provider is never called).
+///
+/// Story 3.6's ToolGate slice (owner condition a; matrix row 42): a step
+/// reads no row, so a plan has no row-input slot. Story 3.6c adds one and
+/// removes this tripwire (tests first: written before the slice's fields).
+///
+/// ```compile_fail
+/// let _ = |p: am_engine::run::StepPlan| p.row_inputs;
+/// ```
+///
+/// while the fields that bind a write are read like any other:
+///
+/// ```
+/// let _ = |p: am_engine::run::StepPlan| (p.grants, p.seat_team, p.table, p.document);
+/// ```
 #[derive(Clone)]
 pub struct StepPlan {
     /// The step's key in the run (its id in the workflow).
@@ -173,6 +198,19 @@ pub struct StepPlan {
     /// Story 3.5 (AD-36): the schema the step's final message must match;
     /// compiled before any row is written.
     pub output_schema: Option<OutputSchema>,
+    /// Story 3.6 (AD-46): the seat's tool grants, its capabilities'
+    /// expansion; ToolGate admits no tool outside them.
+    pub grants: BTreeSet<String>,
+    /// Story 3.6 (AD-21): the seat's team; a seat writes only its own
+    /// team's tables.
+    pub seat_team: String,
+    /// Story 3.6 (AD-21, owner Q3): the one table the step writes (`table:`),
+    /// with its owning team and columns; binds `table_write`, never grants
+    /// it. A gate declares none.
+    pub table: Option<DeclaredTable>,
+    /// Inert until story 3.6b: any value refuses the plan in words naming
+    /// 3.6b.
+    pub document: Option<String>,
 }
 
 /// A run to make: the workflow's steps in order, built from one config
@@ -187,6 +225,10 @@ pub struct RunPlan {
     /// Story 3.5 (AD-27): read at each attempt's start, so a guidance note
     /// that has expired is absent from the prompt.
     pub clock: Arc<dyn Clock>,
+    /// Story 3.6 (owner Q1): the row tool `table_write` is prepared with
+    /// (am-tools', which am-app hands in: am-engine may not depend on
+    /// am-tools, AD-4); `None`: no step writes a row.
+    pub row_tool: Option<Arc<dyn RowTool>>,
 }
 
 /// How a run ended, or where it waits. A failed run is an outcome, not an
@@ -217,6 +259,11 @@ pub enum RunError {
     /// The tools handed to the run cannot be used (story 3.3, review R7).
     #[error("the run's tools were refused: {0}")]
     Tools(String),
+    /// Story 3.6 (AD-21, AD-36): what a step declares it writes cannot be
+    /// written (a table on a gate, a table of another team than its seat's,
+    /// a document before story 3.6b); nothing was written.
+    #[error("step `{step}` cannot run: {why}")]
+    Writes { step: String, why: String },
     /// The run could not be created: the journal holds nothing of it.
     #[error(transparent)]
     Store(#[from] StoreError),
@@ -280,24 +327,6 @@ fn failure_of(step: &StepPlan, turn: &Result<ChatOutcome, ProviderError>) -> Opt
     }
 }
 
-/// Story 3.1's words for a tool request with no tools: each name as
-/// ToolGate's labelling gives it (a built-in id as itself, any other as
-/// `unknown:<sha256>`; review P15, R9).
-fn tool_words(out: &ChatOutcome) -> String {
-    let known = builtin_names();
-    let names: Vec<String> = out
-        .tool_calls
-        .iter()
-        .map(|c| format!("`{}`", label_of(&c.name, &known)))
-        .collect();
-    let asked = if names.is_empty() {
-        "a tool".to_string()
-    } else {
-        names.join(", ")
-    };
-    format!("the model asked for {asked}, and tools are not available in this version")
-}
-
 /// A duration in its shortest whole unit: `2h`, `10m`, `30s`.
 fn duration_words(d: Duration) -> String {
     let s = d.as_secs();
@@ -340,9 +369,10 @@ impl Progress {
 }
 
 /// Creates the run for `plan` as `started_by` and drives it to its end, or
-/// to a gate where it waits. `origin` says what started it (`manual`). No
-/// tool runs: a tool request fails its step in words. See the module docs
-/// for the order of the commits.
+/// to a gate where it waits. `origin` says what started it (`manual`). Its
+/// tools are the shipped ToolGate's (story 3.6): `table_write` with the
+/// plan's row tool, and no runner. See the module docs for the order of the
+/// commits.
 ///
 /// A store error once the run exists never leaves it `running` unsaid: the
 /// engine tries once to record how the run ended (see
@@ -358,7 +388,8 @@ pub async fn run_plan(
 ) -> Result<RunOutcome, RunError> {
     let writer = store.writer();
     let exec = move |actor: Actor, cmd: WriteCommand| writer.exec(actor, cmd);
-    run_on(store, &exec, started_by, origin, plan, cancel, None).await
+    let tooling = Tooling::shipped(store, plan);
+    run_on(store, &exec, started_by, origin, plan, cancel, tooling).await
 }
 
 /// [`run_plan`] with a tool runner: tests only (story 3.3, owner condition
@@ -375,7 +406,12 @@ pub async fn run_plan_with_tools(
     tools: Arc<dyn ToolRunner>,
 ) -> Result<RunOutcome, RunError> {
     let refusals = Arc::new(Refusals::default());
-    let gate = ToolGate::over(tools, refusals.clone());
+    let gate = ToolGate::over(
+        tools,
+        Arc::new(StoreRowWriter::new(store)),
+        plan.row_tool.clone(),
+        refusals.clone(),
+    );
     let twice = gate.duplicates();
     if !twice.is_empty() {
         return Err(RunError::Tools(format!(
@@ -383,24 +419,22 @@ pub async fn run_plan_with_tools(
             twice.join(", ")
         )));
     }
+    // Review round 1, R5: a runner never takes a built-in tool's id.
+    let shadowing = gate.shadowing();
+    if !shadowing.is_empty() {
+        return Err(RunError::Tools(format!(
+            "its runner declares the built-in tool id(s) {}, which only the built-in tools hold; no run was created",
+            shadowing.join(", ")
+        )));
+    }
     let writer = store.writer();
     let exec = move |actor: Actor, cmd: WriteCommand| writer.exec(actor, cmd);
-    let tooling = Tooling::new(gate, refusals);
-    run_on(
-        store,
-        &exec,
-        started_by,
-        origin,
-        plan,
-        cancel,
-        Some(tooling),
-    )
-    .await
+    let tooling = Tooling { gate, refusals };
+    run_on(store, &exec, started_by, origin, plan, cancel, tooling).await
 }
 
 /// [`run_plan`], with every write command executed by `exec` (the seam for
-/// the tests of a store that fails a command) and the tools (a ToolGate),
-/// if any.
+/// the tests of a store that fails a command) and the tools (a ToolGate).
 async fn run_on(
     store: &Store,
     exec: Exec<'_>,
@@ -408,11 +442,13 @@ async fn run_on(
     origin: &str,
     plan: &RunPlan,
     cancel: CancellationToken,
-    tools: Option<Tooling>,
+    tools: Tooling,
 ) -> Result<RunOutcome, RunError> {
     if plan.steps.is_empty() {
         return Err(RunError::NoSteps(plan.workflow.clone()));
     }
+    // Story 3.6: what each step declares it writes, before any row.
+    check_writes(plan)?;
     // Story 3.5: every step's schema is compiled before any row is written.
     let schemas = compile_schemas(plan)?;
     let run_id = new_id();
@@ -438,9 +474,44 @@ async fn run_on(
         plan,
         schemas: &schemas,
         cancel,
-        tools: tools.as_ref(),
+        tools: &tools,
     };
     run.drive_to_outcome(Progress::default()).await
+}
+
+/// Story 3.6 (AD-21, AD-36): refuses a plan, before anything is written,
+/// whose step declares a table on a gate (a gate makes no model call) or a
+/// table of another team than its seat's (a seat writes only its own
+/// team's tables), or any document (versioned from story 3.6b on). The
+/// words name config ids only.
+fn check_writes(plan: &RunPlan) -> Result<(), RunError> {
+    for step in &plan.steps {
+        let refused = |why: String| RunError::Writes {
+            step: step.key.clone(),
+            why,
+        };
+        if let Some(document) = &step.document {
+            return Err(refused(format!(
+                "it declares the document `{document}`, and documents are versioned from story 3.6b on, so this version writes none"
+            )));
+        }
+        let Some(table) = &step.table else {
+            continue;
+        };
+        if matches!(step.hand_off, HandOff::Gate { .. }) {
+            return Err(refused(format!(
+                "it is a gate and declares the table `{}`; a gate makes no model call, so it writes no table",
+                table.id
+            )));
+        }
+        if table.team != step.seat_team {
+            return Err(refused(format!(
+                "it declares the table `{}` of team `{}`, and its seat `{}` is in team `{}`; a seat writes only its own team's tables (AD-21)",
+                table.id, table.team, step.seat, step.seat_team
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Story 3.4 (AD-8, AD-15, AD-16, AD-36; Question 1): goes on with the run
@@ -466,6 +537,7 @@ pub async fn continue_run(
     if plan.steps.is_empty() {
         return Err(RunError::NoSteps(plan.workflow.clone()));
     }
+    check_writes(plan)?;
     let schemas = compile_schemas(plan)?;
     let reader = store.reader()?;
     let Some(run) = reader.run(run_id)? else {
@@ -509,6 +581,7 @@ pub async fn continue_run(
     drop(reader);
     let writer = store.writer();
     let exec = move |actor: Actor, cmd: WriteCommand| writer.exec(actor, cmd);
+    let tooling = Tooling::shipped(store, plan);
     let run = Run {
         store,
         exec: &exec,
@@ -517,7 +590,7 @@ pub async fn continue_run(
         plan,
         schemas: &schemas,
         cancel,
-        tools: None,
+        tools: &tooling,
     };
     run.drive_to_outcome(progress).await
 }
@@ -608,32 +681,36 @@ enum StepEnd {
     Waiting,
 }
 
-/// The tools of a run made with a runner: the ToolGate
-/// [`run_plan_with_tools`] built over it (the only holder and caller of the
-/// runner, AD-11), the refusals ToolGate audited (written to the store
-/// after each check) and the specs the model is offered.
+/// The tools of a run: its ToolGate (the shipped one, or the one
+/// [`run_plan_with_tools`] built over a runner, the only holder and caller
+/// of the runner, AD-11) and the refusals ToolGate audited (written to the
+/// store after each check).
 struct Tooling {
     gate: ToolGate,
     refusals: Arc<Refusals>,
-    specs: Vec<ToolSpec>,
 }
 
 impl Tooling {
-    fn new(gate: ToolGate, refusals: Arc<Refusals>) -> Tooling {
-        let specs = gate
-            .manifests()
-            .iter()
-            .map(|m| ToolSpec {
-                name: m.name.clone(),
-                description: format!("The tool `{}`.", m.name),
-                input_schema_json: "{\"type\":\"object\"}".into(),
-            })
-            .collect();
-        Tooling {
-            gate,
-            refusals,
-            specs,
-        }
+    /// The shipped gate (story 3.6): `table_write` through the engine's
+    /// row-writer port over `store`, with the plan's row tool.
+    fn shipped(store: &Store, plan: &RunPlan) -> Tooling {
+        let refusals = Arc::new(Refusals::default());
+        let gate = ToolGate::shipped(
+            Arc::new(StoreRowWriter::new(store)),
+            plan.row_tool.clone(),
+            refusals.clone(),
+        );
+        Tooling { gate, refusals }
+    }
+}
+
+/// What ToolGate needs of `step` (story 3.6): its seat's grants and team,
+/// and the table it declares.
+fn step_tools(step: &StepPlan) -> StepTools {
+    StepTools {
+        grants: step.grants.clone(),
+        seat_team: step.seat_team.clone(),
+        table: step.table.clone(),
     }
 }
 
@@ -684,7 +761,7 @@ struct Run<'a> {
     /// The compiled output schema of each plan step, by index.
     schemas: &'a [Option<Compiled>],
     cancel: CancellationToken,
-    tools: Option<&'a Tooling>,
+    tools: &'a Tooling,
 }
 
 /// The latest attempt of each step key among `rows`.
@@ -1138,11 +1215,12 @@ impl Run<'_> {
                 inputs: journaled,
                 taint,
                 prompt: assembled.parts,
-                // Story 3.6, the store slice: the attempt's seat, and no
-                // table yet (the ToolGate slice declares it).
+                // Story 3.6 (AD-21): the attempt's seat and the one table
+                // its step declares, which the store checks every row
+                // write against.
                 writes: AttemptWrites {
                     seat: step.seat.clone(),
-                    table: None,
+                    table: step.table.as_ref().map(|t| t.id.clone()),
                     document: None,
                 },
             },
@@ -1162,8 +1240,13 @@ impl Run<'_> {
             step: step.key.clone(),
         };
         // The taint the next reservation carries: the attempt's, then
-        // tainted once a tool result is appended.
+        // tainted once an untrusted tool result is appended (an engine
+        // result leaves it as it is).
         let mut carry = taint;
+        // Story 3.6 (AD-46): what this step is offered, and ToolGate's view
+        // of it.
+        let facts = step_tools(step);
+        let offered = self.tools.gate.offered(&facts);
         // Story 3.5 (AD-36): the repair call's own parts, once the final
         // message failed its schema and a turn and time remain; `repaired`
         // once that call is reserved (at most one per attempt).
@@ -1209,7 +1292,7 @@ impl Run<'_> {
                 // asks for one message that matches the schema.
                 tools: match purpose {
                     CallPurpose::Repair => Vec::new(),
-                    CallPurpose::Turn => self.tools.map(|t| t.specs.clone()).unwrap_or_default(),
+                    CallPurpose::Turn => offered.clone(),
                 },
                 max_output_tokens: step.max_output_tokens,
             };
@@ -1406,10 +1489,6 @@ impl Run<'_> {
                 }
                 return self.end_turn(step, row, call_id, out, carry, progress);
             }
-            let Some(tools) = self.tools else {
-                let why = tool_words(&out);
-                return self.fail(step, row, Some((call_id, out.usage)), why, progress);
-            };
             // The iteration cap, from the journal: a turn that asks for
             // tools needs one more turn, which the cap may not allow.
             let made = self.store.reader()?.calls_for_step(&row.id)?.len() as u32;
@@ -1437,14 +1516,22 @@ impl Run<'_> {
                 },
             )?;
             let mut results = Vec::new();
+            let mut untrusted = false;
             for call in &out.tool_calls {
                 match self
-                    .tool_call(tools, step, row, &seat, call, carry, deadline, progress)
+                    .tool_call(&facts, step, row, &seat, call, carry, deadline, progress)
                     .await?
                 {
-                    ToolEnd::Result(content) => results.push(Part::ToolResult {
+                    ToolEnd::Result(content) => {
+                        untrusted = true;
+                        results.push(Part::ToolResult {
+                            call_id: call.id.clone(),
+                            content,
+                        });
+                    }
+                    ToolEnd::Engine(result) => results.push(Part::EngineResult {
                         call_id: call.id.clone(),
-                        content,
+                        result,
                     }),
                     ToolEnd::Stopped(end) => return Ok(end),
                 }
@@ -1463,8 +1550,12 @@ impl Run<'_> {
                 parts: results,
             });
             // Tool results are untrusted (AD-10): the attempt is tainted,
-            // committed with the next call's reservation.
-            carry = Taint::Tainted;
+            // committed with the next call's reservation. An engine result
+            // (a successful `table_write`, AD-10 as amended 2026-11-24) is
+            // built from engine values only and leaves it as it is.
+            if untrusted {
+                carry = Taint::Tainted;
+            }
         }
     }
 
@@ -1518,13 +1609,16 @@ impl Run<'_> {
 
     /// One tool call the model asked for: the deadline, the tool-call cap
     /// from the journal, then ToolGate's admission (uses counted per step
-    /// run), then the call journaled `issued` before ToolGate runs it,
-    /// within the wall-clock `deadline`. The name is journaled and audited
-    /// as [`tool_label`] gives it.
+    /// run; story 3.6: the seat's grants, the class and, for `table_write`,
+    /// the declared table), then the call journaled `issued` before ToolGate
+    /// runs it, within the wall-clock `deadline`. The name is journaled and
+    /// audited as ToolGate labels it. A successful `table_write` was
+    /// finished by the store's row command itself (`succeeded`, its result
+    /// kind `engine`): it comes back as the engine's result.
     #[allow(clippy::too_many_arguments)]
     async fn tool_call(
         &self,
-        tools: &Tooling,
+        facts: &StepTools,
         step: &StepPlan,
         row: &StepRow,
         seat: &Actor,
@@ -1533,6 +1627,7 @@ impl Run<'_> {
         deadline: tokio::time::Instant,
         progress: &mut Progress,
     ) -> Result<ToolEnd, StoreError> {
+        let tools = self.tools;
         // Nothing starts once the deadline has passed (review P7).
         if tokio::time::Instant::now() >= deadline {
             let end = self.fail_with_item(
@@ -1546,18 +1641,24 @@ impl Run<'_> {
             )?;
             return Ok(ToolEnd::Stopped(end));
         }
-        // The model's name for the tool, as the journal may hold it.
-        let call = &ToolCall {
-            name: tools.gate.label(&call.name),
-            ..call.clone()
-        };
+        // The model's name for the tool, as the journal may hold it; the
+        // gate labels the call it is handed itself (once).
+        let name = tools.gate.label(&call.name);
         let journaled = self.store.reader()?.tool_calls(&row.id)?;
         let used = journaled.iter().filter(|t| t.status != "refused").count() as u32;
-        let record = |status: &str| WriteCommand::RecordToolCall {
-            tool_call_id: new_id(),
+        // AD-8: the call's key is its attempt and its sequence; its row id
+        // is the one a row write names.
+        let place = CallPlace {
             step_run_id: row.id.clone(),
             call_seq: journaled.len() as i64 + 1,
-            tool: call.name.clone(),
+            tool_call_id: new_id(),
+            taint: carry,
+        };
+        let record = |status: &str| WriteCommand::RecordToolCall {
+            tool_call_id: place.tool_call_id.clone(),
+            step_run_id: row.id.clone(),
+            call_seq: place.call_seq,
+            tool: name.clone(),
             status: status.into(),
         };
         if used >= step.limits.tool_calls {
@@ -1573,7 +1674,7 @@ impl Run<'_> {
             )?;
             return Ok(ToolEnd::Stopped(end));
         }
-        let admitted = tools.gate.admit(seat, &row.id, call);
+        let admitted = tools.gate.admit(seat, facts, &place, call);
         for event in tools.refusals.take() {
             self.exec(
                 event.actor,
@@ -1594,26 +1695,27 @@ impl Run<'_> {
                 return Ok(ToolEnd::Stopped(end));
             }
         };
-        let issued = record("issued");
-        let WriteCommand::RecordToolCall { tool_call_id, .. } = &issued else {
-            unreachable!("record builds a RecordToolCall");
-        };
-        let tool_call_id = tool_call_id.clone();
         // Committed before the tool runs (AD-8).
-        self.exec(engine(), issued)?;
+        self.exec(engine(), record("issued"))?;
         let child = self.cancel.child_token();
         let running = tools.gate.run(permit, TokenSignal::signal(child.clone()));
-        // A tool done at the deadline loses to it (review P7).
-        let result = tokio::select! {
-            biased;
-            () = tokio::time::sleep_until(deadline) => {
-                child.cancel();
-                None
+        let result = if name == TABLE_WRITE {
+            // The row write commits on the store's writer before the gate
+            // answers: its outcome is reported as it is, never raced.
+            Some(running.await)
+        } else {
+            // A tool done at the deadline loses to it (review P7).
+            tokio::select! {
+                biased;
+                () = tokio::time::sleep_until(deadline) => {
+                    child.cancel();
+                    None
+                }
+                result = running => Some(result),
             }
-            result = running => Some(result),
         };
         let finish = |status: &str| WriteCommand::FinishToolCall {
-            tool_call_id: tool_call_id.clone(),
+            tool_call_id: place.tool_call_id.clone(),
             status: status.into(),
         };
         match result {
@@ -1630,17 +1732,36 @@ impl Run<'_> {
                 )?;
                 Ok(ToolEnd::Stopped(end))
             }
-            Some(Ok(content)) => {
+            // Finished `succeeded`, result kind `engine`, by the row
+            // command's own transaction (AD-10 as amended).
+            Some(Ok(GateOutput::Engine(result))) => Ok(ToolEnd::Engine(result)),
+            Some(Ok(GateOutput::Untrusted(content))) => {
                 self.exec(engine(), finish("succeeded"))?;
                 Ok(ToolEnd::Result(content))
             }
-            Some(Err(why)) => {
+            Some(Err(GateError::Tool(why))) => {
                 self.exec(engine(), finish("failed"))?;
                 // The tool's own words are untrusted too (AD-10).
                 Ok(ToolEnd::Result(UntrustedData::text(
-                    format!("tool:{}", call.name),
+                    format!("tool:{name}"),
                     why,
                 )))
+            }
+            Some(Err(GateError::Store(why))) => {
+                // A call still in flight ends `failed`; one the row command
+                // finished stays as it committed.
+                let open = self
+                    .store
+                    .reader()?
+                    .tool_calls(&row.id)?
+                    .iter()
+                    .any(|t| t.id == place.tool_call_id && t.status == "issued");
+                if open {
+                    self.exec(engine(), finish("failed"))?;
+                }
+                let why = format!("tool \"{name}\" could not finish: {why}");
+                let end = self.fail(step, row, None, why, progress)?;
+                Ok(ToolEnd::Stopped(end))
             }
         }
     }
@@ -1862,8 +1983,11 @@ impl Run<'_> {
 
 /// How a tool call ended for the loop.
 enum ToolEnd {
-    /// Its result, to append for the next turn.
+    /// Its untrusted result, to append for the next turn.
     Result(UntrustedData),
+    /// The engine's result of a row write (story 3.6), to append for the
+    /// next turn; it does not taint.
+    Engine(am_domain::EngineResult),
     /// The step ended (a cap, a refusal).
     Stopped(StepEnd),
 }
@@ -2000,6 +2124,7 @@ mod tests {
             config_hash: "0".repeat(64),
             steps: vec![],
             clock: am_testkit::FakeClock::at("2026-11-24T10:00:00Z"),
+            row_tool: None,
         };
         let refused = run_plan(
             &store,
@@ -2050,8 +2175,13 @@ mod tests {
                 provider,
                 prompt: StepPrompt::default(),
                 output_schema: None,
+                grants: Default::default(),
+                seat_team: "core".into(),
+                table: None,
+                document: None,
             }],
             clock: am_testkit::FakeClock::at("2026-11-24T10:00:00Z"),
+            row_tool: None,
         }
     }
 
@@ -2086,7 +2216,7 @@ mod tests {
             "manual",
             plan,
             CancellationToken::new(),
-            None,
+            Tooling::shipped(store, plan),
         )
         .await
     }

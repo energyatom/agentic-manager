@@ -5,6 +5,11 @@
 //!
 //! The sample's ids are department vocabulary and may not appear in `crates/`
 //! (AD-23), so its expectations are read from `fixtures/templates/sample.json`.
+//!
+//! Story 3.6's ToolGate slice (matrix row 40, owner 2026-11-24) supersedes
+//! "no findings" for the sample alone: it loads with exactly one warning,
+//! that its chained flow's fan-out update step cannot write a table until
+//! story 3.14.
 #![forbid(unsafe_code)]
 
 mod common;
@@ -12,7 +17,7 @@ mod common;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use am_config::{ConfigSnapshot, Seat, SourceOutput, Trigger, load};
+use am_config::{ConfigSnapshot, Seat, Severity, SourceOutput, Trigger, load};
 use am_domain::capability::Capability;
 use am_domain::workspace::Access;
 use common::set;
@@ -65,6 +70,28 @@ fn clean_snapshot(root: &Path) -> ConfigSnapshot {
         loaded.findings
     );
     loaded.snapshot.expect("no errors gives a snapshot")
+}
+
+/// The sample's snapshot. Story 3.6's ToolGate slice (matrix row 40,
+/// owner 2026-11-24): the sample loads with exactly one finding, the
+/// warning that its chained flow's fan-out update step cannot write a
+/// table until story 3.14 (`step_writes.rs` pins its words and line); any
+/// other finding fails, as in [`clean_snapshot`].
+fn sample_snapshot() -> ConfigSnapshot {
+    let root = sample();
+    let loaded = load(&root).expect("the template folder exists");
+    let file = format!("workflows/{}.yaml", s(&expect()["chained_flows"]["update"]));
+    let only_that = loaded.findings.len() == 1
+        && loaded.findings[0].file == file
+        && loaded.findings[0].severity == Severity::Warning
+        && loaded.findings[0].message.contains("3.14");
+    assert!(
+        only_that,
+        "{}: only the fan-out warning in {file}: {:#?}",
+        root.display(),
+        loaded.findings
+    );
+    loaded.snapshot.expect("a warning keeps the snapshot")
 }
 
 /// A template YAML file as data, for the run-graph keys the loader accepts
@@ -231,7 +258,7 @@ fn every_role_template_validates_with_its_fields() {
 #[test]
 fn sample_validates_and_holds_its_people_and_teams() {
     let e = expect();
-    let snap = clean_snapshot(&sample());
+    let snap = sample_snapshot();
     let owner = s(&e["owner"]);
     let mut want: BTreeSet<String> = BTreeSet::new();
     for team in e["teams"].as_array().unwrap() {
@@ -308,7 +335,7 @@ fn sample_validates_and_holds_its_people_and_teams() {
 #[test]
 fn sample_table_has_its_key_transitions_view_and_grant() {
     let e = &expect()["table"];
-    let snap = clean_snapshot(&sample());
+    let snap = sample_snapshot();
     let table = &snap.tables()[s(&e["id"])];
     assert_eq!(table.team, s(&e["team"]));
     assert_eq!(table.key.as_deref(), Some(s(&e["key"])));
@@ -347,7 +374,7 @@ fn sample_table_has_its_key_transitions_view_and_grant() {
 #[test]
 fn sample_workflows_have_their_triggers_and_caps() {
     let e = expect();
-    let snap = clean_snapshot(&sample());
+    let snap = sample_snapshot();
     let want: BTreeSet<String> = e["workflows"]
         .as_object()
         .unwrap()
@@ -433,7 +460,7 @@ fn sample_cross_department_flow_fans_out_hands_off_and_has_both_gates() {
     let last = steps.last().unwrap();
     assert_eq!(last["seat"], e["last_seat"]);
     assert!(last["review"].is_null(), "no step-level review: {last:#}");
-    let snap = clean_snapshot(&sample());
+    let snap = sample_snapshot();
     assert!(
         seat(&snap, s(&e["last_seat"])).model.is_none(),
         "a human seat"
@@ -466,7 +493,7 @@ fn sample_chained_and_folder_flows_name_their_seats_folder_and_documents() {
             None => seats.push(s(&step["seat"]).to_string()),
         }
     }
-    let snap = clean_snapshot(&sample());
+    let snap = sample_snapshot();
     for id in strs(&f2["update_seats"]) {
         assert!(seats.contains(&id), "{id} in {seats:?}");
         let instructions = &seat(&snap, &id).instructions;
@@ -512,7 +539,7 @@ fn sample_chained_and_folder_flows_name_their_seats_folder_and_documents() {
 #[test]
 fn sample_folder_is_linked_read_only_to_four_seats() {
     let f3 = &expect()["folder_flow"];
-    let snap = clean_snapshot(&sample());
+    let snap = sample_snapshot();
     let mut linked = BTreeSet::new();
     for (id, seat) in snap.seats() {
         for folder in &seat.folders {
@@ -578,7 +605,7 @@ fn sample_folder_holds_the_synthetic_files() {
 #[test]
 fn sample_grants_follow_the_capabilities_on_the_builtin_provider() {
     let e = expect();
-    let snap = clean_snapshot(&sample());
+    let snap = sample_snapshot();
     for id in strs(&e["capabilities"]["web_search_and_browse"]) {
         let seat = seat(&snap, &id);
         assert!(seat.capabilities[&Capability::WebSearch].on, "{id}");
@@ -609,7 +636,7 @@ fn sample_grants_follow_the_capabilities_on_the_builtin_provider() {
 #[test]
 fn sample_skills_sources_and_knowledge() {
     let e = expect();
-    let snap = clean_snapshot(&sample());
+    let snap = sample_snapshot();
     let skills = e["skills"].as_object().unwrap();
     assert_eq!(
         ids(snap.skills().keys()),

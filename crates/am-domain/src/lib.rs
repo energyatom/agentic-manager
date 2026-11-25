@@ -77,7 +77,8 @@ pub use config_history::{
 };
 pub use config_names::{CONFIG_NAMES, config_name_in, config_name_of, is_config_bearing};
 pub use content::{
-    FileKind, FilePart, Instruction, Taint, TrustedInput, UntrustedContent, UntrustedData,
+    EngineResult, FileKind, FilePart, Instruction, Taint, TrustedInput, UntrustedContent,
+    UntrustedData,
 };
 pub use host::{HostPattern, HostPatternError};
 pub use inbox::{Decision, InboxKind, StepStatus};

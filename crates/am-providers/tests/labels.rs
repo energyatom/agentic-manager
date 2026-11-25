@@ -10,8 +10,10 @@
 //! are hardened (today only the quote is replaced).
 #![forbid(unsafe_code)]
 
+use am_domain::rows::{RowStatus, RowWritten};
 use am_domain::{
-    ChatRequest, FilePart, Instruction, Message, Part, Role, Taint, TrustedInput, UntrustedData,
+    ChatRequest, EngineResult, FilePart, Instruction, Message, Part, Role, Taint, ToolCall,
+    TrustedInput, UntrustedData,
 };
 use am_providers::{AnthropicProvider, OpenAiCompatProvider, render_untrusted_text};
 use am_testkit::FakeEgress;
@@ -185,4 +187,108 @@ fn a_file_fence_label_is_one_line_with_every_field_hardened() {
             "{adapter}: {label:?}"
         );
     }
+}
+
+/// Epic 3 story 6 (AD-10 as amended 2026-11-24; matrix rows 2 and 35): a
+/// successful `table_write`'s result is an `EngineResult`, its own part. In
+/// both adapters' bodies it sits in its call's tool-result position (an
+/// Anthropic `tool_result` block naming the `tool_use_id`, an
+/// OpenAI-compatible `tool` message naming the `tool_call_id`) with the
+/// engine's fixed text, outside any untrusted fence, and both adapters
+/// render the same text (one shared function). Written before the part
+/// exists.
+#[test]
+fn an_engine_result_renders_as_a_tool_result_outside_any_fence() {
+    let result = EngineResult::row_written(&RowWritten {
+        row_id: "0192f0c4-9a3e-7c2b-8d4e-1f2a3b4c5d6e".parse().unwrap(),
+        version: 1,
+        status: RowStatus::Inserted,
+    });
+    let request = ChatRequest {
+        model: "m".into(),
+        system: vec![],
+        messages: vec![
+            Message {
+                role: Role::User,
+                parts: vec![Part::Instruction(Instruction::authored("step text"))],
+            },
+            Message {
+                role: Role::Assistant,
+                parts: vec![Part::ToolCall(ToolCall {
+                    id: "call-1".into(),
+                    name: "table_write".into(),
+                    arguments_json: r#"{"table":"entries","data":{"ref":"r-1"}}"#.into(),
+                })],
+            },
+            Message {
+                role: Role::User,
+                parts: vec![Part::EngineResult {
+                    call_id: "call-1".into(),
+                    result: result.clone(),
+                }],
+            },
+        ],
+        tools: vec![],
+        max_output_tokens: 64,
+    };
+    let egress = FakeEgress::new();
+    let anthropic = AnthropicProvider::new(egress.clone(), "test-anthropic")
+        .request_body(&request)
+        .unwrap();
+    let compatible = OpenAiCompatProvider::new(egress, "test-local", "http://127.0.0.1:1/v1")
+        .request_body(&request)
+        .unwrap();
+
+    // The text of a tool result's content: a string, or text blocks.
+    let content_text = |content: &Value| -> String {
+        match content {
+            Value::String(s) => s.clone(),
+            Value::Array(blocks) => blocks
+                .iter()
+                .map(|b| b["text"].as_str().unwrap_or_default().to_string())
+                .collect::<Vec<_>>()
+                .join(""),
+            other => panic!("a tool result's content: {other}"),
+        }
+    };
+
+    let blocks: Vec<&Value> = anthropic["messages"]
+        .as_array()
+        .expect("messages")
+        .iter()
+        .flat_map(|m| m["content"].as_array().into_iter().flatten())
+        .filter(|b| b["type"] == "tool_result")
+        .collect();
+    assert_eq!(blocks.len(), 1, "one tool result: {anthropic:#}");
+    assert_eq!(blocks[0]["tool_use_id"], "call-1");
+    let in_anthropic = content_text(&blocks[0]["content"]);
+
+    let tools: Vec<&Value> = compatible["messages"]
+        .as_array()
+        .expect("messages")
+        .iter()
+        .filter(|m| m["role"] == "tool")
+        .collect();
+    assert_eq!(tools.len(), 1, "one tool message: {compatible:#}");
+    assert_eq!(tools[0]["tool_call_id"], "call-1");
+    let in_compatible = content_text(&tools[0]["content"]);
+
+    for (adapter, text, body) in [
+        ("anthropic", &in_anthropic, &anthropic),
+        ("openai-compatible", &in_compatible, &compatible),
+    ] {
+        assert!(
+            text.contains(result.text()),
+            "{adapter}: the engine's text: {text}"
+        );
+        assert!(
+            !text.contains("<untrusted-data") && !text.contains("</untrusted-data>"),
+            "{adapter}: outside any fence: {text}"
+        );
+        assert!(
+            !body.to_string().contains("untrusted-data"),
+            "{adapter}: nothing in the body is fenced: {body:#}"
+        );
+    }
+    assert_eq!(in_anthropic, in_compatible, "one shared rendering");
 }

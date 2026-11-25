@@ -45,6 +45,16 @@ pub(crate) fn render_trusted_input(label: &str, text: &str) -> String {
     )
 }
 
+/// The engine's result of a successful `table_write` (AD-10 as amended
+/// 2026-11-24; story 3.6): its call's tool result, the engine's fixed words
+/// (the row id, the version and the status), outside any fence, since
+/// ToolGate builds it from engine values only. Every adapter renders
+/// `Part::EngineResult` through this one function. Fence markers are
+/// neutralised all the same, though the text holds none.
+pub(crate) fn render_engine_result(result: &am_domain::EngineResult) -> String {
+    neutralise_markers(result.text())
+}
+
 /// [`neutralise`], and every opening fence tag (`<untrusted-`, any letter
 /// case) escaped too.
 fn neutralise_markers(text: &str) -> String {

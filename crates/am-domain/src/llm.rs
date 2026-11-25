@@ -4,7 +4,9 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use crate::content::{FileKind, Instruction, TrustedInput, UntrustedContent, UntrustedData};
+use crate::content::{
+    EngineResult, FileKind, Instruction, TrustedInput, UntrustedContent, UntrustedData,
+};
 use crate::{BoxFuture, CancelSignal};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -48,6 +50,14 @@ pub enum Part {
     ToolResult {
         call_id: String,
         content: UntrustedData,
+    },
+    /// Story 3.6 (AD-10 as amended 2026-11-24): the result of a successful
+    /// `table_write` (user role only), in its call's tool-result position.
+    /// ToolGate builds it from engine values alone, so it is not fenced and
+    /// does not taint; an error result is a [`Part::ToolResult`].
+    EngineResult {
+        call_id: String,
+        result: EngineResult,
     },
 }
 

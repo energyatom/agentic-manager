@@ -223,20 +223,41 @@ fn each_role_template_exits_zero() {
     }
 }
 
-#[test]
-fn sample_company_template_exits_zero() {
-    // The sample's id is department vocabulary (AD-23); it is read from the
-    // expectations file under fixtures/.
-    let expect = std::fs::read_to_string(
+/// The sample's expectations (its ids are department vocabulary, AD-23,
+/// so they are read from the file under fixtures/).
+fn sample_expect() -> serde_json::Value {
+    let text = std::fs::read_to_string(
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/templates/sample.json"),
     )
     .expect("fixtures/templates/sample.json");
-    let name = expect
-        .split_once("\"sample\": \"")
-        .and_then(|(_, rest)| rest.split_once('"'))
-        .map(|(name, _)| name)
-        .expect("the sample's folder name");
-    assert_clean(&templates().join("samples").join(name));
+    serde_json::from_str(&text).unwrap()
+}
+
+/// The sample company's template folder.
+fn sample() -> PathBuf {
+    let name = sample_expect()["sample"]
+        .as_str()
+        .expect("the sample's folder name")
+        .to_string();
+    templates().join("samples").join(name)
+}
+
+/// Story 3.6's ToolGate slice (matrix row 40, owner 2026-11-24) supersedes
+/// "0 errors, 0 warnings" for the sample alone: it exits 0 with exactly one
+/// warning (pinned by `the_sample_validates_with_the_one_fan_out_warning`).
+fn assert_sample_warned_once(path: &Path) {
+    let (code, out, err) = validate(&["--template", path.to_str().unwrap()]);
+    assert_eq!(code, 0, "{}:\n{out}{err}", path.display());
+    assert!(
+        out.contains("0 errors, 1 warning") && !out.contains("0 errors, 1 warnings"),
+        "{}:\n{out}",
+        path.display()
+    );
+}
+
+#[test]
+fn sample_company_template_exits_zero() {
+    assert_sample_warned_once(&sample());
 }
 
 #[test]
@@ -247,9 +268,70 @@ fn every_template_folder_exits_zero() {
         10,
         "1 department, 8 roles, 1 sample: {folders:?}"
     );
+    let sample = sample();
     for folder in folders {
-        assert_clean(&folder);
+        if folder == sample {
+            assert_sample_warned_once(&folder);
+        } else {
+            assert_clean(&folder);
+        }
     }
+}
+
+/// Story 3.6's ToolGate slice (matrix row 40, owner 2026-11-24): the
+/// Company A sample's chained flow has a fan-out step whose seats hold
+/// `table_write`, which cannot write a table until story 3.14. `agentic
+/// validate --template` on the sample exits 0 and prints exactly one
+/// warning, at that step of the update workflow, naming the step, a table
+/// and story 3.14, with its fix on the next line; the summary is "0
+/// errors, 1 warning". The sample's other fan-out steps print nothing.
+#[test]
+fn the_sample_validates_with_the_one_fan_out_warning() {
+    let sample = sample();
+    let workflow = sample_expect()["chained_flows"]["update"]
+        .as_str()
+        .expect("the chained flow's update workflow")
+        .to_string();
+    let file = format!("workflows/{workflow}.yaml");
+    let text = std::fs::read_to_string(sample.join(&file)).unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    // The one step of the workflow that lists `seats:`, and its lines.
+    let mut steps: Vec<(String, Vec<usize>)> = Vec::new();
+    for (i, l) in lines.iter().enumerate() {
+        if let Some(id) = l.trim_start().strip_prefix("- id: ") {
+            steps.push((id.to_string(), vec![i + 1]));
+        } else if let Some((_, block)) = steps.last_mut()
+            && (l.starts_with("    ") || l.trim().is_empty())
+        {
+            block.push(i + 1);
+        }
+    }
+    let fan_out: Vec<&(String, Vec<usize>)> = steps
+        .iter()
+        .filter(|(_, block)| {
+            block
+                .iter()
+                .any(|n| lines[n - 1].trim_start().starts_with("seats:"))
+        })
+        .collect();
+    assert_eq!(fan_out.len(), 1, "one fan-out step in {file}: {steps:?}");
+    let (step, block) = fan_out[0];
+
+    let (code, out, err) = validate(&["--template", sample.to_str().unwrap()]);
+
+    assert_eq!(code, 0, "warnings alone exit 0:\n{out}{err}");
+    let warned: Vec<&str> = out.lines().filter(|l| l.contains(": warning: ")).collect();
+    assert_eq!(warned.len(), 1, "exactly one warning:\n{out}");
+    let warning = warned[0];
+    let at = block
+        .iter()
+        .any(|n| warning.starts_with(&format!("{file}:{n}: warning: ")));
+    assert!(at, "at the step `{step}` of {file} ({block:?}):\n{out}");
+    for word in [step.as_str(), "fan-out", "table", "3.14"] {
+        assert!(warning.contains(word), "names `{word}`: {warning}");
+    }
+    has_finding_with_fix(&out, warning);
+    assert!(out.contains("0 errors, 1 warning"), "{out}");
 }
 
 // Story 1.13: the project id and the seed reference files.

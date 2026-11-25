@@ -9,12 +9,15 @@
 //! from journal rows (`model_calls`, `tool_calls`, the attempt's persisted
 //! `started_at`), never from memory.
 //!
-//! The shipped binary has no tool: `run_plan` takes none, and a tool
-//! request fails the step in story 3.1's words. Tools exist only through
-//! `run_plan_with_tools`, a constructor parameter shipped code never passes
-//! (owner condition 2; `cargo xtask seam-guard`), here with am-testkit's
-//! `FixtureTool`. No network, no real model; the wall-clock cap runs on
-//! tokio's paused time. Written before the loop exists.
+//! The shipped binary runs no runner tool: `run_plan` takes none. Runner
+//! tools exist only through `run_plan_with_tools`, a constructor parameter
+//! shipped code never passes (owner condition 2; `cargo xtask seam-guard`),
+//! here with am-testkit's `FixtureTool`. Story 3.6 (AD-11): every tool
+//! request goes through ToolGate, `run_plan`'s too, so a request for a tool
+//! the run does not have is refused by ToolGate in its words (superseding
+//! story 3.1's "tools are not available"). No network, no real model; the
+//! wall-clock cap runs on tokio's paused time. Written before the loop
+//! exists.
 #![forbid(unsafe_code)]
 
 use std::path::{Path, PathBuf};
@@ -75,8 +78,25 @@ fn step(provider: Arc<dyn LlmProvider>, limits: Limits) -> StepPlan {
         provider,
         prompt: am_engine::prompt::StepPrompt::default(),
         output_schema: None,
+        // Story 3.6 (AD-11, AD-46): ToolGate checks the seat's grants, so
+        // the seat is granted the fixture tool and this file's test-local
+        // runner tools by name; no table, no document, no row read.
+        grants: GRANTED.iter().map(|g| g.to_string()).collect(),
+        seat_team: "core".into(),
+        table: None,
+        document: None,
     }
 }
+
+/// The tools this file's seats are granted (story 3.6): am-testkit's
+/// fixture tool and the test-local runner's tools.
+const GRANTED: [&str; 5] = [
+    FixtureTool::NAME,
+    "act_on_it",
+    "slow_read",
+    "fast_read",
+    "once_read",
+];
 
 fn plan(steps: Vec<StepPlan>) -> RunPlan {
     RunPlan {
@@ -84,6 +104,8 @@ fn plan(steps: Vec<StepPlan>) -> RunPlan {
         config_hash: HASH.into(),
         steps,
         clock: am_testkit::FakeClock::at("2026-11-24T10:00:00Z"),
+        // No row tool: no step here declares a table (story 3.6).
+        row_tool: None,
     }
 }
 
@@ -429,17 +451,24 @@ async fn counts_a_fresh_reader_derives_match_the_engines() {
     drop(reopened);
 }
 
-/// Row 25: with no tools (`run_plan`, as the binary runs), a tool request
-/// fails the step in story 3.1's words, with no `tool_calls` row and no
-/// Failure item (no cap was hit).
+/// Row 25, superseded by story 3.6 (AD-11; plan matrix rows 8 and 9): with
+/// no runner (`run_plan`, as the binary runs), a tool request still goes
+/// through ToolGate. The fixture tool's name is no tool this run has (it
+/// is refused as `unknown:<sha256>`); `web_search` is a built-in the seat is
+/// not granted. Either way: no tool offered, one tool call journaled
+/// `refused`, one `toolgate.refused` audit entry, the step and the run fail
+/// in ToolGate's words, and no Failure item (no cap was hit).
 #[tokio::test]
-async fn with_no_tools_a_tool_request_fails_as_before() {
-    let p = project();
+async fn with_no_tools_a_tool_request_is_refused_by_toolgate() {
     for name in [FixtureTool::NAME, "web_search"] {
+        let p = project();
         let llm = Arc::new(FakeLlm::new(vec![
             ScriptedTurn::text("let me look").tool_call(name, "{}"),
         ]));
-        let plan = plan(vec![step(llm.clone(), Limits::default())]);
+        let plan = plan(vec![StepPlan {
+            grants: Default::default(),
+            ..step(llm.clone(), Limits::default())
+        }]);
 
         let outcome = run_plan(&p.store, owner(), "manual", &plan, CancellationToken::new())
             .await
@@ -448,21 +477,40 @@ async fn with_no_tools_a_tool_request_fails_as_before() {
         assert_eq!(outcome.status, "failed", "{name}");
         let reason = outcome.reason.clone().expect("in words");
         assert!(
-            reason.contains("tools are not available in this version"),
-            "{name}: {reason}"
+            reason.contains("was refused"),
+            "{name}: ToolGate's words: {reason}"
+        );
+        assert!(
+            !reason.contains("tools are not available"),
+            "{name}: story 3.1's words are gone: {reason}"
         );
         assert!(
             llm.requests()[0].tools.is_empty(),
             "{name}: no tool offered"
         );
+        let r = rows(&p.db);
+        assert_eq!(r.tools.len(), 1, "{name}: {:#?}", r.tools);
+        assert_eq!(r.tools[0].status, "refused", "{name}");
+        assert!(r.items.is_empty(), "{name}: no Failure item");
         let reader = Reader::open(&p.db).unwrap();
-        let run = reader.run(&outcome.run_id).unwrap().unwrap();
-        let steps = reader.steps(&run.id).unwrap();
-        assert!(
-            reader.tool_calls(&steps[0].id).unwrap().is_empty(),
-            "{name}"
-        );
-        assert!(reader.inbox_items(&run.id).unwrap().is_empty(), "{name}");
+        let mut audit = Vec::new();
+        reader.export_audit_jsonl(&mut audit).unwrap();
+        let audit = String::from_utf8(audit).unwrap();
+        let refusals: Vec<&str> = audit
+            .lines()
+            .filter(|l| l.contains("\"action\":\"toolgate.refused\""))
+            .collect();
+        assert_eq!(refusals.len(), 1, "{name}: {audit}");
+        assert!(refusals[0].contains("step:work"), "{name}: {}", refusals[0]);
+        if name == FixtureTool::NAME {
+            assert!(reason.contains("unknown:"), "{name}: labelled: {reason}");
+            assert!(!reason.contains(name), "{name}: never raw: {reason}");
+        } else {
+            assert!(
+                reason.contains("web_search") && reason.contains("not granted"),
+                "{name}: {reason}"
+            );
+        }
     }
 }
 
@@ -724,7 +772,8 @@ async fn a_fresh_attempt_started_just_before_a_second_boundary_waits_the_full_ca
 /// P2: ToolGate refuses every action class but `Read` on this path (a
 /// local-write or external-effect tool waits for stories 3.6 and 4.8): the
 /// call is refused and journaled `refused`, the step fails in words, and
-/// the runner is never asked to run it.
+/// the runner is never asked to run it. Story 3.6: still so for a granted
+/// runner tool; of the local-write class only `table_write` runs.
 #[tokio::test]
 async fn a_tool_whose_class_is_not_read_is_refused_and_never_runs() {
     for class in [ManifestClass::LocalWrite, ManifestClass::ExternalEffect] {
@@ -752,7 +801,13 @@ async fn a_tool_whose_class_is_not_read_is_refused_and_never_runs() {
 
         assert!(tools.ran().is_empty(), "{class:?}: the runner never ran it");
         assert_eq!(outcome.status, "failed", "{class:?}: {outcome:?}");
-        assert!(outcome.reason.is_some(), "{class:?}: in words");
+        // Story 3.6: the seat is granted `act_on_it`, so the refusal is the
+        // class's (only `table_write` of the local-write class runs).
+        let reason = outcome.reason.clone().expect("in words");
+        assert!(
+            reason.contains("act_on_it") && reason.contains(class.as_str()),
+            "{class:?}: names the tool and its class: {reason}"
+        );
         assert_eq!(llm.calls(), 1, "{class:?}");
         let r = rows(&p.db);
         assert_eq!(r.tools.len(), 1, "{class:?}: {:#?}", r.tools);
@@ -1405,7 +1460,9 @@ async fn the_repair_request_after_a_tool_turn_holds_no_tool_part_and_no_tools() 
             .flat_map(|m| m.parts.iter())
             .all(|p| !matches!(
                 p,
-                am_domain::Part::ToolCall(_) | am_domain::Part::ToolResult { .. }
+                am_domain::Part::ToolCall(_)
+                    | am_domain::Part::ToolResult { .. }
+                    | am_domain::Part::EngineResult { .. }
             )),
         "no tool part: {:#?}",
         repair.messages

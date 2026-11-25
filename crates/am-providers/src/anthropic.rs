@@ -11,7 +11,8 @@ use base64::Engine as _;
 use serde_json::{Value, json};
 
 use crate::common::{
-    drive_sse, file_label, render_trusted_input, render_untrusted_text, send_cancellable,
+    drive_sse, file_label, render_engine_result, render_trusted_input, render_untrusted_text,
+    send_cancellable,
 };
 
 pub const ANTHROPIC_HOST: &str = "api.anthropic.com";
@@ -76,6 +77,9 @@ impl AnthropicProvider {
                             json!({"type": "tool_result", "tool_use_id": call_id, "content": text}),
                         )
                     }
+                    (Role::User, Part::EngineResult { call_id, result }) => content.push(
+                        json!({"type": "tool_result", "tool_use_id": call_id, "content": render_engine_result(result)}),
+                    ),
                     (Role::Assistant, Part::AssistantText(t)) => {
                         content.push(json!({"type": "text", "text": t}))
                     }
@@ -93,7 +97,8 @@ impl AnthropicProvider {
                         Part::Instruction(_)
                         | Part::Trusted(_)
                         | Part::Untrusted(_)
-                        | Part::ToolResult { .. },
+                        | Part::ToolResult { .. }
+                        | Part::EngineResult { .. },
                     ) => {
                         return Err(ProviderError::Protocol(
                             "a part was placed in the wrong role".into(),

@@ -3,16 +3,16 @@ title: 'table_write through ToolGate'
 type: feature
 ticket: 23
 created: '2026-11-24'
-status: approved
-baseline_revision: 'ec930b6f82943ca36c640f793d3e0686619cd7d6'
+status: built
+baseline_revision: '8aab0ea8835fb4fe8dffa7e76b2ee39624147b23'
 after: [6]
 route: full
 route_source: auto
 risk: high
 review: quick
 review_source: pinned
-lenses_ran: []
-review_loop_iteration: 0
+lenses_ran: [correctness, adversarial-security]
+review_loop_iteration: 2
 followup_review_recommended: false
 context:
   - '{project-root}/docs/owner-standing-rules.md'
@@ -303,7 +303,7 @@ All FakeLlm and FakeClock; no network; no real model. The tester splits these fr
 
 ## Implementation Notes
 
-### API the tests fix (tester, 2026-11-24): the ToolGate slice's items
+### API the tests fix (ToolGate slice)
 
 *Moved word for word from 3.6's plan in the third re-slice (2026-11-24); the store slice's plan keeps the store items, 3.6c's and 3.6b's theirs. Lines the splits changed are marked (re-slice).*
 
@@ -356,6 +356,438 @@ All FakeLlm and FakeClock; no network; no real model. The tester splits these fr
 - The planted forms refuse a second `write_row` in `row_writer.rs` and any `fn write_row` in `toolgate.rs`: a fake `RowWriter` for ToolGate's unit tests belongs in `crates/am-engine/tests/`.
 - `toolgate.rs`'s existing tests grant the runner's tool by name (`granted(&["lookup"])`), and `loop_caps.rs`'s `step` grants the fixture tool and its test-local runner tools (`GRANTED`); the class test grants `act_on_it` so its refusal stays the class's.
 
-### Red run of the ToolGate slice
+**Added by the ToolGate slice's tester (2026-11-24).** The items above stand. These are the items the new tests fix, with the choices the plan left open (tester's choice where marked):
 
-*(The tester logs it here after the store slice merges.)*
+*Derives.* Every new am-domain type derives `Debug, Clone, PartialEq, Eq`; `ColumnKind`, `RowStatus` and `RowWritten` also derive `Copy`. The tests compare `RowWritten`, `Result<RowWritten, RowWriteError>`, `PreparedRow`, `EngineResult` and `Option<EngineResult>` with `assert_eq!`. A test-local `RowTool` clones a `PreparedRow`.
+
+*am-domain doctests (row 42, doc-comment lines):*
+- `crates/am-domain/src/rows.rs` module docs:
+  - a `compile_fail` for `use am_domain::rows::RowInput;`;
+  - an allowed block that imports `ColumnKind`, `ColumnSpec`, `DeclaredTable`, `PreparedRow`, `RowStatus`, `RowTool`, `RowWriteError`, `RowWriter` and `RowWritten`, and names each.
+- 3.6c removes the tripwire. The implementer may move both blocks.
+
+*am-engine doctests (row 42, doc-comment lines on `StepPlan`):*
+- a `compile_fail` for `|p: am_engine::run::StepPlan| p.row_inputs`;
+- an allowed read of `p.grants`, `p.seat_team`, `p.table` and `p.document`.
+- `just doctest` runs only `-p am-store -p am-domain` today. **The implementer adds `-p am-engine`**, as the plan's Verification says (`cargo test --doc -p am-domain -p am-engine`).
+
+*am-engine `toolgate`:* `pub fn engine_result_of(reader: &am_store::Reader, step_run_id: &str, call_seq: i64) -> Result<Option<EngineResult>, am_store::StoreError>`, as listed. It gives:
+- `Ok(Some(_))` equal (`==` and `text()`) to the result ToolGate's `run` gave for that call, even after the row has moved on: the insert's result still says version 1, `inserted`;
+- `Ok(None)` for a call whose write the store refused (a stale version), a call sequence never journaled and an unknown step run.
+
+*am-config (row 40):*
+- `Step.table` is kept on a fan-out step too.
+- A fan-out step gets one `Severity::Warning` when it (a) lists `seats:` and one of them holds `table_write`, or (b) declares `table:` under `seats:` or under `over_folder:` (with `routes:`). Seats without `table_write` and no `table:` give none.
+  - **Where:** in the workflow file, at a line of the step's block (its `- id:` line or any line under it).
+  - **Message:** holds the step id, `fan-out`, `table`, `3.14` and `agentic run`.
+  - **Fix:** not empty.
+  - The warning is never an error, and the snapshot is kept.
+- On a fan-out step, `table:` naming no table is still an error at its line.
+- One function builds the words for validate and `agentic run`. The tests do not name it: they compare the two outputs. Its name is the implementer's.
+- The Company A sample loads with exactly one finding: that warning, in the chained flow's update workflow, at its one step with `seats:`. The ids come from `fixtures/templates/sample.json` (`sample`, `chained_flows.update`).
+
+*`agentic validate` (row 40):*
+- The sample exits 0. Its summary holds `0 errors, 1 warning` (singular, so not `1 warnings`).
+- Exactly one output line holds `: warning: `. It starts `workflows/<wf>.yaml:<line>: warning: `, and the next line is its `fix: `.
+
+*`agentic run` (row 40):*
+- `agentic run spread` on the fixture exits 1.
+- Its output holds the validate warning's message and its fix, verbatim, and not the `not_honoured` words (`cannot honour yet`).
+- No model is called, and there is no run and no row.
+
+*Fixture:* `fixtures/projects/rows-documents/workflows/spread.yaml`, team `core`: one step `share` with `seats: [writer]` and no `table:`. The file stem has no hyphen, so the denylist derives no term from it. **The implementer adds `fixtures/projects/rows-documents/` to `just validate`'s list** (it exits 0 with that one warning).
+
+*xtask `check-deps` (row 43, new rules):*
+- **Records.** `RowRecord` and `RowHistoryRecord` are named in shipped code only in `crates/am-store/src/`. They are matched as bare tokens over the whole file, with whitespace around `::` and line breaks normalised.
+  - A finding names, on one stderr line, `file:line:` of a line holding the token, and the exact record.
+  - Caught: a `use`, a `use … as` alias, a `type` alias, a path spaced around `::` or split over lines, a raw identifier (`r#RowHistoryRecord`), a generic argument.
+  - Allowed: comments, literals, tests and `RowReceipt`.
+- **rusqlite.** `rusqlite` as a normal or target-specific dependency of any workspace crate but am-store is a finding `<crate> -> rusqlite: …`, and the findings hold the words `only am-store may depend on rusqlite` *(tester's choice, after globset's rule)*.
+  - Dev-dependencies are not findings: am-engine and am-e2e have one today.
+  - Today the rule's composition-root branch checks only am-glob and globset. The new rule covers the root (am-app), record (am-config), engine and adapter layers alike.
+  - The tests use a new metadata fixture, `xtask/tests/fixtures/metadata/rusqlite_user.json` (clean.json plus rusqlite edges):
+    - findings: am-engine (normal), am-config (normal, `cfg(unix)`), am-providers and am-app;
+    - allowed: am-store (normal), and the dev edges of am-engine, am-tools and am-e2e.
+
+*Superseded (row 40: the sample now has one warning):*
+- `crates/am-config/tests/templates.rs`: the sample's eight tests call `sample_snapshot()` (exactly that one warning) instead of `clean_snapshot(&sample())`.
+- `crates/am-e2e/tests/cli_validate.rs`:
+  - `sample_company_template_exits_zero` expects `0 errors, 1 warning`;
+  - `every_template_folder_exits_zero` expects the same for the sample, and `0 errors, 0 warnings` for every other folder.
+- `crates/am-app/tests/user_accounts.rs` `templates_and_fixtures_validate_with_their_accounts_variant`: the sample expects `0 errors, 1 warning` naming `3.14`.
+
+*Checked against stubs:*
+- I used a scratch copy of this working tree, with its own `CARGO_TARGET_DIR`.
+- On it I added signature-only stubs (`todo!()` bodies):
+  - the am-domain types and `Part::EngineResult`;
+  - `ToolGate::{shipped, over, admit, run}`, `StepTools`, `CallPlace`, `GateOutput`, `GateError` and `engine_result_of`;
+  - `StoreRowWriter`, `TableWrite` and am-tools' `serde_json` edge;
+  - `Step.table`, the plan fields and the literals.
+- On that copy, all of these pass:
+  - `cargo check --tests` for am-engine, am-tools, am-config, am-providers, am-domain, am-app, am-e2e, am-server and am-store;
+  - `cargo clippy --tests -p am-engine -p am-tools -p am-config -p am-providers -p am-domain -p am-app -p am-e2e -p xtask -- -D warnings`, with no finding;
+  - `cargo test --doc -p am-domain -p am-engine`: the new allowed blocks pass, and the `compile_fail` blocks still fail to compile.
+- The real tree's shared cache was not cleaned or built from the copy.
+
+### Red run (ToolGate slice, 2026-11-24)
+
+*Tester, on Opus. The working tree holds `.git/wip/tests-toolgate.patch` (applied by the manager) plus the tests below. Nothing was recorded in git.*
+
+**Checked against the Tests-first list.** Every entry has its test.
+
+Applied from the patch, already complete:
+- the am-domain `EngineResult` doctests (one allowed block, five `compile_fail`);
+- am-tools `table_write.rs` (4 tests);
+- am-engine:
+  - `toolgate.rs`: grant, binding, team, class and echo refusals, `a_write_comes_back_as_an_engine_result` and `an_error_comes_back_untrusted`;
+  - `row_writer.rs` (2 tests);
+  - the superseded `loop_caps.rs` and `run.rs`;
+- am-config `step_writes.rs`: the table tests;
+- am-providers `labels.rs`;
+- am-e2e:
+  - engine: `rows_table_write` (6), `rows_idempotent` (3);
+  - trust: `capabilities_tables_grant` (3), `taint_rows_declared_table` (3), `taint_rows_at_rest` (2), `taint_tool_result_engine_values` (3), `rule_16_row_provenance` (4);
+- am-app `run_rows.rs` (3) and the superseded `run_cli.rs`;
+- xtask `check_deps.rs`: rows 33 and 37 and `the_shipped_tree_passes_the_rules`;
+- the fixture without the fan-out workflow.
+
+Written now:
+- **doctests (row 42):** am-domain `rows.rs`, one `compile_fail` (`RowInput`) and one allowed block; am-engine `StepPlan`, one `compile_fail` (`row_inputs`) and one allowed block;
+- **am-engine `toolgate.rs`:** `the_rebuilt_result_equals_the_one_sent` (row 44, on a real store through `StoreRowWriter`);
+- **am-config `step_writes.rs` (row 40):**
+  - `a_fan_out_step_that_writes_a_table_is_warned_with_the_reason`;
+  - `a_fan_out_steps_unknown_table_is_an_error`;
+  - `the_sample_f2_update_gets_exactly_that_warning`;
+- **am-e2e:**
+  - `tests/engine/engine_result_journal.rs` (row 44): `each_result_kind_is_journaled_with_its_label`, `a_resume_rebuilds_the_same_result_from_the_record`, `the_journal_and_the_rebuild_hold_no_canary`;
+  - `tests/trust/taint_rows_no_read_path.rs` (row 43): `no_row_content_reaches_a_later_model_request` and `no_step_input_names_a_row`, each with a clean writer and with a tainted one;
+  - their two `[[test]]` targets;
+  - `cli_validate.rs`: `the_sample_validates_with_the_one_fan_out_warning` (row 40);
+- **am-app `run_rows.rs`:** `a_fan_out_step_that_writes_a_table_is_refused_with_the_validate_words` (row 40);
+- **xtask `check_deps.rs` (row 43):** `row_content_is_read_only_in_the_store` and `only_the_store_links_rusqlite`, with the metadata fixture `rusqlite_user.json`;
+- **fixture:** `workflows/spread.yaml`;
+- **supersessions:** see the API notes above.
+
+**Commands.**
+- Every command ran from the repository root with `CARGO_TARGET_DIR=/Users/hiteshmamgain/cargo-target/agentic-manager`, after `cargo fmt --all`:
+  - `cargo nextest run -p <crate> --test <target> --no-fail-fast`;
+  - `cargo build -p am-e2e --tests --keep-going`, to list the targets that do not compile;
+  - `cargo test --doc -p am-domain` and `cargo test --doc -p am-engine`;
+  - `cargo test -p xtask --test check_deps`.
+- The only `src/` changes are doc-comment lines:
+  - the `EngineResult` doctests in `crates/am-domain/src/content.rs`, from the patch;
+  - `crates/am-domain/src/rows.rs` module docs;
+  - `crates/am-engine/src/run.rs`, on `StepPlan`.
+
+| Target | Tests | Red reason |
+|---|---|---|
+| am-tools `table_write` (new) | 4 | does not compile: `E0432 unresolved imports am_domain::rows::{ColumnKind, ColumnSpec, DeclaredTable, PreparedRow, RowTool}` (then `am_tools::table_write`, `serde_json`) |
+| am-engine `toolgate` | 12 (8 new, 4 moved to the new `over`/`admit`/`run`) | does not compile: `E0432 unresolved imports am_domain::rows::{ColumnKind, …, RowWritten}` (then `am_engine::row_writer`, `toolgate::{CallPlace, GateError, GateOutput, StepTools, engine_result_of}`) |
+| am-engine `row_writer` (new) | 2 | does not compile: `E0432 unresolved imports am_domain::rows::{RowStatus, RowWriteError, RowWriter, RowWritten}` |
+| am-engine `loop_caps`, `run` | literals; 1 test superseded in each | do not compile: `E0560 struct StepPlan has no field named grants` |
+| am-config `step_writes` (new) | 8 | does not compile: `E0609 no field table on type am_config::Step` |
+| am-config `templates` | 13 (8 superseded) | compiles; 5 passed, 8 failed: every sample test at `templates.rs:88` (`sample_snapshot`: the sample has no finding yet, not the one fan-out warning) |
+| am-providers `labels` | 4 (1 new) | does not compile: `E0432 unresolved imports am_domain::rows::{RowStatus, RowWritten}` (then `Part::EngineResult`) |
+| am-e2e engine `rows_table_write` / `rows_idempotent` / `engine_result_journal` (new) | 6 / 3 / 3 | do not compile: `E0432 unresolved imports am_domain::rows::{ColumnKind, ColumnSpec, DeclaredTable}` (support/mod.rs) |
+| am-e2e trust `capabilities_tables_grant` / `taint_rows_declared_table` / `taint_rows_at_rest` / `taint_tool_result_engine_values` / `taint_rows_no_read_path` / `rule_16_row_provenance` (new) | 3 / 3 / 2 / 3 / 2 / 4 | do not compile: same |
+| am-e2e `handoff_next`, `handoff_loop_back`, `handoff_gate`, `handoff_gate_resolve`, `prompt_assembly_journal`, `schema_repair`, `inbox_resolve_human_only`, `rule_15_inbox`, `taint_handoff_chain`, `taint_prompt_fence`, `taint_prompt_names_only`, `taint_prompt_repair`, `taint_prompt_type_wall`, `taint_trusted_input_gate_note`, `taint_trusted_input_sources` | literals (support's `step`/`plan`; `taint_handoff_chain` grants `FixtureTool::NAME`) | do not compile: same (support/mod.rs) |
+| am-e2e `cli_validate` | 17 (1 new, 2 superseded) | compiles; 14 passed, 3 failed: `sample_company_template_exits_zero` and `every_template_folder_exits_zero` at `cli_validate.rs:251` (`0 errors, 0 warnings`, not `1 warning`); `the_sample_validates_with_the_one_fan_out_warning` at `:324` ("exactly one warning": none) |
+| am-e2e `trust_targets` | 3 | green: the nine new `[[test]]` targets are listed |
+| am-app `run_rows` (new) | 4 | does not compile: `E0432 unresolved imports am_domain::rows::{ColumnKind, ColumnSpec, DeclaredTable, RowTool}` |
+| am-app `run_cli` | 32 (1 superseded) | compiles; 31 passed, 1 failed: `a_tool_request_the_seat_is_not_granted_fails_the_run_in_toolgates_words` at `run_cli.rs:1117` (story 3.1's "tools are not available", not ToolGate's words) |
+| am-app `user_accounts` | 49 (1 superseded) | compiles; 48 passed, 1 failed: `templates_and_fixtures_validate_with_their_accounts_variant` at `user_accounts.rs:1164` (the sample says `0 errors, 0 warnings`) |
+| `cargo test --doc -p am-domain` | +1 allowed `EngineResult` and 5 `compile_fail` (patch); +1 allowed and 1 `compile_fail` in `rows.rs` | 19 passed, 2 failed: the allowed blocks, `E0432 unresolved import am_domain::EngineResult` (content.rs) and `am_domain::rows::{ColumnKind, …}` (rows.rs). The `compile_fail` blocks are green on arrival; the stub check shows they still fail for the right reason once the types exist |
+| `cargo test --doc -p am-engine` | 1 allowed, 1 `compile_fail` (new; am-engine had no doctest) | 1 passed, 1 failed: the allowed read, `E0609 no field grants (seat_team, table, document) on type StepPlan`; the `row_inputs` `compile_fail` is green on arrival and stays so |
+| xtask `check_deps` | 39 (4 new from the patch, 2 widened by it, 2 new now) | 33 passed, 6 failed (details below) |
+
+The six failing `check_deps` tests:
+- `only_toolgate_calls_the_row_writer` (`:1771`), `the_store_row_write_is_named_only_by_the_engines_row_writer` (`:1860`) and `only_toolgate_builds_an_engine_result` (`:1905`) fail on their allowed tree. The store slice's row-48 rule still refuses `crates/am-engine/src/row_writer.rs:9` ("until the ToolGate slice adds its one caller").
+- `row_content_is_read_only_in_the_store` fails with "a parameter in the engine's driver: must fail". Its allowed tree passes, and the planted `RowRecord` passes today.
+- `the_shipped_tree_passes_the_rules` fails with "am-domain defines the port's method".
+- `only_the_store_links_rusqlite` fails because check-deps passes the rusqlite graph. Its manifest scan alone is green: only am-store links rusqlite today.
+
+Also clean with this slice's files:
+- `cargo fmt --all -- --check`;
+- `cargo xtask denylist`: 275 files clean; the new fixture stem `spread` has no hyphen;
+- `cargo xtask seam-guard`;
+- `cargo xtask check-deps` on the real tree.
+
+`agentic validate --template fixtures/projects/rows-documents` with the current binary reports one error, `workflows/record.yaml:9: unknown key 'table' in step`. That stays red until am-config reads the key. `spread.yaml` gives no finding yet.
+
+**Not tested, and why.**
+- **An `over_folder:` step whose route seat holds `table_write` but which declares no `table:`.** The plan names "seats whose grants hold `table_write`", and am-config keeps no route seats today. The test covers `over_folder:` with `table:` and `seats:` with a `table_write` seat. The sample's folder flow, whose route seats lack `table_write`, must give no warning; the one-finding check on the sample pins that.
+- **Row 43's "planted read path" that the e2e test plants.** No shipped path exists to plant at run time. The run-time proof is the e2e test, and the planted forms are the check-deps tests.
+
+**Size.** This slice's tests come to about 6,100 lines of Rust test code:
+- about 3,900 in new test files;
+- about 2,190 inserted in changed ones.
+
+Beside them:
+- about 90 doc-comment lines;
+- 46 manifest lines;
+- 98 fixture YAML lines;
+- the 528-line metadata JSON.
+
+This round added about 1,550 of those lines. The total is a little over the plan's 5,300 to 5,900.
+
+### Implementation (ToolGate slice, 2026-11-25)
+
+*Implementer, on Opus. Built to the API above; nothing recorded in git.*
+
+**What was built.**
+- **am-domain:** `rows.rs`: `ColumnKind` (with `as_str`/`parse`), `ColumnSpec`, `DeclaredTable`, `RowStatus`, `RowWritten`, `RowWriteError` (`Display`), the `RowWriter` port, `PreparedRow` (its `Debug` prints byte lengths, like `RowOp`) and the `RowTool` trait. `content.rs`: `EngineResult` (private `label`, `text`; one constructor `row_written`; `label()`, `text()`; derives `Debug, Clone, PartialEq, Eq` only), re-exported at the root. `llm.rs`: `Part::EngineResult { call_id, result }`.
+- **am-tools:** `table_write.rs`, `TableWrite` (`RowTool`): the spec from config ids and types; `prepare` checks the arguments as the API says. `serde_json` edge (lock: one dependency line, no new package).
+- **am-engine:** `row_writer.rs`, `StoreRowWriter` over `Writer::apply_row_write`, answering from `Reader::row_receipt`; `toolgate.rs` rebuilt: `StepTools`, `CallPlace`, `GateOutput`, `GateError`, `ToolGate::{shipped, over, admit, run, offered}`, the grant, class and binding checks, the one `write_row` call, the one-file `EngineResult::row_written` builds, `engine_result_of`; `run.rs`: the plan fields, `RunError::Writes` (a table on a gate, another team's table, any document), the shipped gate on `run_plan` and `continue_run`, per-step offers, the engine result in the loop (no taint, no `FinishToolCall`: the row command finished the call), `tool_words` removed.
+- **am-providers:** `common::render_engine_result`, used by both adapters at the call's tool-result position, unfenced.
+- **am-config:** `Step.table` and `Step.seats`; the `table` key; existence by reference; the team and Tables checks once every file is read (`refs.rs`, `Known.{seat_teams, table_writers, table_teams}`); `table:` on a gate an error; `writes.rs`: `fan_out_table_words` (the one wording) and `fan_out_table_refusal` (for `agentic run`).
+- **am-app:** `plan_of` refuses a fan-out step that would write a table first, then maps grants, team, the declared table (columns from the snapshot) and `document: None`; `row_tool` is am-tools' `TableWrite`.
+- **xtask:** `deps.rs`: the row-command rule widened to `row_writer.rs`; `write_row` (method call only in `toolgate.rs`, `fn` only in `am-domain/src/rows.rs` and `row_writer.rs`); `::row_written` only in `toolgate.rs`; no alias of `RowWriter`/`EngineResult`; no glob of `am_domain::{rows, content}::*` outside am-domain; `RowRecord`/`RowHistoryRecord` only in am-store's source; `rusqlite` a non-dev dependency of am-store alone (every layer). `seam_guard.rs` doc lines reworded.
+- **justfile** (`validate` gains `fixtures/projects/rows-documents/`; `doctest` gains `-p am-engine`) and **`docs/config-schema.md`** (the `table` key, the fan-out warning, the interim risk).
+
+**Choices the plan left open.**
+- *Built-in reads with no runner:* the shipped gate knows every built-in manifest (so a class or grant refusal is worded), but a granted read tool no runner runs is refused ("this version has no runner for it"). A step is offered only tools the gate would admit: granted read tools of its runner, then `table_write` for a declared table of the seat's team.
+- *Not-granted words* name the capability from `capability_of_tool` ("its tables capability is off"); a runner tool with none says "it is not in the seat's grants".
+- *A table_write with no row tool* is refused at admission ("this run has no row tool").
+- *`GateError::Store`* (a store failure, a foreign permit) fails the step with no Failure item; a call still `issued` is finished `failed` first.
+- *A table_write is not raced against the wall clock:* the write commits on the store's writer before the gate answers, so its outcome is reported as committed (the deadline check before admission still applies).
+- *Replay detection in `StoreRowWriter`:* the receipt is read before the write; a key that held one is `AlreadyWritten`, as is a receipt naming another call or another inserted row id.
+- *Data as written:* `prepare` hands the store the model's own `data` text (a small scanner of the already-parsed arguments), never a re-serialisation; a column named twice in `data` is refused (it would be checked at one value and stored with both).
+- *Fan-out seats:* am-config keeps a fan-out step's `seats:` ids (`Step.seats`) without checking them (3.14 does), so `agentic run` can apply the same predicate as validate.
+- *am-store, three small edits (no schema, no command):* the unknown-row refusal now reads "the update names a row this table does not hold (table `<id>`)" (matrix row 5's words; still "does not hold", no id); a `taint` argument of the `Audit` command is written as the 0/1 flag every other entry writes (the tests read `args.taint` as a flag); the private helper `write_row` in `rows.rs` is renamed `checked_write`, so the port method's name is unique in `crates/` and the rule has no exemption.
+
+**Mechanical test edits.**
+- `crates/am-engine/tests/toolgate.rs` `seat()`: mis-specified, since it minted a new run UUID on each call, so `assert_eq!(events[0].actor, seat())` and `assert_eq!(actor, &seat())` could never hold. It now keeps one run id (a `OnceLock` UUIDv7).
+- `crates/am-engine/src/toolgate.rs` unit tests: `check` takes the step's grants; a `granted()` helper (`lookup`) and that argument at each call.
+- `crates/am-engine/src/run.rs` unit tests: the two plan literals gain the new fields; `run_on` takes `Tooling::shipped(store, plan)` in place of `None`.
+- New unit test `crates/am-tools/src/table_write.rs::the_raw_value_is_the_last_member_of_its_name_as_written`.
+
+**Size.** Code: about 2,030 lines added and 255 removed (source, docs, justfile; the tester's 90 doc-comment lines, the am-e2e manifest and unit tests not counted), well under the ~4,000 stop. Tests: about 35 lines (the edits above).
+
+**New `Instruction::authored` callers:** none.
+
+**Verification.** Each crate's targets of the plan green; `cargo test --doc -p am-domain -p am-store -p am-engine` green (21, 11 and 2); `cargo xtask check-deps` and `seam-guard` green; `cargo deny … licenses bans sources` (offline) ok. `just check`: `Summary [ 55.977s] 1534 tests run: 1534 passed, 8 skipped`, every repo check green, `agentic validate` 0 errors over `templates/` and `fixtures/` with exactly one fan-out warning each on `company-a` (`f2-update.yaml:14`, step `update`) and `rows-documents` (`spread.yaml:6`, step `share`).
+
+### Review triage round 1 (manager, 2026-11-25)
+
+Two Opus reviews ran on the working tree over 047e8e7: correctness (C) and adversarial security (S). Neither found a critical or high break of the trust boundary:
+- In shipped code, only ToolGate calls the port and builds an `EngineResult`.
+- No outside content enters a result.
+- Taint is never lowered.
+- Another team's table, an undeclared table, or a table write from a fan-out step is refused.
+- No row is read.
+
+C1 is a high correctness gap: some bad data stops the step. All fixes below are written tests first.
+
+| Id | From | Finding | Decision |
+|----|------|---------|----------|
+| R1 | C1, S5 | Bad model data stops the step, where it should give the model an untrusted error result (matrix row 14). Two cases: (a) a duplicate key nested inside a JSON value passes am-tools and is refused by the store as `Invalid`; (b) an update whose merged row passes the 64 KiB or 256-column cap. | Fix: am-tools refuses repeated keys at every depth, in words. The store returns `RowRefused`, not `Invalid`, for its duplicate-key and cap refusals. That changes only the error kind, never the guard, and the manager decides it under the standing rules. `StoreRowWriter` maps `RowRefused` to an untrusted error result. Tests: both cases give an untrusted error result, write nothing, and the step goes on. |
+| R2 | S1 | The check-deps rules allow a whole file, not one call site. A second method in `row_writer.rs` that calls `apply_row_write`, or a second `.write_row` anywhere in `toolgate.rs`, passes. | Fix: exactly one `.apply_row_write(`, inside `fn write_row` of `row_writer.rs`; exactly one `.write_row(`, inside ToolGate's write path; `StoreRowWriter`'s public items are only `new` and the trait impl. Planted-file tests for a second method and a second call. |
+| R3 | S2 | `ToolGate::shipped`, `admit` and `run`, and `StoreRowWriter::new`, are public. No rule pins their callers, so shipped code could forge `StepTools`, `seat_team` or `CallPlace`. | Fix: pin those names to `crates/am-engine/src/run.rs` and tests through seam-guard, or narrow their visibility. Planted-file tests. |
+| R4 | S3, C5 | A replay at a used key returns `Ok` before any check of tool call id, actor, table or op kind, so a different write could come back as a success. Also, the rebuilt result for a replayed call (`Inserted`/`Updated`) differs from what the model received (`AlreadyWritten`). | Fix: on replay the store requires the same tool call id, actor, table and op kind, and refuses anything else in words. This only narrows the store's replay, decided by the manager under the standing rules. The result the model receives on a replay carries the first write's status word, so the rebuild equals it. Tests. |
+| R5 | S4 | A runner's tool can declare the id `table_write`, replacing its manifest and lifting the 100-use limit. | Fix: refuse a runner tool id that equals a built-in id. Test. |
+| R6 | C3 | A missing `table` argument, or arguments that are not JSON, fail the whole step at admission. am-tools' worded checks are never reached. | Fix: admission refuses only a `table` that is a string naming another table. A missing table, bad JSON or a non-object goes to `prepare` and returns an untrusted error result the model can act on. The tests that pin today's behaviour are updated. |
+| R7 | C4 | `row_id: null` on an insert is taken as an update. An insert keeps an explicit `null` column, while an update removes it. | Fix: `null` means absent for `row_id`, and for a column on insert as on update. Tests. |
+| R8 | C6 | validate and `agentic run` decide "fan-out" differently: `over_folder: ~` counts as absent in one and present in the other. | Fix: one `fan_out` flag on `Step`, computed once in am-config, used by both. Test. |
+| R9 | C7 | The store turns an audit `taint` arg into a number for every `Audit` command, and leaves other values as text. | Fix: convert only for `toolgate.refused` (the only caller), and refuse a value other than 0 or 1. Test. |
+
+**Owed to the next replan:** **C2.** am-config now keeps a fan-out step's `seats:` ids (`Step.seats`). That is an existing config key, but story 4.17 must classify it (adding a seat to a fan-out list could widen privilege). The owner's Q3 note named only `table:` and `document:`, so Sofia adds `seats` to 4.17's list.
+
+**Accepted:**
+- **D1 (S6):** another SQLite crate in a non-store crate is not denied by check-deps. Any new crate needs the owner's approval and a Stack row (AD-3), so the rule adds little.
+- **D2 (S7):** a nested glob import can evade the glob rule, but the `.write_row` and `::row_written` rules still catch any use.
+- **D3 (S8):** `Part::EngineResult.call_id` is the model's own call id, sent as `tool_use_id`, the same as for every tool result. No new channel.
+
+### Red run round 1 (ToolGate slice, 2026-11-25)
+
+*Tester, on Opus. Tests for R1–R9 of the triage above. No `src/` change; nothing was recorded in git.*
+
+**What the tests fix (choices the triage left open, tester's choice):**
+- **R1.** Every store refusal of the data a model wrote is `StoreError::RowRefused`, keeping its words (`duplicate`, `byte`, `column`). That covers a key repeated at any depth, an insert past either cap, a patch past either cap or repeating a key, and an update whose merged row passes either cap. `StoreRowWriter` maps those to `RowWriteError::Refused`. am-tools refuses a key repeated anywhere inside `data` (an object in an array included) in words holding `once`; the same key in two different objects is no repeat.
+- **R2.** check-deps, as written in the triage. For a public item on `StoreRowWriter` (a method or a field), the finding names the file, its line and `StoreRowWriter`.
+- **R3: the mechanism is seam-guard.** In shipped code:
+  - `ToolGate` is named only in `crates/am-engine/src/toolgate.rs` and `run.rs`;
+  - `StoreRowWriter` only in `row_writer.rs` and `run.rs`;
+  - a call of `.admit(` only in `run.rs` and `toolgate.rs`.
+
+  `run` is covered through the type: it needs a `Permit`, which only `admit` makes, on a gate reached only where `ToolGate` is named. The planted tests accept a finding from either guard (the `failures` helper), naming the file and one of the names.
+- **R4.** A replay must match the first write's tool call id, actor, table and op kind; the row id and the data may differ, because ToolGate mints a new id on a re-run. Anything else at a used key is refused with words holding `refused`, echoing no data, and changing nothing; the error variant is not pinned. That holds before and after the attempt finishes. The port's answer to a genuine replay carries the first write's status (`Inserted` or `Updated`), so the gate's result equals `engine_result_of`'s rebuild. `RowStatus::AlreadyWritten` stays in the enum, because a test names it, but nothing returns it for a genuine replay any more.
+- **R5.** A runner tool declaring a built-in id never replaces the built-in's manifest. Its `table_write` is refused, or written through the port as the built-in, never run on the runner. From the 101st call in one step run it is refused. Its `web_search` never runs on the runner.
+- **R6.** Admission refuses only a `table` that is a string naming another table. A missing `table`, a non-string `table`, non-JSON and a JSON non-object are admitted, and come back as a `failed` call with an untrusted result that names the declared table and echoes nothing. There is no `toolgate.refused` entry, and the step goes on.
+- **R7.**
+  - `"row_id": null` with no `expected_version` is an insert.
+  - A `null` column on an insert is absent: from the row, from its after-image, and from `row.written`'s `columns` count.
+- **R8.** `am_config::Step` gains `pub fan_out: bool`. For a step with `over_folder: ~`, its own `seat:` and `table:`, three things agree: `fan_out`, validate's warning and `am_config::fan_out_table_refusal`. `agentic run` refuses in validate's words exactly when validate warns, and otherwise says nothing of `3.14`. Which way the decision goes is not pinned.
+- **R9.**
+  - `toolgate.refused` exports `args.taint` as the number 0 or 1.
+  - Another action's `taint` argument stays as given, as text (`"1"`, `"0"`, `"high"`).
+  - A `toolgate.refused` taint of `2`, `true`, empty, ` 1`, `01` or `tainted` is refused, and nothing is appended.
+
+**Tests added and changed.**
+
+| File | Added | Changed (supersessions) |
+|---|---|---|
+| am-tools `tests/table_write.rs` | `a_key_repeated_at_any_depth_of_data_is_refused_in_words` (R1), `malformed_arguments_are_refused_in_words` (R6), `a_null_row_id_is_an_insert` (R7) | — |
+| am-store `tests/rows.rs` | `a_refusal_of_the_data_is_row_refused` (R1), `a_replay_is_the_same_write_or_refused` (R4) | `a_repeated_call_sequence_writes_once`: the update-op write at a used key is now `expect_err` (R4) |
+| am-store `tests/audit.rs` | `a_toolgate_refusals_taint_is_a_flag`, `another_audit_entrys_taint_stays_as_given`, `a_toolgate_refusals_taint_other_than_0_or_1_is_refused` (R9) | — |
+| am-engine `tests/toolgate.rs` | `a_replay_gives_the_first_writes_result` (R4, real store), `a_runner_tool_named_like_a_built_in_is_refused` (R5) | `table_write_is_admitted_only_for_the_declared_table` (R6): a missing `table` and non-JSON are now admitted (they were refused), plus `"table": 7` and a JSON array; 3 audit refusals, not 5 |
+| am-engine `tests/row_writer.rs` | `a_refusal_of_the_data_maps_to_refused` (R1) | `the_store_row_writer_reads_its_result_from_the_receipt`: the replay answers `Inserted`, not `AlreadyWritten` (R4) |
+| am-config `tests/step_writes.rs` | `an_empty_over_folder_gets_one_fan_out_decision` (R8) | — |
+| am-app `tests/run_rows.rs` | `an_empty_over_folder_gets_one_decision_from_validate_and_run` (R8) | — |
+| am-e2e `tests/engine/rows_table_write.rs` | `data_the_store_refuses_is_a_tool_error_and_the_step_goes_on` (R1: a nested repeated key, and a merged row past 64 KiB), `a_merged_row_past_the_column_cap_is_a_tool_error` (R1, a 300-column table), `malformed_arguments_are_tool_errors_and_the_step_goes_on` (R6), `a_null_row_id_is_an_insert` and `a_null_column_on_an_insert_is_absent` (R7) | — |
+| am-e2e `tests/engine/rows_idempotent.rs` | — | `a_repeated_call_sequence_writes_once_and_reads_back_the_same_result`: `Inserted`, and equal to `engine_result_of`'s rebuild (R4) |
+| xtask `tests/check_deps.rs` | `the_row_rules_pin_one_call_site`, `the_shipped_tree_has_one_call_site_each` (R2) | — |
+| xtask `tests/seam_guard.rs` | `only_the_engines_driver_builds_admits_and_runs_a_gate`, `the_repository_builds_gates_only_in_the_engines_driver` (R3) | — |
+
+**Commands.** All from the repository root with the shared `CARGO_TARGET_DIR`, after `cargo fmt --all`:
+- `cargo nextest run -p <crate> --test <target> --no-fail-fast`, for each target;
+- `cargo clippy --tests --keep-going -p am-tools -p am-store -p am-engine -p am-app -p am-e2e -p xtask -- -D warnings`: clean, every changed target but am-config `step_writes`, which does not compile yet.
+
+| Target | Result | Red reasons |
+|---|---|---|
+| am-tools `table_write` | 7 run: 5 passed, 2 failed | `a_key_repeated…`: a nested repeat is prepared (`Insert`). `a_null_row_id…`: taken as an update ("names a row this table does not hold"). `malformed_arguments…` is green on arrival: `prepare` already words them. |
+| am-store `rows` | 59 run: 56 passed, 3 failed | `a_refusal_of_the_data…`: `Invalid("refused: the row's data holds a duplicate key…")`, not `RowRefused`. `a_replay_is_the_same_write…`: another tool call id at a used key is `Ok(())`. `a_repeated_call_sequence_writes_once`: the update-op write is `Ok(())`. |
+| am-store `audit` | 23 run: 21 passed, 2 failed | `another_audit_entrys_taint…`: `egress.blocked`'s `"1"` becomes `Number(1)`. `…other_than_0_or_1…`: `2` is `Ok(())`. `a_toolgate_refusals_taint_is_a_flag` is green on arrival. |
+| am-engine `toolgate` | 14 run: 11 passed, 3 failed | `table_write_is_admitted…`: a missing `table` is refused ("this call names no table"). `a_replay_gives…`: the replay says "was already written at version 1 by this call", not "was inserted at version 1". `a_runner_tool_named…`: 101 calls are admitted, because the runner's manifest (limit 10,000) replaced the built-in's. |
+| am-engine `row_writer` | 3 run: 1 passed, 2 failed | `the_store_row_writer_reads…`: `AlreadyWritten`, not `Inserted`. `a_refusal_of_the_data_maps_to_refused`: `Failed("refused: … duplicate key …")`. |
+| am-config `step_writes` | does not compile | `E0609 no field fan_out on type am_config::Step` |
+| am-app `run_rows` | 5 run: 4 passed, 1 failed | Validate gives `odd.yaml` no warning, and `agentic run odd` refuses it in the fan-out words (`3.14`): the two decisions differ. |
+| am-e2e `rows_table_write` | 11 run: 6 passed, 5 failed | The run fails where it should go on: with a repeated key, "tool \"table_write\" could not finish: refused: … duplicate key"; with a missing `table`, "this call names no table"; with 300 columns, "… over the cap of 256 columns a row". `a_null_row_id…`: no row lands. `a_null_column…`: the row keeps `"title": null`. |
+| am-e2e `rows_idempotent` | 3 run: 2 passed, 1 failed | `AlreadyWritten`, not `Inserted` |
+| xtask `check_deps` | 41 run: 40 passed, 1 failed | `the_row_rules_pin_one_call_site`: a second method calling `apply_row_write` in `row_writer.rs` passes today. `the_shipped_tree_has_one_call_site_each` is green on arrival. |
+| xtask `seam_guard` | 20 run: 19 passed, 1 failed | `only_the_engines_driver…`: am-app building the shipped gate gives no finding. `the_repository_builds_gates…` is green on arrival. |
+
+Also clean: `cargo fmt --all -- --check` and `cargo xtask denylist` (278 files).
+
+**Not tested, and why.**
+- **Every R1 case on its own.** In `data_the_store_refuses_is_a_tool_error_and_the_step_goes_on`, the merged-row byte-cap case is masked by the repeated-key case, which stops the run first. The same store path is red on its own at the store level (`a_refusal_of_the_data_is_row_refused`) and at the port level (`a_refusal_of_the_data_maps_to_refused`).
+- **R2's later planted forms.** These are the second call inside `fn write_row`, the second `.write_row(`, and the public method or field. They are masked in the red run, because the test stops at its first case.
+- **R3: a `cfg(test)` module in another crate's `src/` naming `ToolGate`.** It is left out on purpose: the triage allows tests, and seam-guard already treats such modules as shipped for its other seams.
+
+**Size.** This round adds about 1,480 test lines:
+- am-tools 91;
+- am-store `rows` 229 and `audit` 91;
+- am-engine `toolgate` 230 and `row_writer` 103;
+- am-config 47;
+- am-app 60;
+- am-e2e 309;
+- xtask: check-deps 126, seam-guard 192.
+
+### Implementation round 1 (ToolGate slice, 2026-11-25)
+
+*Implementer, on Opus. Patches for R1–R9 of the triage, to the tester's round-1 tests; nothing recorded in git; no test file edited.*
+
+- **R1:** am-store's duplicate-key and byte and column cap refusals (insert, patch, merged row) are `StoreError::RowRefused` through one `data_refused` helper; the guards and their words are unchanged. `StoreRowWriter` maps `RowRefused` to `Refused`, so ToolGate's `GateError::Tool` gives the model an untrusted error and the step goes on. am-tools walks `data` and refuses a key named twice in any one object at any depth, in words holding `once` and no key or value.
+- **R2:** check-deps allows `.apply_row_write(` in `row_writer.rs` only as the file's one call, a method call inside `fn write_row`; `.write_row(` in `toolgate.rs` only as the file's one method call; and `row_writer.rs`'s public items only `pub struct StoreRowWriter` and `pub fn new` (any other `pub`, `pub(crate)` included, is a finding naming `StoreRowWriter`). Findings name no allowed file.
+- **R3:** three seam-guard seams: `ToolGate` (homes `toolgate.rs`, `run.rs`), `StoreRowWriter` (`row_writer.rs`, `run.rs`), `admit` (`toolgate.rs`, `run.rs`).
+- **R4:** on a replay the store requires the after-image's tool call id, actor, table and op kind (`same_write`), else refuses in words naming the call and its op, no data. `StoreRowWriter` no longer reads before writing; it answers from the receipt with its op's word (`Inserted`/`Updated`), so a replay's result equals `engine_result_of`. `RowStatus::AlreadyWritten` stays, documented as unused by the port.
+- **R5:** `ToolGate::over` ignores a runner manifest whose id is a built-in's (the built-in's manifest, class and limit stand; it never runs on the runner) and lists it in `shadowing()`; `run_plan_with_tools` refuses such a runner before any run, as it does duplicates.
+- **R6:** admission refuses only a `table` string naming another table; anything else goes to `prepare` (already worded).
+- **R7:** `null` `row_id`/`expected_version` are absent; an insert's top-level `null` members are dropped from the text as written (`without_nulls`), so the row, its after-image and `row.written`'s column count omit them.
+- **R8:** `Step.fan_out`, set once from the parser's `fan_out`; validate's check and `fan_out_table_refusal` both read it (`over_folder: ~` is not fan-out for either).
+- **R9:** the `Audit` command converts `taint` to 0/1 only for `toolgate.refused`, and refuses another value there before anything is written; every other entry keeps its arguments as given.
+
+**Size this round:** code about +270 lines net (tracked source +197 added and +16 removed over round 0; new files +70); the slice's code now stands at about 2,300 lines, under the ~4,000 stop. Tests: none edited.
+
+**Verification.** `cargo test --doc -p am-domain -p am-store -p am-engine` passes (21, 11, 2). `just check` exits 0: `Summary [ 59.532s] 1556 tests run: 1556 passed, 8 skipped`, every repo check green, `agentic validate` 0 errors with the one fan-out warning on `company-a` and on `rows-documents`.
+
+### Review triage round 2 (manager, 2026-11-25)
+
+An Opus follow-up review confirms R1–R9 are fixed and no regression. It found four low or info items, all fixed tests first:
+
+| Id | From | Finding | Decision |
+|----|------|---------|----------|
+| T1 | F1 | In `toolgate.rs` the rule counts one `.write_row(` per file, but does not pin it inside `fn write`, as `row_writer.rs`'s rule does with `fn_body`. | Fix: the one call must sit inside `fn_body(code, "write")`. Planted-file test: a new `pub fn` holding the only call fails. |
+| T2 | F2 | `RowStatus::AlreadyWritten` is dead now that a replay answers from the receipt. A later writer returning it would break "result equals rebuild" with no test noticing. | Fix: remove the variant and update its one test use. |
+| T3 | F4 | Since R1, the merged-row cap words reach the model and give the exact byte size of a stored row it cannot read. | Fix: word the refusal without the stored size. It may name the caps and the patch's own size. Test: the words hold no number derived from the stored row. |
+| T4 | F3 | Stale doc comments in `toolgate.rs:197`, `am-store/src/rows.rs:171`, `lib.rs:904-905` and `lib.rs:191-194`; `execute`'s doc sits on `const TOOLGATE_REFUSED`. | Fix the wording, and move the const above the doc block. Documentation only. |
+
+### Red run round 2 (ToolGate slice, 2026-11-25)
+
+*Tester, on Opus. Tests for T1–T3 of round 2's triage; T4 is documentation only and has no test. The only `src/` change is doc-comment lines on `RowStatus` in `crates/am-domain/src/rows.rs`. Nothing was recorded in git.*
+
+**Tests**
+- **T1, xtask `check_deps.rs`: `toolgates_one_port_call_is_inside_fn_write`.**
+  - A planted `toolgate.rs` holds its only `.write_row(` in a new `pub fn write_through`, which `fn write` calls. It must fail, naming the file, a line of that function, `write_row` and AD-21.
+  - The allowed tree passes.
+  - On the shipped tree, the one call is inside `fn write`.
+- **T2, removing `RowStatus::AlreadyWritten`:**
+  - doctests on `RowStatus`: an allowed exhaustive `match` with only `Inserted` and `Updated`, and a `compile_fail` for `RowStatus::AlreadyWritten`;
+  - `taint_rows_no_read_path.rs` (around line 171) no longer names the variant.
+- **T3, am-store `rows.rs`: `a_merged_row_refusal_names_no_stored_size`.**
+  - Setup: a stored row of about half the byte cap, then a patch of about half, which would merge past `ROW_MAX_BYTES`.
+  - The refusal is `RowRefused` and names `byte`, as R1's test requires, so a T3 rewording keeps that word.
+  - No number in the words is derived from the stored row: not its size, not the merged size (±16), not the overage (±16), not the room left. The cap and the patch's own size may appear.
+  - Nothing changes.
+
+**Commands.** All with the shared `CARGO_TARGET_DIR`, after `cargo fmt --all`:
+- `cargo nextest run -p xtask --test check_deps --no-fail-fast`;
+- `cargo nextest run -p am-store --test rows --no-fail-fast`;
+- `cargo nextest run -p am-e2e --test taint_rows_no_read_path --no-fail-fast`;
+- `cargo test --doc -p am-domain`;
+- `cargo clippy --tests -p am-store -p am-e2e -p xtask -- -D warnings`: clean;
+- `cargo xtask denylist`: clean.
+
+| Target | Result | Red reason |
+|---|---|---|
+| xtask `check_deps` | 42 run: 41 passed, 1 failed | `toolgates_one_port_call_is_inside_fn_write`: "the only call in a new pub fn: must fail", because check-deps passes it today. |
+| am-store `rows` | 60 run: 59 passed, 1 failed | `a_merged_row_refusal_names_no_stored_size`: the words "the row would hold 65829 bytes of JSON…" name the merged size, from a stored row of 33127 bytes. |
+| am-e2e `taint_rows_no_read_path` | 2 run: 2 passed | green: it uses only `Inserted` and `Updated`, so it compiles before and after the removal. |
+| `cargo test --doc -p am-domain` | 23 run: 21 passed, 2 failed | the exhaustive `match`: `E0004 non-exhaustive patterns: RowStatus::AlreadyWritten not covered`; the `compile_fail` block: "Test compiled successfully". |
+
+**For the implementer:** `EngineResult::row_written`'s `AlreadyWritten` arm in `crates/am-domain/src/content.rs` goes with the variant.
+
+**Size:** about 150 test lines: check-deps 50, store 75, doc-comment lines 20, and the edit to `taint_rows_no_read_path.rs`.
+
+### Implementation round 2 (ToolGate slice, 2026-11-25)
+
+*Implementer, on Opus. Patches for T1–T4; nothing recorded in git.*
+
+- **T1:** check-deps allows ToolGate's one `.write_row(` only inside `fn_body(code, "write")`. **Mechanical test edit:** the R3 seam-guard fixture (`GATE_SITES`, `crates/am-engine/src/toolgate.rs` in `xtask/tests/seam_guard.rs`) held its call in `pub fn run`, so its `clean` check (which also runs check-deps) failed under T1; its `run` now calls a `fn write` that holds the call.
+- **T2:** `RowStatus::AlreadyWritten` and its `EngineResult::row_written` arm removed.
+- **T3:** an update's cap refusal names the caps and the patch's own byte size only (no merged or stored size, no merged column count); an insert's keeps its own sizes.
+- **T4:** doc comments fixed (`ToolGate.manifests`, the store's replay comment, `RowRefused`'s cases, `apply_row_write`'s replay); `TOOLGATE_REFUSED` moved above `execute`'s doc block.
+
+**Verification.** `cargo test --doc -p am-domain -p am-store -p am-engine` passes (23, 11, 2). `just check` exits 0: `Summary [ 54.500s] 1558 tests run: 1558 passed, 8 skipped`, every repo check green, `agentic validate` 0 errors with the one fan-out warning each on `company-a` and `rows-documents`.
+
+## Auto Run Result
+
+**Status:** built (2026-11-25). This is slice 2 of 4 of the re-sliced story 3.6. The order is store (merged, #38), then ToolGate (this), then rows reaching later steps (22), then documents and Drafts (21). It was planned, tested, built and reviewed on Opus.
+
+**Summary:** a seat writes rows only through `table_write`, reached only through ToolGate.
+- **The port:** `RowWriter` lives in am-domain. `table_write` is a `RowTool` in am-tools. am-engine's `StoreRowWriter` implements the port over the store's `apply_row_write`.
+- **check-deps and seam-guard pin each piece to one place:**
+  - exactly one `.apply_row_write(`, inside `fn write_row` of `row_writer.rs`;
+  - exactly one `.write_row(`, inside ToolGate's `fn write`;
+  - the `EngineResult` is built only in `toolgate.rs`;
+  - `ToolGate`, `StoreRowWriter` and `admit` are named only in their own files and `run.rs`;
+  - a runner tool may not shadow a built-in id.
+- **The result:**
+  - A successful write returns an `EngineResult` built from engine values only: the minted row id, the version and a fixed status word. It does not taint.
+  - It is journaled on its tool call's journal row (AD-10, AD-8). A resume or drill-down rebuilds the same result from the writer's record. A replay must match the first write's tool call id, actor, table and op.
+  - Every error result stays untrusted and taints, including bad data, a nested repeated key and a cap refusal. Bad data never stops the step.
+- **Admission:**
+  - Grant (AD-46 capability `table_write`), then the declared `table:` of the seat's own team, then the class, then the 100-use limit.
+  - Only a `table` string naming another table is refused at admission. Everything else is worded back to the model.
+  - `agentic run` offers `table_write` only to a step that declares a table.
+- **No read path:** no row-input slot, no `from_row`. A canary written into a row reaches no later model request. Row taint is stored on write.
+- **Fan-out:** one `Step.fan_out` flag. `agentic validate` warns, and `agentic run` refuses with the same words, for a fan-out step that declares `table:` or whose seats hold `table_write`, until 3.14. The Company A `f2-update` step gets exactly that warning.
+
+**Size (owner rule: code and test lines reported separately):** 2,469 lines of code (doc comments included), 8,233 lines of tests.
+
+**Tests:** written and seen red first, with red runs logged for the build and both review rounds. `just check`: 1558 passed, 8 skipped.
+
+**Review:** a correctness review and an adversarial security review, then a follow-up, all on Opus. None found a critical or high break of the trust boundary.
+- Round 1 fixed R1–R9. The worst was C1: bad model data stopped the step instead of giving an untrusted error.
+- Round 2 fixed T1–T4.
+- D1–D3 are accepted.
+
+**For the owner:**
+- **Store edits beyond the plan's "reads only"**, each only narrowing or relabelling:
+  - the missing-row refusal wording;
+  - the audit `taint` number, for `toolgate.refused` only;
+  - a private rename;
+  - the error kind `RowRefused` for duplicate-key and cap refusals;
+  - the replay identity check.
+- **No new `Instruction::authored` caller.**
+- **Owed to the next replan:** fan-out `seats` (now kept as `Step.seats`) joins 4.17's widening list.
+- **For 3.14:** remove the fan-out warning and refusal when branches can write.

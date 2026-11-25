@@ -1,0 +1,31 @@
+schema_version: 2
+name: Entries
+team: core
+description: One row per recorded entry.
+key: ref
+columns:
+  - id: ref
+    type: text
+    required: true
+  - id: title
+    type: text
+  - id: amount
+    type: number
+  - id: count
+    type: integer
+  - id: done
+    type: boolean
+  - id: due
+    type: date
+  - id: link
+    type: url
+  - id: state
+    type: status
+    values:
+      - new
+      - done
+    transitions:
+      - from: new
+        to: done
+  - id: extra
+    type: json

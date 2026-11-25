@@ -15,6 +15,61 @@
 //! `TrustedInput`, none from `TrustedInput` to `Instruction` or back, and
 //! none may be added. A step run is [`Taint::Tainted`] once any
 //! `UntrustedData` enters its request; its taint only ever rises.
+//!
+//! Story 3.6 (AD-10 as amended 2026-11-24, owner Q4): a fourth, narrow kind
+//! answers a successful `table_write`, the `EngineResult`. ToolGate builds
+//! it from engine values only (the row id it minted, the version the write
+//! produced, a fixed status word) through its one constructor,
+//! `EngineResult::row_written`; it holds no row data, argument or model
+//! text, and it does not taint. Every error result stays `UntrustedData`.
+//! (Tests first: these doctests were written before the type; the
+//! implementer may move them onto `EngineResult`.)
+//!
+//! The allowed use: built from a `RowWritten`, its label names the tool and
+//! its text the row id; the same three values give the same result.
+//!
+//! ```
+//! use am_domain::EngineResult;
+//! use am_domain::rows::{RowStatus, RowWritten};
+//! let row_id = uuid::Uuid::now_v7();
+//! let written = RowWritten { row_id, version: 2, status: RowStatus::Updated };
+//! let result = EngineResult::row_written(&written);
+//! assert_eq!(result.label(), "tool:table_write");
+//! assert!(result.text().contains(&row_id.to_string()));
+//! assert_eq!(result, EngineResult::row_written(&written));
+//! ```
+//!
+//! No `Default`:
+//!
+//! ```compile_fail
+//! let _r = am_domain::EngineResult::default();
+//! ```
+//!
+//! no `From` with text:
+//!
+//! ```compile_fail
+//! let _r = am_domain::EngineResult::from(String::from("row 1 inserted"));
+//! ```
+//!
+//! nor with untrusted data:
+//!
+//! ```compile_fail
+//! let _r: am_domain::EngineResult = am_domain::UntrustedData::text("tool:table_write", "x").into();
+//! ```
+//!
+//! no struct literal (its fields are private):
+//!
+//! ```compile_fail
+//! let _r = am_domain::EngineResult { label: "tool:table_write".into(), text: "inserted".into() };
+//! ```
+//!
+//! and no `Deserialize` (the probe holds for plain text, see
+//! `TrustedInput`'s docs):
+//!
+//! ```compile_fail
+//! fn deserializable<T: serde::de::DeserializeOwned>() {}
+//! deserializable::<am_domain::EngineResult>();
+//! ```
 
 use serde::{Deserialize, Serialize};
 
@@ -325,6 +380,51 @@ impl TrustedInput {
         &self.label
     }
 
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+}
+
+/// The result of a successful `table_write` (AD-10 as amended 2026-11-24,
+/// owner Q4): the fourth content kind, built by ToolGate alone through its
+/// one constructor, [`EngineResult::row_written`], from engine values only
+/// (the row id the engine minted, the version the write produced and one
+/// fixed status word). It holds no row data, no argument and no model
+/// text, so it does not taint (and never clears taint). Every error result
+/// stays [`UntrustedData`]. Its fields are private, and it has no
+/// `Default`, `From`, `TryFrom` or `Deserialize` (see the module docs).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EngineResult {
+    label: String,
+    text: String,
+}
+
+/// The label of every engine result: the tool it answers.
+const ENGINE_RESULT_LABEL: &str = "tool:table_write";
+
+impl EngineResult {
+    /// The engine result of a committed row write. The text is built from
+    /// `written` alone: the same row id, version and status give the same
+    /// result, so a rebuild from the journal equals what the model received.
+    pub fn row_written(written: &crate::rows::RowWritten) -> EngineResult {
+        use crate::rows::RowStatus;
+        let (id, v) = (written.row_id, written.version);
+        let text = match written.status {
+            RowStatus::Inserted => format!("Row {id} was inserted at version {v}."),
+            RowStatus::Updated => format!("Row {id} was updated to version {v}."),
+        };
+        EngineResult {
+            label: ENGINE_RESULT_LABEL.to_string(),
+            text,
+        }
+    }
+
+    /// The tool it answers: `tool:table_write`.
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+
+    /// The engine's words: the row id, the version and the status word.
     pub fn text(&self) -> &str {
         &self.text
     }

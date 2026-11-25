@@ -1,5 +1,7 @@
 //! Folder access tools (AD-30): `list_files` and `read_file` (read class) and
 //! `write_file` (local-write, only on a folder linked with write access).
+//! Story 3.6 (the ToolGate slice, AD-21): [`table_write`], the built-in
+//! row tool ToolGate prepares a seat's row write with.
 //!
 //! Every path is confined to a linked folder (a grant root): requested paths
 //! are checked lexically (no absolute paths, no `..`), then canonicalised with
@@ -7,6 +9,8 @@
 //! read, write and refusal is audited with root, path and hash. Files are
 //! returned unchanged as `UntrustedData` file parts; nothing is converted.
 #![forbid(unsafe_code)]
+
+pub mod table_write;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

@@ -18,7 +18,7 @@ use crate::entities::*;
 use crate::fields::{Fields, Text, fields, unique};
 use crate::finding::Report;
 use crate::node::{self, Kind, Node};
-use crate::refs::{HostTarget, RESERVED_ACCOUNTS, RefKind, Refs, Tree};
+use crate::refs::{HostTarget, RESERVED_ACCOUNTS, RefKind, Refs, StepWrites, Tree};
 
 const WEEKDAYS: &[&str] = &[
     "monday",
@@ -2119,6 +2119,22 @@ const STEP_LOOP_KEYS: &[&str] = &["loop_back", "gate", "limits", "max_returns"];
 /// 3.4, Decision 1).
 const DEFAULT_MAX_RETURNS: u32 = 2;
 
+/// A fan-out step's `seats:`, the ids as written (story 3.6: only read to
+/// warn that one holding `table_write` cannot write a table until story
+/// 3.14, which checks them); an entry that is not text is left to 3.14.
+fn declared_seats(s: &Fields) -> Vec<String> {
+    match s.get("seats").map(|n| &n.kind) {
+        Some(Kind::Seq(items)) => items
+            .iter()
+            .filter_map(|n| match &n.kind {
+                Kind::Str(id) => Some(id.clone()),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 /// What the checks across a workflow's steps need of one step (story 3.3).
 struct StepHandOff {
     id: Option<String>,
@@ -2359,6 +2375,7 @@ pub(crate) fn workflow(
             "description",
             "output_schema",
             "max_tokens",
+            "table",
         ];
         allowed.extend_from_slice(STEP_LOOP_KEYS);
         allowed.extend_from_slice(RUN_GRAPH_KEYS);
@@ -2388,19 +2405,27 @@ pub(crate) fn workflow(
             refs.push(rep, o.line, RefKind::Schema, &o.value);
         }
         let max_tokens = s.int(rep, "max_tokens", 1, 10_000_000).map(|v| v as u32);
+        // Story 3.6 (AD-21): the one table the step writes, checked to
+        // exist here and, once every file is read, against its seat's team
+        // and Tables capability (or, on a fan-out step, warned about).
+        let table = s.id(rep, "table");
+        if let Some(t) = &table {
+            refs.push(rep, t.line, RefKind::Table, &t.value);
+        }
+        let fan_out_seats = declared_seats(&s);
         let (loop_back, to) = step_loop_back(rep, &s);
         let gate = step_gate(rep, &s);
         let max_returns = step_max_returns(rep, &s, gate.is_some() || !s.absent("gate"));
         let limits = step_limits(rep, &s);
         if gate.is_some() {
             // A gate makes no model call (AD-36): it neither loops back nor
-            // has caps.
-            for key in ["loop_back", "limits"] {
+            // has caps, and writes no table.
+            for key in ["loop_back", "limits", "table"] {
                 if let Some(line) = line_of_key(&s, key) {
                     rep.error(
                         line,
                         format!(
-                            "a step with `gate: review` declares `{key}`; a gate makes no model call, so it neither loops back nor has limits"
+                            "a step with `gate: review` declares `{key}`; a gate makes no model call, so it neither loops back, has limits nor writes a table"
                         ),
                         format!(
                             "remove `{key}:` from the gate step, or remove `gate:` to make it a step a seat's model runs"
@@ -2414,6 +2439,23 @@ pub(crate) fn workflow(
             loop_back_to: to,
             gate_line: gate.and_then(|_| line_of_key(&s, "gate")),
         });
+        if let (Some(id), None) = (&id, gate) {
+            refs.step_write(
+                rep,
+                StepWrites {
+                    step: id.value.clone(),
+                    line: s.line,
+                    table: table.clone(),
+                    seat: if fan_out {
+                        None
+                    } else {
+                        seat.as_ref().map(|t| t.value.clone())
+                    },
+                    seats: fan_out_seats.clone(),
+                    fan_out,
+                },
+            );
+        }
         if let Some(id) = &id {
             step_ids.push(id.clone());
         }
@@ -2430,6 +2472,9 @@ pub(crate) fn workflow(
                 gate,
                 max_returns,
                 limits,
+                table: value(table),
+                fan_out,
+                seats: fan_out_seats,
             });
         }
     }

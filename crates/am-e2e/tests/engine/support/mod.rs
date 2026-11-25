@@ -10,26 +10,29 @@
 //! Implementation Notes ("Phase 1 test API (tester, 2026-11-23)").
 #![allow(dead_code)]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use am_app::cli::RunContext;
 use am_app::runtime::{OpenRequest, Places, Prompt, open_project};
 use am_config::ModelRef;
+use am_domain::rows::{ColumnKind, ColumnSpec, DeclaredTable};
 use am_domain::{
-    Actor, BoxFuture, CancelSignal, ChatOutcome, ChatRequest, EventSink, Instruction, LlmProvider,
-    ModelCapabilities, Part, ProviderError, Role, RuntimeLayout, UntrustedContent, UntrustedData,
+    Actor, BoxFuture, CancelSignal, ChatOutcome, ChatRequest, EngineResult, EventSink, Instruction,
+    LlmProvider, ModelCapabilities, Part, ProviderError, Role, RuntimeLayout, StopReason, ToolCall,
+    UntrustedContent, UntrustedData,
 };
 use am_engine::prompt::{StepPrompt, heading};
 use am_engine::run::{HandOff, Limits, RunPlan, StepPlan};
 use am_engine::schema::OutputSchema;
 use am_store::{
-    CallRow, InboxItemRow, LedgerRow, PromptPartRow, Reader, RunRow, StepInput, StepRow, Store,
-    ToolCallRow,
+    CallRow, InboxItemRow, LedgerRow, PromptPartRow, Reader, RowHistoryRecord, RowRecord, RunRow,
+    StepInput, StepRow, Store, ToolCallRow,
 };
 use am_testkit::{FakeLlm, FakeProjectIdentity, FakeTerminal, ScriptedTurn};
-use serde_json::Value;
+use am_tools::table_write::TableWrite;
+use serde_json::{Value, json};
 
 /// The pinned snapshot's hash: 64 lowercase hex characters.
 pub const HASH: &str = "0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f9";
@@ -86,6 +89,12 @@ pub fn step(key: &str, provider: Arc<dyn LlmProvider>) -> StepPlan {
         provider,
         prompt: am_engine::prompt::StepPrompt::default(),
         output_schema: None,
+        // Story 3.6: no grant, no table, no document; the seat is in team
+        // `core`.
+        grants: BTreeSet::new(),
+        seat_team: TEAM.into(),
+        table: None,
+        document: None,
     }
 }
 
@@ -164,12 +173,16 @@ pub fn with_schema(step: StepPlan, schema: OutputSchema) -> StepPlan {
     }
 }
 
+/// A run of `steps`. Story 3.6: with am-tools' `table_write` as the row
+/// tool, as `agentic run` wires it (am-app); a step is offered it only when
+/// its seat is granted it and it declares a table.
 pub fn plan(steps: Vec<StepPlan>) -> RunPlan {
     RunPlan {
         workflow: "wf".into(),
         config_hash: HASH.into(),
         steps,
         clock: am_testkit::FakeClock::at("2026-11-24T10:00:00Z"),
+        row_tool: Some(Arc::new(TableWrite::new())),
     }
 }
 
@@ -371,6 +384,7 @@ pub fn part_text(part: &Part) -> String {
             UntrustedContent::File(f) => f.name.clone(),
         },
         Part::Trusted(t) => t.text().to_string(),
+        Part::EngineResult { result, .. } => result.text().to_string(),
         other => format!("{other:?}"),
     }
 }
@@ -662,4 +676,310 @@ pub fn line_of(text: &str, needle: &str) -> u32 {
         .position(|l| l.contains(needle))
         .map(|i| i as u32 + 1)
         .unwrap_or_else(|| panic!("no line holds `{needle}` in:\n{text}"))
+}
+
+// ------------------------------------------------------------------ rows (story 3.6)
+//
+// Epic 3 story 6 (AD-10, AD-11, AD-21, AD-29, AD-43): steps that write
+// table rows through ToolGate and am-tools' `table_write`, and steps that
+// version a document. The API these helpers pin is in the story plan's
+// Implementation Notes ("API the tests fix").
+
+/// The team of every seat [`step`] makes.
+pub const TEAM: &str = "core";
+/// Another team.
+pub const OTHER_TEAM: &str = "side";
+/// The table a writing step declares (team `core`).
+pub const TABLE: &str = "entries";
+/// Another team's table (team `side`).
+pub const OTHER_TABLE: &str = "others";
+/// The label of every `table_write` result (AD-10 as amended 2026-11-24).
+pub const WRITE_LABEL: &str = "tool:table_write";
+
+fn column(id: &str, kind: ColumnKind, required: bool, values: &[&str]) -> ColumnSpec {
+    ColumnSpec {
+        id: id.into(),
+        kind,
+        required,
+        values: values.iter().map(|v| v.to_string()).collect(),
+    }
+}
+
+/// `entries` of team `core`: `ref` (text, required), `title` (text),
+/// `amount` (number), `count` (integer), `done` (boolean), `state` (status:
+/// `new`, `done`), `extra` (json).
+pub fn entries() -> DeclaredTable {
+    DeclaredTable {
+        id: TABLE.into(),
+        team: TEAM.into(),
+        columns: vec![
+            column("ref", ColumnKind::Text, true, &[]),
+            column("title", ColumnKind::Text, false, &[]),
+            column("amount", ColumnKind::Number, false, &[]),
+            column("count", ColumnKind::Integer, false, &[]),
+            column("done", ColumnKind::Boolean, false, &[]),
+            column("state", ColumnKind::Status, false, &["new", "done"]),
+            column("extra", ColumnKind::Json, false, &[]),
+        ],
+    }
+}
+
+/// `others` of team `side`: `ref` (text, required).
+pub fn others() -> DeclaredTable {
+    DeclaredTable {
+        id: OTHER_TABLE.into(),
+        team: OTHER_TEAM.into(),
+        columns: vec![column("ref", ColumnKind::Text, true, &[])],
+    }
+}
+
+/// The Tables capability's grants (AD-46): `table_read`, `table_write`.
+pub fn tables_on() -> BTreeSet<String> {
+    ["table_read", "table_write"]
+        .into_iter()
+        .map(String::from)
+        .collect()
+}
+
+/// `step` with its seat granted the Tables capability's tools and the
+/// table `entries` declared.
+pub fn writing(step: StepPlan) -> StepPlan {
+    StepPlan {
+        grants: tables_on(),
+        table: Some(entries()),
+        ..step
+    }
+}
+
+/// `table_write`'s arguments for an insert into `table`.
+pub fn insert_into(table: &str, data: Value) -> Value {
+    json!({ "table": table, "data": data })
+}
+
+/// `table_write`'s arguments for an insert into `entries`.
+pub fn insert(data: Value) -> Value {
+    insert_into(TABLE, data)
+}
+
+/// `table_write`'s arguments for an update of `row_id` in `entries`, read
+/// at `version`.
+pub fn update(row_id: &str, version: i64, patch: Value) -> Value {
+    json!({ "table": TABLE, "row_id": row_id, "expected_version": version, "data": patch })
+}
+
+/// The rows of `table`, as committed.
+pub fn rows_of(db: &Path, table: &str) -> Vec<RowRecord> {
+    Reader::open(db).unwrap().table_rows_of(table).unwrap()
+}
+
+/// The one row of `table`.
+pub fn only_row(db: &Path, table: &str) -> RowRecord {
+    let mut rows = rows_of(db, table);
+    assert_eq!(rows.len(), 1, "one row in {table}: {rows:#?}");
+    rows.remove(0)
+}
+
+/// Every after-image of one row, in version order.
+pub fn history_of(db: &Path, table: &str, row_id: &str) -> Vec<RowHistoryRecord> {
+    Reader::open(db)
+        .unwrap()
+        .row_history_of(table, row_id)
+        .unwrap()
+}
+
+/// A row's (or an after-image's) data as JSON.
+pub fn data_of(text: &str) -> Value {
+    serde_json::from_str(text).unwrap_or_else(|e| panic!("row data is JSON ({e}): {text}"))
+}
+
+/// Every engine result in `request`, with its call id.
+pub fn engine_results(request: &ChatRequest) -> Vec<(String, EngineResult)> {
+    request
+        .messages
+        .iter()
+        .flat_map(|m| m.parts.iter())
+        .filter_map(|p| match p {
+            Part::EngineResult { call_id, result } => Some((call_id.clone(), result.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Every untrusted tool result in `request`, with its call id.
+pub fn tool_results(request: &ChatRequest) -> Vec<(String, UntrustedData)> {
+    request
+        .messages
+        .iter()
+        .flat_map(|m| m.parts.iter())
+        .filter_map(|p| match p {
+            Part::ToolResult { call_id, content } => Some((call_id.clone(), content.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The text of an untrusted part (a file's name for a file).
+pub fn text_of(data: &UntrustedData) -> String {
+    match data.content() {
+        UntrustedContent::Text(t) => t.clone(),
+        UntrustedContent::File(f) => f.name.clone(),
+    }
+}
+
+/// The names of the tools a request offers.
+pub fn offered(request: &ChatRequest) -> Vec<String> {
+    request.tools.iter().map(|t| t.name.clone()).collect()
+}
+
+// ------------------------------------------------------------ a live model
+
+/// One turn of a [`Live`] model, made when the model is called, from the
+/// journal at that moment and the request (so a turn can name a row id the
+/// engine minted a turn earlier).
+pub type Turn = Box<dyn Fn(&Reader, &ChatRequest) -> ChatOutcome + Send + Sync>;
+
+/// A model whose turns are made when it is called (see [`Turn`]); the last
+/// turn repeats.
+pub struct Live {
+    db: PathBuf,
+    turns: Vec<Turn>,
+    requests: Mutex<Vec<ChatRequest>>,
+}
+
+impl Live {
+    pub fn new(db: &Path, turns: Vec<Turn>) -> Arc<Live> {
+        assert!(!turns.is_empty(), "a live model needs a turn");
+        Arc::new(Live {
+            db: db.to_path_buf(),
+            turns,
+            requests: Mutex::new(Vec::new()),
+        })
+    }
+
+    pub fn requests(&self) -> Vec<ChatRequest> {
+        self.requests.lock().unwrap().clone()
+    }
+
+    pub fn calls(&self) -> usize {
+        self.requests.lock().unwrap().len()
+    }
+}
+
+impl LlmProvider for Live {
+    fn account_id(&self) -> String {
+        "live".into()
+    }
+    fn capabilities(&self, _model: &str) -> ModelCapabilities {
+        ModelCapabilities::default()
+    }
+    fn check_file_parts(&self, _request: &ChatRequest) -> Result<(), ProviderError> {
+        Ok(())
+    }
+    fn stream(
+        &self,
+        request: ChatRequest,
+        _cancel: Arc<dyn CancelSignal>,
+        _sink: Arc<dyn EventSink>,
+    ) -> BoxFuture<Result<ChatOutcome, ProviderError>> {
+        let n = {
+            let mut seen = self.requests.lock().unwrap();
+            seen.push(request.clone());
+            seen.len() - 1
+        };
+        let turn = &self.turns[n.min(self.turns.len() - 1)];
+        let reader = Reader::open(&self.db).unwrap();
+        let out = turn(&reader, &request);
+        Box::pin(async move { Ok(out) })
+    }
+}
+
+/// A turn that ends with `text`.
+pub fn say(text: &str) -> Turn {
+    let text = text.to_string();
+    Box::new(move |_, _| ChatOutcome {
+        text: text.clone(),
+        tool_calls: vec![],
+        usage: None,
+        stop: StopReason::EndTurn,
+    })
+}
+
+/// A turn that asks for `calls` (name, arguments), ids `call-1`, `call-2`, ….
+pub fn ask(calls: Vec<(&str, Value)>) -> Turn {
+    let calls: Vec<(String, String)> = calls
+        .into_iter()
+        .map(|(n, a)| (n.to_string(), a.to_string()))
+        .collect();
+    Box::new(move |_, _| asking(&calls))
+}
+
+/// A turn that asks for one `table_write` with `args`.
+pub fn write(args: Value) -> Turn {
+    ask(vec![("table_write", args)])
+}
+
+/// A turn whose calls are made from the journal when the model is called.
+pub fn ask_with(f: impl Fn(&Reader) -> Vec<(String, Value)> + Send + Sync + 'static) -> Turn {
+    Box::new(move |reader, _| {
+        let calls: Vec<(String, String)> = f(reader)
+            .into_iter()
+            .map(|(n, a)| (n, a.to_string()))
+            .collect();
+        asking(&calls)
+    })
+}
+
+/// A turn that asks for one `table_write` whose arguments are made from the
+/// journal when the model is called.
+pub fn write_with(f: impl Fn(&Reader) -> Value + Send + Sync + 'static) -> Turn {
+    ask_with(move |reader| vec![("table_write".to_string(), f(reader))])
+}
+
+fn asking(calls: &[(String, String)]) -> ChatOutcome {
+    ChatOutcome {
+        text: "recording".into(),
+        tool_calls: calls
+            .iter()
+            .enumerate()
+            .map(|(i, (name, args))| ToolCall {
+                id: format!("call-{}", i + 1),
+                name: name.clone(),
+                arguments_json: args.clone(),
+            })
+            .collect(),
+        usage: None,
+        stop: StopReason::ToolUse,
+    }
+}
+
+/// The id of the newest row of `table`, read from the journal.
+pub fn newest_row(reader: &Reader, table: &str) -> String {
+    reader
+        .table_rows_of(table)
+        .unwrap()
+        .last()
+        .unwrap_or_else(|| panic!("no row in {table} yet"))
+        .row_id
+        .clone()
+}
+
+/// The current version of the newest row of `table`.
+pub fn newest_version(reader: &Reader, table: &str) -> i64 {
+    reader.table_rows_of(table).unwrap().last().unwrap().version
+}
+
+/// The id of the newest row of the step attempt `step_run_id`'s run that
+/// a tool call wrote (for tests that run more than one row).
+pub fn row_written_by(reader: &Reader, step_run_id: &str, call_seq: i64) -> RowHistoryRecord {
+    reader
+        .row_written_at(step_run_id, call_seq)
+        .unwrap()
+        .unwrap_or_else(|| panic!("no after-image for {step_run_id} call {call_seq}"))
+}
+
+/// True when `text` holds `n` as a word of its own (not inside a UUID).
+pub fn holds_version(text: &str, n: i64) -> bool {
+    let n = n.to_string();
+    text.split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|w| w == n)
 }

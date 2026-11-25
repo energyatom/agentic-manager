@@ -1,0 +1,11 @@
+schema_version: 2
+name: Others
+team: side
+description: The other team's table.
+key: ref
+columns:
+  - id: ref
+    type: text
+    required: true
+  - id: title
+    type: text
