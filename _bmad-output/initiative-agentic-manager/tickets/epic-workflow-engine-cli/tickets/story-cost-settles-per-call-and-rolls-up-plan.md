@@ -553,6 +553,7 @@ The manager read these on 2026-11-25. The owner checks them at review. The build
 | openai | gpt-5-mini | 0.25 | 2.00 | developers.openai.com/api/docs/pricing (Standard) |
 
 - **Rate:** 1 USD = 92.292247 INR. Mid-market rate from x-rates.com at 12:34 UTC on 25 Nov 2026. Written as `rates: [{ currency: INR, per_usd: 92.292247 }]` in the sample's file only. `templates/prices.yaml` carries no rate, because the company currency is the owner's.
+  - **Owner, at review (2026-11-25):** "Model prices are approved. Change the sample's INR rate to 95.0 (deliberately rounded up, so INR spend is never understated), and note that in the file's source comment in templates/prices.yaml." The sample's file now carries `per_usd: 95.0`. The golden snapshot's rate-snapshot id moved from `6433b3384aa4` to `1323f85eb009`, the sha256 of the changed file.
 - **Models per file:**
   - `templates/prices.yaml`: all four models.
   - The sample's file: the three models its seats name (`claude-sonnet-5-5`, `claude-haiku-5-5` and `gpt-5-mini`), plus the INR rate.

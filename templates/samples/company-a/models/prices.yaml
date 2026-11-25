@@ -15,4 +15,4 @@ models:
     output_usd_per_mtok: 2.0
 rates:
   - currency: INR
-    per_usd: 92.292247
+    per_usd: 95.0

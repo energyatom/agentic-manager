@@ -14,10 +14,11 @@
 # US-only inference (none is sent in v1).
 #
 # No `rates:` here: the company currency is the owner's. The sample company's
-# INR rate, in templates/samples/company-a/models/prices.yaml, is the
-# x-rates.com mid-market rate at 12:34 UTC on 25 Nov 2026 (1 USD = 92.292247
-# INR). That file names its sources here because a comment in a project's
-# config file is a validate warning.
+# INR rate, in templates/samples/company-a/models/prices.yaml, is 95.0 INR per
+# USD: the x-rates.com mid-market rate at 12:34 UTC on 25 Nov 2026 was
+# 92.292247, deliberately rounded up by the owner (2026-11-25) so INR spend is
+# never under-stated. That file names its sources here because a comment in a
+# project's config file is a validate warning.
 schema_version: 2
 updated: 2026-11-25
 models:
