@@ -155,7 +155,8 @@ fn later_story(kind: InboxKind) -> Option<&'static str> {
     }
 }
 
-/// The checks the API makes before it writes, from committed rows: the item
+/// The checks the API makes before it writes, from one committed state (the
+/// caller's read transaction, with the item it read there): the item
 /// exists and is open, the decision fits its kind, a return or answer has
 /// its text, a tainted approve has the id typed back, and the step waits.
 fn check(reader: &Reader, item: &InboxItemRow, body: &ResolveBody) -> Result<Decision, Refusal> {
@@ -284,22 +285,35 @@ pub(crate) async fn resolve(
     let done = tokio::task::spawn_blocking(
         move || -> Result<Result<ResolutionDto, Refusal>, StoreError> {
             let reader = Reader::open(&db)?;
-            let Some(item) = reader.inbox_item(&id)? else {
-                return Ok(Err(Refusal::NotFound));
-            };
-            let Some(run_before) = reader.run(&item.run_id)? else {
-                return Ok(Err(Refusal::NotFound));
-            };
-            let decision = match check(&reader, &item, &body) {
-                Ok(decision) => decision,
+            // Owner (2026-11-25): the item and the step status are read in
+            // one transaction, not re-read, so the checks see one committed
+            // state; it ends before the write, so a refused write reads back
+            // what committed since.
+            let prechecked = reader.snapshot(|reader| {
+                let Some(item) = reader.inbox_item(&id)? else {
+                    return Ok(Err(Refusal::NotFound));
+                };
+                #[cfg(test)]
+                tests::after_item_read(&id);
+                let Some(run_before) = reader.run(&item.run_id)? else {
+                    return Ok(Err(Refusal::NotFound));
+                };
+                let decision = match check(reader, &item, &body) {
+                    Ok(decision) => decision,
+                    Err(refusal) => return Ok(Err(refusal)),
+                };
+                if item.kind == InboxKind::Review
+                    && matches!(decision, Decision::Approve | Decision::Return)
+                    && let Err(refusal) = ready_to_go_on(reader, &item, pin.as_deref())?
+                {
+                    return Ok(Err(refusal));
+                }
+                Ok(Ok((item, run_before, decision)))
+            })?;
+            let (item, run_before, decision) = match prechecked {
+                Ok(prechecked) => prechecked,
                 Err(refusal) => return Ok(Err(refusal)),
             };
-            if item.kind == InboxKind::Review
-                && matches!(decision, Decision::Approve | Decision::Return)
-                && let Err(refusal) = ready_to_go_on(&reader, &item, pin.as_deref())?
-            {
-                return Ok(Err(refusal));
-            }
             // The one Human-only command (AD-15): the person is the owner as
             // Reviewer, whatever the request says.
             let recorded = writer.resolve_inbox_item(
@@ -375,5 +389,491 @@ pub(crate) async fn resolve(
             Some(resolution) => envelope::json(StatusCode::OK, &resolution),
             None => envelope::internal(),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Post-merge fix of story 3.4 (owner, 2026-11-25): the second-resolve
+    //! race. `resolve` read the item, then the step's status in a separate
+    //! read; a first resolve that committed between the two made a second
+    //! request answer 409 `not-waiting` instead of `item-resolved`. The
+    //! owner's fix: the item and the step status are read in one
+    //! transaction, not re-read.
+    //!
+    //! The seam these tests need, test-only (the fix adds it): `resolve`'s
+    //! blocking work calls [`after_item_read`] with the item's id right
+    //! after it first reads the item, inside the read transaction its
+    //! pre-checks share, under `#[cfg(test)]`:
+    //!
+    //! ```ignore
+    //! #[cfg(test)]
+    //! tests::after_item_read(&id);
+    //! ```
+    //!
+    //! A test commits another request's decision there, so the race is
+    //! reproduced without timing: the item read as open, the first resolve
+    //! committed, then every later read. No store, no network beyond the
+    //! system temp folder; the handler is called directly.
+    use super::*;
+    use am_domain::{Actor, Taint};
+    use am_store::{
+        AttemptWrites, CallPurpose, NewInboxItem, StepInput, Store, WriteCommand, new_id,
+    };
+    use serde_json::Value;
+    use std::path::PathBuf;
+    use std::sync::Condvar;
+    use std::time::Duration;
+
+    type Hook = Box<dyn FnOnce() + Send>;
+
+    /// The hooks a test set, by item id; each runs once, in the order set.
+    static HOOKS: Mutex<Vec<(String, Hook)>> = Mutex::new(Vec::new());
+    /// Every item id `resolve` reported reading, in order.
+    static READS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+    fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+        m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// The seam: `resolve` calls this right after it first reads the item
+    /// `id` (inside the read transaction its pre-checks share). It runs the
+    /// first hook a test set for `id`, if any.
+    pub(super) fn after_item_read(id: &str) {
+        lock(&READS).push(id.to_string());
+        let hook = {
+            let mut hooks = lock(&HOOKS);
+            hooks
+                .iter()
+                .position(|(k, _)| k == id)
+                .map(|i| hooks.remove(i).1)
+        };
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+
+    /// Runs `hook` once, the next time a resolve of `id` has read the item.
+    fn on_item_read(id: &str, hook: impl FnOnce() + Send + 'static) {
+        lock(&HOOKS).push((id.to_string(), Box::new(hook)));
+    }
+
+    /// How many times a resolve of `id` reported reading the item.
+    fn reads_of(id: &str) -> usize {
+        lock(&READS).iter().filter(|r| r.as_str() == id).count()
+    }
+
+    const SEAM: &str = "the seam is missing: `resolve` must call `tests::after_item_read(&id)` right after it first reads the item (inside the read transaction its pre-checks share)";
+
+    /// The snapshot hash the rig's run pinned, and what its pin check finds.
+    const PINNED: &str = "0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f9";
+
+    struct Pinned;
+
+    impl PinCheck for Pinned {
+        fn current_snapshot(&self) -> Result<String, String> {
+            Ok(PINNED.into())
+        }
+    }
+
+    fn engine() -> Actor {
+        Actor::System {
+            component: "engine".into(),
+        }
+    }
+
+    fn note_of(decision: Decision) -> Option<String> {
+        (decision == Decision::Return).then(|| "tighten it".to_string())
+    }
+
+    fn body_of(decision: Decision) -> String {
+        match note_of(decision) {
+            Some(note) => serde_json::json!({"decision": decision.as_str(), "note": note}),
+            None => serde_json::json!({"decision": decision.as_str()}),
+        }
+        .to_string()
+    }
+
+    /// A store with one run of `make`, `check` and `next`: `make` succeeded,
+    /// the gate `check` waits with an open, clean Review item on its output
+    /// (`max_returns` 2); the run pinned [`PINNED`]. The server's state
+    /// holds the store's path, its writer and a pin check finding the pin.
+    struct Rig {
+        dir: PathBuf,
+        db: PathBuf,
+        store: Store,
+        state: AppState,
+        run: String,
+        item: String,
+        gate: String,
+    }
+
+    impl Drop for Rig {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    fn rig() -> Rig {
+        let dir = std::env::temp_dir().join(format!("am-server-inbox-race-{}", new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let db = dir.join("state.db");
+        let store = Store::open(&db).unwrap();
+        let w = store.writer();
+        let run = new_id();
+        w.exec(
+            engine(),
+            WriteCommand::CreateRun {
+                run_id: run.clone(),
+                workflow: "wf".into(),
+                origin: "manual".into(),
+                steps: vec!["make".into(), "check".into(), "next".into()],
+                config_hash: Some(PINNED.into()),
+            },
+        )
+        .unwrap();
+        let steps = store.reader().unwrap().steps(&run).unwrap();
+        let (make, gate) = (steps[0].id.clone(), steps[1].id.clone());
+        w.exec(
+            engine(),
+            WriteCommand::StartAttempt {
+                step_run_id: make.clone(),
+                inputs: vec![],
+                taint: Taint::Clean,
+                prompt: vec![],
+                writes: AttemptWrites {
+                    seat: "seat".into(),
+                    table: None,
+                    document: None,
+                },
+            },
+        )
+        .unwrap();
+        let call = new_id();
+        w.exec(
+            engine(),
+            WriteCommand::ReserveCall {
+                step_run_id: make.clone(),
+                call_id: call.clone(),
+                call_seq: 1,
+                reserved_micro_usd: 0,
+                rate_snapshot: "none".into(),
+                taint: Taint::Clean,
+                purpose: CallPurpose::Turn,
+                prompt: vec![],
+            },
+        )
+        .unwrap();
+        w.exec(
+            engine(),
+            WriteCommand::SettleAndFinishStep {
+                call_id: call,
+                usage: None,
+                cost_micro_usd: None,
+                step_run_id: make.clone(),
+                status: "succeeded".into(),
+                output: Some("the output to review".into()),
+            },
+        )
+        .unwrap();
+        let item = new_id();
+        w.exec(
+            engine(),
+            WriteCommand::PauseStep {
+                step_run_id: gate.clone(),
+                inputs: vec![StepInput {
+                    kind: "step_output".into(),
+                    from_step_run: Some(make.clone()),
+                    from_item: None,
+                    label: "step:make@1".into(),
+                    taint: Taint::Clean,
+                }],
+                taint: Taint::Clean,
+                item: NewInboxItem {
+                    id: item.clone(),
+                    kind: InboxKind::Review,
+                    payload: Some(make),
+                    taint: Taint::Clean,
+                    title: "Review before step check goes on".into(),
+                    body: "Step `check` waits for your review of the output of step `make`.".into(),
+                    max_returns: Some(2),
+                },
+            },
+        )
+        .unwrap();
+        let state = AppState::builder(0)
+            .project_db(db.clone())
+            .project_writer(store.writer())
+            .pin_check(Arc::new(Pinned))
+            .build();
+        Rig {
+            dir,
+            db,
+            store,
+            state,
+            run,
+            item,
+            gate,
+        }
+    }
+
+    /// The resolve route's handler, called directly: its status and its
+    /// JSON body.
+    async fn post(state: &AppState, id: &str, decision: Decision) -> (u16, Value) {
+        let response = resolve(
+            State(state.clone()),
+            Path(id.to_string()),
+            Bytes::from(body_of(decision)),
+        )
+        .await;
+        let status = response.status().as_u16();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("a body");
+        let body = serde_json::from_slice(&bytes).expect("a JSON body");
+        (status, body)
+    }
+
+    fn code(body: &Value) -> &str {
+        body["code"].as_str().unwrap_or("")
+    }
+
+    impl Rig {
+        /// Another request's decision, as its handler records it: the one
+        /// Human-only command, and then (when `applied`) the engine's apply.
+        fn commit(&self, decision: Decision, applied: bool) -> impl FnOnce() + Send + 'static {
+            let (w, db, item) = (self.store.writer(), self.db.clone(), self.item.clone());
+            move || {
+                w.resolve_inbox_item(
+                    HumanActor::new("owner", REVIEWER_HAT),
+                    &item,
+                    decision,
+                    note_of(decision),
+                )
+                .expect("the first request records its decision");
+                if applied {
+                    am_engine::gate::apply_resolution(&w, &Reader::open(&db).unwrap(), &item)
+                        .expect("the first request applies it");
+                }
+            }
+        }
+
+        fn audit(&self) -> Vec<Value> {
+            let mut out = Vec::new();
+            Reader::open(&self.db)
+                .unwrap()
+                .export_audit_jsonl(&mut out)
+                .unwrap();
+            String::from_utf8(out)
+                .unwrap()
+                .lines()
+                .map(|l| serde_json::from_str(l).unwrap())
+                .collect()
+        }
+
+        /// Exactly one resolution, `decision`'s: the item holds it, one
+        /// `inbox.resolved` entry, the gate attempt moved once (one
+        /// `step.finished` or `step.looped_back` entry on it) to what the
+        /// decision gives, no other item.
+        fn assert_one_resolution(&self, decision: Decision, case: &str) {
+            let reader = Reader::open(&self.db).unwrap();
+            let item = reader.inbox_item(&self.item).unwrap().unwrap();
+            assert_eq!(item.status, "resolved", "{case}");
+            assert_eq!(item.decision, Some(decision), "{case}");
+            let audit = self.audit();
+            let resolved: Vec<&Value> = audit
+                .iter()
+                .filter(|e| e["action"] == "inbox.resolved" && e["target"] == self.item.as_str())
+                .collect();
+            assert_eq!(
+                resolved.len(),
+                1,
+                "one inbox.resolved entry ({case}): {resolved:#?}"
+            );
+            assert_eq!(resolved[0]["args"]["decision"], decision.as_str(), "{case}");
+            let moves: Vec<&Value> = audit
+                .iter()
+                .filter(|e| {
+                    e["target"] == self.gate.as_str()
+                        && (e["action"] == "step.finished" || e["action"] == "step.looped_back")
+                })
+                .collect();
+            assert_eq!(
+                moves.len(),
+                1,
+                "the gate is applied once ({case}): {moves:#?}"
+            );
+            let steps = reader.steps(&self.run).unwrap();
+            let shape: Vec<(String, i64, String)> = steps
+                .iter()
+                .map(|s| (s.step_key.clone(), s.attempt, s.status.clone()))
+                .collect();
+            let want: &[(&str, i64, &str)] = match decision {
+                Decision::Approve => &[
+                    ("make", 1, "succeeded"),
+                    ("check", 1, "succeeded"),
+                    ("next", 1, "queued"),
+                ],
+                Decision::Reject => &[
+                    ("make", 1, "succeeded"),
+                    ("check", 1, "failed"),
+                    ("next", 1, "queued"),
+                ],
+                _ => &[
+                    ("make", 1, "succeeded"),
+                    ("make", 2, "queued"),
+                    ("check", 1, "looped_back"),
+                    ("check", 2, "queued"),
+                    ("next", 1, "queued"),
+                ],
+            };
+            let want: Vec<(String, i64, String)> = want
+                .iter()
+                .map(|(k, a, s)| (k.to_string(), *a, s.to_string()))
+                .collect();
+            assert_eq!(shape, want, "{case}");
+            let run = reader.run(&self.run).unwrap().unwrap();
+            let run_status = if decision == Decision::Reject {
+                "failed"
+            } else {
+                "running"
+            };
+            assert_eq!(run.status, run_status, "{case}");
+            assert_eq!(
+                reader.inbox_items(&self.run).unwrap().len(),
+                1,
+                "no other item ({case})"
+            );
+        }
+    }
+
+    /// Who commits first (A) and who read the item while it was open (B).
+    const PAIRS: [(Decision, Decision); 5] = [
+        (Decision::Approve, Decision::Reject),
+        (Decision::Reject, Decision::Approve),
+        (Decision::Approve, Decision::Return),
+        (Decision::Return, Decision::Approve),
+        (Decision::Approve, Decision::Approve),
+    ];
+
+    /// The race, deterministic (owner, 2026-11-25): request B reads the
+    /// item while it is open; request A's decision commits right then
+    /// (recorded only, as A's handler is between its write and its apply;
+    /// or recorded and applied); B goes on. B's answer is 409
+    /// `item-resolved`, never `not-waiting` (nor `not-continuable` or a
+    /// 400 from a read inside a stale snapshot), and A's decision alone is
+    /// recorded and applied, once.
+    #[tokio::test]
+    async fn a_resolve_that_read_the_item_before_another_committed_answers_item_resolved() {
+        for (a, b) in PAIRS {
+            for a_applied in [false, true] {
+                let case = format!(
+                    "A {} ({}), then B {}",
+                    a.as_str(),
+                    if a_applied {
+                        "recorded and applied"
+                    } else {
+                        "recorded"
+                    },
+                    b.as_str()
+                );
+                let r = rig();
+                on_item_read(&r.item, r.commit(a, a_applied));
+
+                let (status, body) = post(&r.state, &r.item, b).await;
+
+                assert_eq!(reads_of(&r.item), 1, "{SEAM} ({case})");
+                assert_ne!(
+                    code(&body),
+                    "not-waiting",
+                    "the stale read ({case}): B read the item open, A committed, then B read the step"
+                );
+                assert_eq!(
+                    (status, code(&body)),
+                    (409, "item-resolved"),
+                    "{case}: {body}"
+                );
+                if !a_applied {
+                    let reader = Reader::open(&r.db).unwrap();
+                    am_engine::gate::apply_resolution(&r.store.writer(), &reader, &r.item)
+                        .expect("A's handler applies its decision after B's answer");
+                }
+                r.assert_one_resolution(a, &case);
+            }
+        }
+    }
+
+    /// A meeting point for `n` requests, with a 5 s limit (a request that
+    /// never comes is recorded, not waited for forever).
+    struct Meeting {
+        n: usize,
+        here: Mutex<usize>,
+        cv: Condvar,
+        late: Mutex<bool>,
+    }
+
+    impl Meeting {
+        fn new(n: usize) -> Arc<Meeting> {
+            Arc::new(Meeting {
+                n,
+                here: Mutex::new(0),
+                cv: Condvar::new(),
+                late: Mutex::new(false),
+            })
+        }
+
+        fn arrive(&self) {
+            let mut here = lock(&self.here);
+            *here += 1;
+            self.cv.notify_all();
+            let (_here, waited) = self
+                .cv
+                .wait_timeout_while(here, Duration::from_secs(5), |h| *h < self.n)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if waited.timed_out() {
+                *lock(&self.late) = true;
+            }
+        }
+    }
+
+    /// Both requests read the item while it is open, then both go on at
+    /// once (owner: "both resolves' prechecks before either commit"), with
+    /// approve vs reject, approve vs return and approve vs approve, many
+    /// rounds: exactly one 200, the other 409 `item-resolved`; one decision
+    /// recorded, the winner's, applied once.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn two_resolves_that_both_read_the_item_open_record_one_decision() {
+        for (a, b) in [
+            (Decision::Approve, Decision::Reject),
+            (Decision::Approve, Decision::Return),
+            (Decision::Approve, Decision::Approve),
+        ] {
+            for round in 0..10 {
+                let case = format!("{} and {}, round {round}", a.as_str(), b.as_str());
+                let r = rig();
+                let meeting = Meeting::new(2);
+                for _ in 0..2 {
+                    let m = meeting.clone();
+                    on_item_read(&r.item, move || m.arrive());
+                }
+
+                let ((sa, ba), (sb, bb)) =
+                    tokio::join!(post(&r.state, &r.item, a), post(&r.state, &r.item, b));
+
+                assert_eq!(reads_of(&r.item), 2, "{SEAM} ({case})");
+                assert!(!*lock(&meeting.late), "both reached the seam ({case})");
+                let mut statuses = [sa, sb];
+                statuses.sort_unstable();
+                assert_eq!(statuses, [200, 409], "{case}: {ba} / {bb}");
+                let (winner, lost) = if sa == 200 { (a, &bb) } else { (b, &ba) };
+                assert_eq!(code(lost), "item-resolved", "{case}: {lost}");
+                r.assert_one_resolution(winner, &case);
+            }
+        }
     }
 }

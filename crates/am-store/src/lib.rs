@@ -3138,6 +3138,29 @@ impl Reader {
         Ok(Reader { conn })
     }
 
+    /// Runs `f` inside one read transaction on this connection, so every
+    /// read `f` makes sees one committed state (the WAL snapshot its first
+    /// read takes): a commit made after that read is not seen until `f`
+    /// returns. The transaction ends when `f` returns, whatever it returns,
+    /// so later reads see what committed since. `f` must not call
+    /// `snapshot` again.
+    pub fn snapshot<T>(
+        &self,
+        f: impl FnOnce(&Reader) -> Result<T, StoreError>,
+    ) -> Result<T, StoreError> {
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.conn,
+            rusqlite::TransactionBehavior::Deferred,
+        )?;
+        let out = f(self);
+        // It wrote nothing, so ending it either way is the same; a failure
+        // to end it is an error, as a reader left inside it reads stale.
+        let ended = tx.rollback();
+        let out = out?;
+        ended?;
+        Ok(out)
+    }
+
     /// The database's schema version (`user_version`), so a lock-free
     /// reader can tell a database this binary has not migrated yet (older
     /// than [`SCHEMA_VERSION`]) before it reads columns that are not there.
