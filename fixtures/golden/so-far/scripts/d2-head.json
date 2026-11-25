@@ -1,0 +1,14 @@
+{
+  "turns": [
+    {
+      "step": "produce",
+      "text": "Document A is written from the processed rows of Table T1, naming the item_id of each row it uses.",
+      "usage": [1200, 90]
+    },
+    {
+      "step": "report",
+      "text": "The draft of Report R1 leads with the decision the Owner needs, then lists each point with the document it comes from.",
+      "usage": [1100, 110]
+    }
+  ]
+}

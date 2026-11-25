@@ -1,0 +1,43 @@
+{
+  "about": "Story 3.24 (owner, 2026-11-25, Q1 and Q3): the golden run so far. workflow.yaml beside this file is the cut-down copy of the sample's report flow: the real flow with exactly the entries below taken out, each tagged with the story that restores it: a story of this epic after this one (stories.own) in its build order, not yet built. Put back alone, each entry is refused by agentic run at its step; a story that makes an entry runnable deletes or narrows it, edits workflow.yaml to match and moves both expected results in snapshot.txt in the same commit, so the list only shrinks; story 3.13 deletes the copy, this list and the drift test once the list is empty and the copy equals the real flow. The copy is a fixture only, never a template. Read by crates/am-e2e/tests/golden/, which spells none of these ids (AD-23).",
+  "clock": "2026-11-25T09:00:00Z",
+  "stories": {
+    "tickets": "_bmad-output/initiative-agentic-manager/tickets/epic-workflow-engine-cli/tickets/tickets.toml",
+    "epic": 3,
+    "own": 24
+  },
+  "removed_keys": [
+    {
+      "step": "produce",
+      "key": "handoff",
+      "until": ["3.15"]
+    },
+    {
+      "step": "consolidate",
+      "key": "join",
+      "until": ["3.14"]
+    },
+    {
+      "step": "consolidate",
+      "key": "handoff",
+      "until": ["3.15"]
+    },
+    {
+      "step": "report",
+      "key": "handoff",
+      "until": ["3.15", "3.16"]
+    }
+  ],
+  "removed_steps": [
+    {
+      "step": "branches",
+      "until": ["3.14"],
+      "why": "a fan-out step (seats, max_parallel): with those keys removed it would have no seat, so no key removal can make it run"
+    },
+    {
+      "step": "approve",
+      "until": ["3.13"],
+      "why": "it runs on the Owner's seat, which has no model, and removing keys cannot give it gate: review (DR-137)"
+    }
+  ]
+}

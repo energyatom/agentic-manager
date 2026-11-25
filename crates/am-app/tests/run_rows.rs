@@ -102,6 +102,7 @@ impl Env {
             identity: Arc::new(FakeProjectIdentity::new("Test Mac")),
             terminal: Box::new(FakeTerminal::new()),
             providers,
+            clock: am_testkit::FakeClock::at("2026-11-25T09:00:00Z"),
         };
         let argv = vec![
             workflow.to_string(),

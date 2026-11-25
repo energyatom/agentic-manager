@@ -15,6 +15,7 @@
 //!     identity: Arc<dyn ProjectIdentity>,
 //!     terminal: Box<dyn Terminal>,
 //!     providers: am_app::cli::Providers,
+//!     clock: Arc<dyn am_domain::Clock>,   // story 3.24: the continued run's clock
 //! }
 //! am_app::cli::gate(args: &[String], ctx: GateContext, out, err).await -> i32
 //!     args: [<item id>] [--project <folder>]
@@ -335,6 +336,7 @@ impl Env {
             identity: Arc::new(FakeProjectIdentity::new("Test Mac")),
             terminal: Box::new(FakeTerminal::new()),
             providers: local(llm),
+            clock: am_testkit::FakeClock::at("2026-11-25T09:00:00Z"),
         };
         let (mut out, mut err) = (Vec::new(), Vec::new());
         let code = run(&argv, ctx, &mut out, &mut err).await;
@@ -365,6 +367,7 @@ impl Env {
             identity: Arc::new(FakeProjectIdentity::new("Test Mac")),
             terminal: Box::new(term.clone()),
             providers,
+            clock: am_testkit::FakeClock::at("2026-11-25T09:00:00Z"),
         };
         let (mut out, mut err) = (Vec::new(), Vec::new());
         let code = gate(argv, ctx, &mut out, &mut err).await;

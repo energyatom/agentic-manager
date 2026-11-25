@@ -37,6 +37,10 @@ use serde_json::{Value, json};
 /// The pinned snapshot's hash: 64 lowercase hex characters.
 pub const HASH: &str = "0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f9";
 
+/// The FakeClock instant of every plan and every `agentic run` this rig
+/// makes (story 3.24: `RunContext.clock`, the run's clock port).
+pub const CLOCK: &str = "2026-11-24T10:00:00Z";
+
 /// The poisoned input's label and text (the "untrusted page" a test plants
 /// on a step's plan; AD-10).
 pub const POISON_LABEL: &str = "test:poisoned-page";
@@ -181,7 +185,7 @@ pub fn plan(steps: Vec<StepPlan>) -> RunPlan {
         workflow: "wf".into(),
         config_hash: HASH.into(),
         steps,
-        clock: am_testkit::FakeClock::at("2026-11-24T10:00:00Z"),
+        clock: am_testkit::FakeClock::at(CLOCK),
         row_tool: Some(Arc::new(TableWrite::new())),
     }
 }
@@ -548,6 +552,17 @@ impl Cli {
         root.canonicalize().unwrap()
     }
 
+    /// A copy of the folder `from` (a fixture or a template) under this
+    /// HOME's folder for projects, by its own name, never opened on this
+    /// Mac (story 3.24: the golden run copies the sample three times a
+    /// pass), made by [`copy_files`].
+    pub fn copy_from(&self, from: &Path) -> PathBuf {
+        let name = from.file_name().expect("a folder with a name");
+        let root = self.dir.path().join("projects").join(name);
+        copy_files(from, &root);
+        root.canonicalize().unwrap()
+    }
+
     pub fn layout(&self, root: &Path) -> Option<RuntimeLayout> {
         let id = am_config::read_company(root).ok()?.project_id?;
         Some(self.places.base.project(&id))
@@ -577,6 +592,7 @@ impl Cli {
             identity: Arc::new(FakeProjectIdentity::new("Test Mac")),
             terminal: Box::new(FakeTerminal::new()),
             providers,
+            clock: am_testkit::FakeClock::at(CLOCK),
         };
         let (mut out, mut err) = (Vec::new(), Vec::new());
         let code = am_app::cli::run(&argv, ctx, &mut out, &mut err).await;
@@ -596,6 +612,33 @@ impl Cli {
             code,
             out: String::from_utf8(out).unwrap(),
             err: String::from_utf8(err).unwrap(),
+        }
+    }
+}
+
+/// Copies the folder `from` into `to` (created as needed), file by file:
+/// each file's bytes read, then written (never `std::fs::copy`, whose
+/// clonefile(2) fails with EPERM under `~/Library/CloudStorage/`). Unlike
+/// `am_testkit::copy_tree` it syncs nothing to disk: a copy here is a
+/// temporary project that lives for one test, and a sync per file is most
+/// of a golden pass's time (story 3.24). Links are not followed or copied.
+pub fn copy_files(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap_or_else(|e| panic!("cannot create {}: {e}", to.display()));
+    let mut entries: Vec<_> = std::fs::read_dir(from)
+        .unwrap_or_else(|e| panic!("cannot list {}: {e}", from.display()))
+        .map(|e| e.unwrap())
+        .collect();
+    entries.sort_by_key(|e| e.file_name());
+    for entry in entries {
+        let target = to.join(entry.file_name());
+        let kind = entry.file_type().unwrap();
+        if kind.is_dir() {
+            copy_files(&entry.path(), &target);
+        } else if kind.is_file() {
+            let bytes = std::fs::read(entry.path())
+                .unwrap_or_else(|e| panic!("cannot read {}: {e}", entry.path().display()));
+            std::fs::write(&target, bytes)
+                .unwrap_or_else(|e| panic!("cannot write {}: {e}", target.display()));
         }
     }
 }

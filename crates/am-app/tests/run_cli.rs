@@ -19,7 +19,10 @@
 //!     terminal: Box<dyn Terminal>,
 //!     providers: Arc<dyn Fn(&am_config::ModelRef)
 //!                    -> Result<Arc<dyn LlmProvider>, String> + Send + Sync>,
+//!     clock: Arc<dyn am_domain::Clock>,   // story 3.24: the run's clock
 //! }
+//! am_app::cli::system_clock() -> Arc<dyn am_domain::Clock>
+//!     the clock `main` gives the binary (story 3.24); tests pass FakeClock
 //! am_app::cli::unwired_providers() -> that factory type
 //!     the factory `main` gives the binary: it wires no provider and
 //!     refuses every model in words
@@ -64,6 +67,9 @@ use am_testkit::{FakeLlm, FakeProjectIdentity, FakeTerminal, ScriptedTurn};
 
 /// The schema version before migration 0006 (the run's pin and the times).
 const BEFORE_RUN_PIN: i64 = 5;
+
+/// The run's clock (story 3.24: `RunContext.clock`).
+const CLOCK: &str = "2026-11-25T09:00:00Z";
 
 /// The provider factory of `RunContext`: a seat's model to the provider
 /// that serves it, or a refusal in words.
@@ -396,6 +402,7 @@ async fn run_argv(env: &Env, argv: &[String], providers: Providers, term: FakeTe
         identity: Arc::new(FakeProjectIdentity::new("Test Mac")),
         terminal: Box::new(term),
         providers,
+        clock: am_testkit::FakeClock::at(CLOCK),
     };
     let (mut out, mut err) = (Vec::new(), Vec::new());
     let code = run(argv, ctx, &mut out, &mut err).await;
@@ -1501,6 +1508,7 @@ async fn a_server_the_pinned_snapshot_enables_refuses_the_run() {
         }),
         terminal: Box::new(FakeTerminal::new()),
         providers: kit.providers(),
+        clock: am_testkit::FakeClock::at(CLOCK),
     };
     let (mut out, mut err) = (Vec::new(), Vec::new());
 
