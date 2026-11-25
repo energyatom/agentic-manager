@@ -1,0 +1,12 @@
+schema_version: 2
+name: Record
+team: core
+description: A writing step and a step that declares nothing.
+steps:
+  - id: collect
+    seat: writer
+    instruction: Record each entry you are given with table_write.
+    table: entries
+  - id: plain
+    seat: writer
+    instruction: Say in one line what was recorded.

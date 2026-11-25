@@ -188,10 +188,16 @@ pub enum StoreError {
     WriterGone,
     #[error("{0}")]
     Invalid(String),
-    /// Story 3.6 (owner Q2): a row write the row's state refuses: an
-    /// update read at a version the row is no longer (or not yet) at, or
-    /// of a row the table does not hold. The words name the row and its
-    /// current version, never a value of the write.
+    /// Story 3.6 (owner Q2): a row write the row's state or the seat's data
+    /// refuses, in words the seat may act on (an untrusted error result;
+    /// the step goes on): an update read at a version the row is no longer
+    /// (or not yet) at; an update of a row the table does not hold; data
+    /// or a patch that repeats a key at any depth; an insert or a patch
+    /// past `ROW_MAX_BYTES` or `ROW_MAX_COLUMNS`; an update whose merged
+    /// row would pass either cap (the ToolGate slice's review round 1, R1).
+    /// The words name the row, its current version, the caps and the
+    /// write's own sizes, never a value of the write or a size of a stored
+    /// row.
     #[error("{0}")]
     RowRefused(String),
     #[error("no pending config intent {0}")]
@@ -630,9 +636,21 @@ impl WriteCommand {
                 args,
                 ..
             } => {
+                // Story 3.6 (review round 1, R9): a ToolGate refusal's
+                // `taint` is the flag every other entry writes, 0 or 1 (any
+                // other value is refused in `execute`); every other argument
+                // is kept as given.
+                let flagged = action == TOOLGATE_REFUSED;
                 let mut named: serde_json::Map<String, Value> = args
                     .iter()
-                    .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+                    .map(|(k, v)| {
+                        let value = match (flagged && k == "taint", v.as_str()) {
+                            (true, "0") => Value::from(0),
+                            (true, "1") => Value::from(1),
+                            _ => Value::String(v.clone()),
+                        };
+                        (k.clone(), value)
+                    })
                     .collect();
                 if let Some(h) = hash {
                     named.insert("sha256".into(), Value::String(h.clone()));
@@ -890,9 +908,11 @@ impl Writer {
     /// committed taint, the write's and the row's), the call `succeeded`
     /// with its result kind `engine`, and `row.written` (ids, op, version,
     /// call sequence, taint, a column count; never the row's data). A key
-    /// that holds its write already writes nothing and returns `Ok`. An
-    /// update read at another version, or of a row the table does not
-    /// hold, is [`StoreError::RowRefused`]; every refusal writes nothing.
+    /// that holds this write already (the same tool call id, actor, table
+    /// and op kind) writes nothing and returns `Ok`; any other write at the
+    /// key is refused. A stale version, a row the table does not hold, a
+    /// repeated key or data past a cap is [`StoreError::RowRefused`]; every
+    /// refusal writes nothing.
     ///
     /// Until the ToolGate slice, no shipped code outside am-store calls it
     /// (`cargo xtask check-deps`, the owner's condition).
@@ -1079,6 +1099,9 @@ fn apply_resolve(conn: &mut Connection, actor: &Actor, r: &Resolve) -> Result<()
     Ok(())
 }
 
+/// ToolGate's refusal entry (story 3.6): its `taint` argument is a flag.
+const TOOLGATE_REFUSED: &str = "toolgate.refused";
+
 /// The one command executor (story 2.12, AD-6): checks the command, runs it
 /// and appends its audit entries in the caller's transaction. The project
 /// store's writer thread and the user store's guard ([`user::UserStore`])
@@ -1096,6 +1119,14 @@ pub(crate) fn execute(
     {
         return Err(StoreError::Invalid(format!(
             "refused audit entry: a `{action}` entry is written only with a config intent"
+        )));
+    }
+    if let WriteCommand::Audit { action, args, .. } = cmd
+        && action == TOOLGATE_REFUSED
+        && args.get("taint").is_some_and(|t| t != "0" && t != "1")
+    {
+        return Err(StoreError::Invalid(format!(
+            "refused audit entry: a `{TOOLGATE_REFUSED}` entry's `taint` is a flag, 0 or 1"
         )));
     }
     if let WriteCommand::Audit { hash: Some(h), .. } = cmd

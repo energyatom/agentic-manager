@@ -1314,8 +1314,9 @@ fn store_slice_refused(what: &str, file: &str, source: &str, markers: &[&str], w
 /// row-write command until the ToolGate slice): am-store's definition and
 /// its own `#[cfg(test)]` calls, tests, comments and literals pass. Each
 /// planted call fails, naming the file, the line, `apply_row_write` and
-/// AD-21: in the engine's driver, in the file the ToolGate slice will make
-/// its one caller (not yet), in am-app and in am-server; split over lines
+/// AD-21: in the engine's driver, in am-app and in am-server (the ToolGate
+/// slice widens the rule to its one caller, the engine's port
+/// implementation, `crates/am-engine/src/row_writer.rs`); split over lines
 /// and spaced around `.`; by path (`Writer::apply_row_write(&w, …)`), also
 /// with spaces around `::`.
 #[test]
@@ -1331,11 +1332,6 @@ fn the_row_write_command_is_named_only_in_the_store() {
     let call = "fn write(w: &am_store::Writer, a: Actor, x: RowWrite) {\n    let _ = w.apply_row_write(a, x);\n}\n";
     for (what, file, source) in [
         ("the engine's driver", "crates/am-engine/src/run.rs", call),
-        (
-            "the engine's port file, before the ToolGate slice",
-            "crates/am-engine/src/row_writer.rs",
-            call,
-        ),
         ("am-app", "crates/am-app/src/run.rs", call),
         ("am-server", "crates/am-server/src/inbox.rs", call),
         (
@@ -1414,8 +1410,9 @@ fn shipped_sources() -> Vec<(String, String)> {
         .collect()
 }
 
-/// Row 48: on the shipped tree am-store defines the row command, no file
-/// outside `crates/am-store/src/` names it, and `cargo xtask check-deps`
+/// Row 48, widened by the ToolGate slice: on the shipped tree am-store
+/// defines the row command, no file outside `crates/am-store/src/` but the
+/// engine's port implementation names it, and `cargo xtask check-deps`
 /// passes on the real workspace.
 #[test]
 fn the_shipped_tree_passes_the_row_write_rule() {
@@ -1431,7 +1428,9 @@ fn the_shipped_tree_passes_the_row_write_rule() {
     let elsewhere: Vec<&String> = sources
         .iter()
         .filter(|(rel, code)| {
-            !rel.starts_with("crates/am-store/src/") && code.contains("apply_row_write")
+            !rel.starts_with("crates/am-store/src/")
+                && rel != "crates/am-engine/src/row_writer.rs"
+                && code.contains("apply_row_write")
         })
         .map(|(rel, _)| rel)
         .collect();
@@ -1617,4 +1616,881 @@ fn reader_refused(what: &str, file: &str, source: &str, reader: &str) {
             );
         }
     }
+}
+
+// ------------------------------------------------- the ToolGate slice of 3.6
+//
+// Epic 3 story 6's ToolGate slice (owner conditions Q1 and Q4; AD-10 and
+// AD-21 as amended 2026-11-24; matrix rows 33 and 37): three call-site
+// rules beside 3.4's resolve rule, each over whole-file shipped text with
+// whitespace around `.` and `::` normalised and line breaks joined (the
+// store slice's row-48 rule is widened to the engine's port
+// implementation):
+//
+// - the row-writer port's method `write_row` stands only as its call in
+//   `crates/am-engine/src/toolgate.rs`, the trait's definition in
+//   `crates/am-domain/src/rows.rs` and the `fn write_row` line of the
+//   engine's implementation, `crates/am-engine/src/row_writer.rs`;
+// - the store's row command `apply_row_write` stands only in
+//   `crates/am-store/src/` and `crates/am-engine/src/row_writer.rs`;
+// - `EngineResult::row_written` stands only in
+//   `crates/am-engine/src/toolgate.rs` and its definition in
+//   `crates/am-domain/src/content.rs`;
+// - an `as` alias (or a `type` alias) of `RowWriter` or `EngineResult`, and
+//   a glob import of `am_domain::rows::*` or `am_domain::content::*` outside
+//   am-domain, fail anywhere in `crates/`.
+//
+// Tests, comments and literals are not shipped code. Written before the
+// rules exist.
+
+/// am-domain's port (the trait's one definition of `write_row`, with a doc
+/// example that names it: a comment).
+const ROWS_PORT: &str = "use crate::{Actor, Taint};\npub struct RowWrite {\n    pub table_id: String,\n    pub taint: Taint,\n}\n/// ```\n/// let _ = writer.write_row(actor, write);\n/// ```\npub trait RowWriter: Send + Sync {\n    fn write_row(&self, actor: Actor, write: RowWrite) -> Result<RowWritten, RowWriteError>;\n}\n";
+
+/// am-domain's `EngineResult` and its one constructor.
+const ENGINE_RESULT_DEF: &str = "pub struct EngineResult {\n    label: String,\n    text: String,\n}\nimpl EngineResult {\n    pub fn row_written(written: &RowWritten) -> EngineResult {\n        EngineResult { label: \"tool:table_write\".into(), text: format!(\"{} {}\", written.row_id, written.version) }\n    }\n    pub fn text(&self) -> &str {\n        &self.text\n    }\n}\n";
+
+/// ToolGate: the one call of the port's method and the one build of an
+/// engine result.
+const TOOLGATE: &str = "use std::sync::Arc;\nuse am_domain::rows::{RowTool, RowWrite, RowWriter};\nuse am_domain::{Actor, EngineResult};\npub struct ToolGate {\n    rows: Arc<dyn RowWriter>,\n    tool: Option<Arc<dyn RowTool>>,\n}\nimpl ToolGate {\n    fn write(&self, actor: Actor, write: RowWrite) -> Result<EngineResult, String> {\n        match self.rows.write_row(actor, write) {\n            Ok(written) => Ok(EngineResult::row_written(&written)),\n            Err(e) => Err(words(e)),\n        }\n    }\n}\n";
+
+/// The engine's implementation of the port, over the store's row command.
+const ROW_WRITER: &str = "use am_domain::rows::{RowWrite, RowWriteError, RowWriter, RowWritten};\nuse am_domain::Actor;\npub struct StoreRowWriter {\n    writer: am_store::Writer,\n}\nimpl RowWriter for StoreRowWriter {\n    fn write_row(&self, actor: Actor, write: RowWrite) -> Result<RowWritten, RowWriteError> {\n        let key = (write.step_run_id.clone(), write.call_seq);\n        self.writer.apply_row_write(actor, write).map_err(refused)?;\n        self.read_back(&key)\n    }\n}\n";
+
+/// Every allowed site of the three rules, as [`rows_tree`] writes them, plus
+/// other shipped files that name the types (not the method or the
+/// constructor), tests that call all three, and comments and literals.
+fn rows_files() -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("crates/am-domain/src/rows.rs", ROWS_PORT),
+        ("crates/am-domain/src/content.rs", ENGINE_RESULT_DEF),
+        ("crates/am-engine/src/toolgate.rs", TOOLGATE),
+        ("crates/am-engine/src/row_writer.rs", ROW_WRITER),
+        ("crates/am-store/src/lib.rs", STORE_ROWS),
+        (
+            "crates/am-store/src/rows.rs",
+            "/// The checks `Writer::apply_row_write` makes.\npub(crate) fn checks(write: &RowWrite) -> Result<(), StoreError> {\n    Ok(())\n}\n#[cfg(test)]\nmod tests {\n    fn t(w: &crate::Writer, a: Actor, x: RowWrite) {\n        let _ = w.apply_row_write(a, x);\n    }\n}\n",
+        ),
+        (
+            "crates/am-engine/src/run.rs",
+            "use std::sync::Arc;\nuse am_domain::rows::RowWriter;\nfn gate(store: &am_store::Store) -> ToolGate {\n    let rows: Arc<dyn RowWriter> = Arc::new(crate::row_writer::StoreRowWriter::new(store));\n    ToolGate::shipped(rows, None, audit())\n}\n",
+        ),
+        (
+            "crates/am-app/src/run.rs",
+            "use std::sync::Arc;\nuse am_tools::table_write::TableWrite;\npub fn row_tool() -> Option<Arc<dyn am_domain::rows::RowTool>> {\n    Some(Arc::new(TableWrite::new()))\n}\n",
+        ),
+        (
+            "crates/am-providers/src/common.rs",
+            "pub(crate) fn render_engine_result(result: &am_domain::EngineResult) -> String {\n    result.text().to_string()\n}\n",
+        ),
+        (
+            "crates/am-tools/src/table_write.rs",
+            "// Never calls write_row or apply_row_write; ToolGate does (AD-21).\nconst WHY: &str = \"EngineResult::row_written is ToolGate's, and so is .write_row(\";\npub struct TableWrite;\n",
+        ),
+        (
+            "crates/am-e2e/tests/trust/taint_tool_result_engine_values.rs",
+            "fn t(w: &dyn RowWriter, s: &am_store::Writer, a: Actor, x: RowWrite, y: RowWrite) {\n    let written = w.write_row(a.clone(), x).unwrap();\n    let _ = EngineResult::row_written(&written);\n    let _ = s.apply_row_write(a, y);\n}\n",
+        ),
+        (
+            "crates/am-engine/tests/row_writer.rs",
+            "fn t(w: &StoreRowWriter, a: Actor, x: RowWrite) {\n    let _ = w.write_row(a, x);\n}\n",
+        ),
+    ]
+}
+
+/// A tree holding [`rows_files`], with each of `files` added or put in
+/// place of the file at the same path.
+fn rows_tree(files: &[(&str, &str)]) -> tempfile::TempDir {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut all = rows_files();
+    for (file, _) in files {
+        all.retain(|(f, _)| f != file);
+    }
+    for (file, text) in all.iter().chain(files.iter()) {
+        common::write(tmp.path(), file, text);
+    }
+    tmp
+}
+
+/// `check-deps` on [`rows_tree`] with `(file, source)` planted fails,
+/// naming `file:<line>` for one of the lines of `source` that hold one of
+/// `markers` (the token, or either part of a path split over lines) and
+/// every one of `words`; no other allowed site is a finding.
+fn rows_refused(what: &str, file: &str, source: &str, markers: &[&str], words: &[&str]) {
+    let tmp = rows_tree(&[(file, source)]);
+    let out = deps_at(tmp.path());
+    let err = stderr(&out);
+    assert!(!out.status.success(), "{what}: must fail: {err}");
+    let lines = lines_holding(source, markers);
+    assert!(!lines.is_empty(), "{what}: the source holds {markers:?}");
+    assert!(
+        lines.iter().any(|n| err.contains(&format!("{file}:{n}"))),
+        "{what}: names {file} at a line holding {markers:?} ({lines:?}): {err}"
+    );
+    for w in words {
+        assert!(err.contains(w), "{what}: names `{w}`: {err}");
+    }
+    for (allowed, _) in rows_files() {
+        if allowed != file {
+            assert!(
+                !err.contains(allowed),
+                "{what}: an allowed site is not a finding ({allowed}): {err}"
+            );
+        }
+    }
+}
+
+/// `check-deps` on [`rows_tree`] with `(file, source)` planted fails and
+/// names `file` and every one of `words` (a finding with no one token
+/// line, such as a glob import).
+fn rows_refused_in_file(what: &str, file: &str, source: &str, words: &[&str]) {
+    let tmp = rows_tree(&[(file, source)]);
+    let out = deps_at(tmp.path());
+    let err = stderr(&out);
+    assert!(!out.status.success(), "{what}: must fail: {err}");
+    assert!(err.contains(file), "{what}: names {file}: {err}");
+    for w in words {
+        assert!(err.contains(w), "{what}: names `{w}`: {err}");
+    }
+}
+
+/// Row 33 (owner Q1): only ToolGate calls the row-writer port. The allowed
+/// sites pass: the trait's definition, ToolGate's call, the
+/// implementation's `fn write_row` line, other shipped files naming the
+/// trait, tests, comments and literals. Each planted form fails, naming the
+/// file, the line, `write_row` (or the aliased `RowWriter`) and AD-21: a
+/// call in another am-engine file, in am-tools and in am-app; a call split
+/// over lines; spaces around `.`; the method called by path with spaces
+/// around `::`; a second call in the implementation's file; an `as` alias
+/// of `RowWriter` in a plain file and in ToolGate's own file; a glob import
+/// of `am_domain::rows::*` outside am-domain.
+#[test]
+fn only_toolgate_calls_the_row_writer() {
+    let tmp = rows_tree(&[]);
+    let out = deps_at(tmp.path());
+    assert!(
+        out.status.success(),
+        "the allowed sites, tests, comments and literals pass: {}",
+        stderr(&out)
+    );
+
+    for (what, file, source) in [
+        (
+            "another am-engine file",
+            "crates/am-engine/src/run.rs",
+            "fn record(rows: &dyn RowWriter, a: Actor, x: RowWrite) {\n    let _ = rows.write_row(a, x);\n}\n",
+        ),
+        (
+            "am-tools",
+            "crates/am-tools/src/table_write.rs",
+            "pub fn write(rows: &dyn am_domain::rows::RowWriter, a: Actor, x: RowWrite) {\n    let _ = rows.write_row(a, x);\n}\n",
+        ),
+        (
+            "am-app",
+            "crates/am-app/src/run.rs",
+            "pub fn write(rows: &dyn am_domain::rows::RowWriter, a: Actor, x: RowWrite) {\n    let _ = rows.write_row(a, x);\n}\n",
+        ),
+        (
+            "a call split over lines",
+            "crates/am-engine/src/scheduler.rs",
+            "fn record(&self, a: Actor, x: RowWrite) {\n    let _ = self\n        .rows\n        .write_row(a, x);\n}\n",
+        ),
+        (
+            "spaces around the dot",
+            "crates/am-engine/src/gate.rs",
+            "fn record(&self, a: Actor, x: RowWrite) {\n    let _ = self.rows . write_row (a, x);\n}\n",
+        ),
+        (
+            "the method by path, spaces around ::",
+            "crates/am-server/src/runs.rs",
+            "fn record(w: &dyn RowWriter, a: Actor, x: RowWrite) {\n    let _ = RowWriter :: write_row(w, a, x);\n}\n",
+        ),
+        (
+            "a second call in the implementation's file",
+            "crates/am-engine/src/row_writer.rs",
+            "use am_domain::rows::{RowWrite, RowWriteError, RowWriter, RowWritten};\nuse am_domain::Actor;\npub struct StoreRowWriter {\n    writer: am_store::Writer,\n}\nimpl RowWriter for StoreRowWriter {\n    fn write_row(&self, actor: Actor, write: RowWrite) -> Result<RowWritten, RowWriteError> {\n        self.writer.apply_row_write(actor, write).map_err(refused)?;\n        todo!()\n    }\n}\nimpl StoreRowWriter {\n    fn again(&self, a: Actor, x: RowWrite) {\n        let _ = self.write_row(a, x);\n    }\n}\n",
+        ),
+    ] {
+        let marker = if what.starts_with("a second call") {
+            ".write_row("
+        } else {
+            "write_row"
+        };
+        rows_refused(what, file, source, &[marker], &["write_row", "AD-21"]);
+    }
+
+    for (what, file, source) in [
+        (
+            "an alias in a plain file",
+            "crates/am-engine/src/run.rs",
+            "use am_domain::rows::RowWriter as W;\nfn keep(_w: &dyn W) {}\n",
+        ),
+        (
+            "an alias in ToolGate's own file",
+            "crates/am-engine/src/toolgate.rs",
+            "use std::sync::Arc;\nuse am_domain::rows::RowWriter as Rows;\nuse am_domain::{Actor, EngineResult};\npub struct ToolGate {\n    rows: Arc<dyn Rows>,\n}\nimpl ToolGate {\n    fn write(&self, actor: Actor, write: RowWrite) -> Result<EngineResult, String> {\n        match self.rows.write_row(actor, write) {\n            Ok(written) => Ok(EngineResult::row_written(&written)),\n            Err(e) => Err(words(e)),\n        }\n    }\n}\n",
+        ),
+        (
+            "a type alias",
+            "crates/am-mcp/src/lib.rs",
+            "type W = dyn am_domain::rows::RowWriter;\nfn keep(_w: &W) {}\n",
+        ),
+    ] {
+        rows_refused(what, file, source, &["RowWriter"], &["RowWriter"]);
+    }
+
+    rows_refused_in_file(
+        "a glob import of am_domain::rows outside am-domain",
+        "crates/am-app/src/run.rs",
+        "use std::sync::Arc;\nuse am_domain::rows::*;\npub fn row_tool() -> Option<Arc<dyn RowTool>> {\n    None\n}\n",
+        &[],
+    );
+}
+
+/// Row 33 (owner Q1): the store's row command is named only in am-store
+/// (any file of its `src/`, its `#[cfg(test)]` items included) and in the
+/// engine's implementation of the port. Named in am-app, am-server, the
+/// engine's driver or ToolGate (which calls the port, never the store), or
+/// with spacing and a line break before it, it fails, naming the file, the
+/// line, `apply_row_write` and AD-21.
+#[test]
+fn the_store_row_write_is_named_only_by_the_engines_row_writer() {
+    let tmp = rows_tree(&[]);
+    let out = deps_at(tmp.path());
+    assert!(
+        out.status.success(),
+        "am-store, the engine's implementation and tests pass: {}",
+        stderr(&out)
+    );
+
+    let call = "fn write(w: &am_store::Writer, a: Actor, x: RowWrite) {\n    let _ = w.apply_row_write(a, x);\n}\n";
+    for (what, file, source) in [
+        ("am-app", "crates/am-app/src/run.rs", call),
+        ("am-server", "crates/am-server/src/inbox.rs", call),
+        ("the engine's driver", "crates/am-engine/src/run.rs", call),
+        (
+            "ToolGate itself",
+            "crates/am-engine/src/toolgate.rs",
+            "use am_domain::{Actor, EngineResult};\npub struct ToolGate {\n    store: am_store::Writer,\n}\nimpl ToolGate {\n    fn write(&self, actor: Actor, write: RowWrite) -> Result<(), String> {\n        self.store.apply_row_write(actor, write).map_err(|e| e.to_string())\n    }\n}\n",
+        ),
+        (
+            "spacing and a line break",
+            "crates/am-tools/src/lib.rs",
+            "fn write(w: &Writer, a: Actor, x: RowWrite) {\n    let _ = w\n        . apply_row_write (a, x);\n}\n",
+        ),
+    ] {
+        rows_refused(
+            what,
+            file,
+            source,
+            &["apply_row_write"],
+            &["apply_row_write", "AD-21"],
+        );
+    }
+}
+
+/// Row 37 (owner Q4; AD-10 as amended 2026-11-24): only ToolGate builds an
+/// engine result. The definition and ToolGate's call pass, and so does any
+/// file that only names the type (an adapter rendering it). Each planted
+/// form fails: `EngineResult::row_written` in the engine's driver, am-tools,
+/// am-providers, am-app and another am-domain file (naming the file, the
+/// line, `EngineResult` and AD-10); spaces around `::`, a path split over
+/// lines and a qualified path `<EngineResult>::row_written`; a `use … as`
+/// and a `type` alias of `EngineResult` (naming it); a glob import of
+/// `am_domain::content::*` outside am-domain (naming the file).
+#[test]
+fn only_toolgate_builds_an_engine_result() {
+    let tmp = rows_tree(&[]);
+    let out = deps_at(tmp.path());
+    assert!(
+        out.status.success(),
+        "the definition, ToolGate's call and the type named alone pass: {}",
+        stderr(&out)
+    );
+
+    for (what, file, source, marker) in [
+        (
+            "the engine's driver",
+            "crates/am-engine/src/run.rs",
+            "fn result(w: &RowWritten) -> Part {\n    Part::EngineResult { call_id: \"c\".into(), result: EngineResult::row_written(w) }\n}\n",
+            "row_written",
+        ),
+        (
+            "am-tools",
+            "crates/am-tools/src/table_write.rs",
+            "pub fn result(w: &RowWritten) -> am_domain::EngineResult {\n    am_domain::EngineResult::row_written(w)\n}\n",
+            "row_written",
+        ),
+        (
+            "am-providers",
+            "crates/am-providers/src/common.rs",
+            "pub(crate) fn render(w: &RowWritten) -> String {\n    EngineResult::row_written(w).text().to_string()\n}\n",
+            "row_written",
+        ),
+        (
+            "am-app",
+            "crates/am-app/src/run.rs",
+            "pub fn result(w: &RowWritten) -> EngineResult {\n    EngineResult::row_written(w)\n}\n",
+            "row_written",
+        ),
+        (
+            "another am-domain file",
+            "crates/am-domain/src/llm.rs",
+            "impl From<RowWritten> for Part {\n    fn from(w: RowWritten) -> Part {\n        Part::EngineResult { call_id: String::new(), result: EngineResult::row_written(&w) }\n    }\n}\n",
+            "row_written",
+        ),
+        (
+            "spaces around ::",
+            "crates/am-engine/src/gate.rs",
+            "fn r(w: &RowWritten) -> EngineResult {\n    EngineResult :: row_written(w)\n}\n",
+            "row_written",
+        ),
+        (
+            "a path split over lines",
+            "crates/am-mcp/src/lib.rs",
+            "fn r(w: &RowWritten) -> am_domain::EngineResult {\n    am_domain::EngineResult\n        ::row_written(w)\n}\n",
+            "::row_written",
+        ),
+        (
+            "a qualified path",
+            "crates/am-engine/src/scheduler.rs",
+            "fn r(w: &RowWritten) -> EngineResult {\n    <EngineResult>::row_written(w)\n}\n",
+            "row_written",
+        ),
+    ] {
+        // A path split over lines may be reported at either of its lines.
+        let markers: &[&str] = if marker == "::row_written" {
+            &["    am_domain::EngineResult", "::row_written"]
+        } else {
+            &[marker]
+        };
+        rows_refused(what, file, source, markers, &["EngineResult", "AD-10"]);
+    }
+
+    for (what, file, source) in [
+        (
+            "a use-as alias",
+            "crates/am-tools/src/lib.rs",
+            "use am_domain::EngineResult as Done;\nfn r(w: &RowWritten) -> Done {\n    Done::row_written(w)\n}\n",
+        ),
+        (
+            "a type alias",
+            "crates/am-server/src/runs.rs",
+            "type Done = am_domain::EngineResult;\nfn r(w: &RowWritten) -> Done {\n    Done::row_written(w)\n}\n",
+        ),
+    ] {
+        rows_refused(what, file, source, &["EngineResult"], &["EngineResult"]);
+    }
+
+    rows_refused_in_file(
+        "a glob import of am_domain::content outside am-domain",
+        "crates/am-providers/src/anthropic.rs",
+        "use am_domain::content::*;\npub(crate) fn render(r: &EngineResult) -> String {\n    r.text().to_string()\n}\n",
+        &[],
+    );
+}
+
+/// A shipped file's code (lines that are only a comment left out), with
+/// whitespace around `.` and `::` and line breaks normalised away.
+fn shipped_code(rel: &str) -> String {
+    let path = repo_root().join(rel);
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("{rel} must exist ({e}); the ToolGate slice adds it"));
+    let code: String = text
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    code.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .replace(" ::", "::")
+        .replace(":: ", "::")
+        .replace(" .", ".")
+        .replace(". ", ".")
+}
+
+/// Rows 33 and 37: the shipped tree has each rule's one site and passes the
+/// rules: am-domain defines the port's `fn write_row` and the engine
+/// result's `fn row_written`; ToolGate calls `write_row` and
+/// `EngineResult::row_written`; the engine's implementation names
+/// `apply_row_write`; and `cargo xtask check-deps` passes on the real
+/// workspace.
+#[test]
+fn the_shipped_tree_passes_the_rules() {
+    let rows = shipped_code("crates/am-domain/src/rows.rs");
+    assert!(
+        rows.contains("fn write_row("),
+        "am-domain defines the port's method"
+    );
+    let content = shipped_code("crates/am-domain/src/content.rs");
+    assert!(
+        content.contains("fn row_written("),
+        "am-domain defines the engine result's one constructor"
+    );
+    let gate = shipped_code("crates/am-engine/src/toolgate.rs");
+    assert!(
+        gate.contains(".write_row("),
+        "ToolGate calls the port's method"
+    );
+    assert!(
+        gate.contains("EngineResult::row_written("),
+        "ToolGate builds the engine result"
+    );
+    let writer = shipped_code("crates/am-engine/src/row_writer.rs");
+    assert!(
+        writer.contains(".apply_row_write("),
+        "the engine's implementation calls the store's row command"
+    );
+    assert!(
+        writer.contains("fn write_row("),
+        "the engine's implementation defines the port's method"
+    );
+    let out = xtask(&["check-deps"]);
+    assert!(
+        out.status.success(),
+        "the real workspace passes the rules: {}",
+        stderr(&out)
+    );
+}
+
+// --------------------------------------- row 43 (the ToolGate slice of 3.6)
+//
+// Owner condition b of the second re-slice (2026-11-24; matrix row 43): no
+// engine path passes row content to a model call. The store slice's row-49
+// rule keeps the four row-content readers in am-store; this slice adds the
+// two record types they return, the only types that carry a row's data:
+// `RowRecord` and `RowHistoryRecord` stand in shipped code only in
+// `crates/am-store/src/`, matched as bare tokens over the whole file (so a
+// `use … as` alias, a `type` alias, a path split over lines or spaced
+// around `::`, and a raw identifier are caught). And `rusqlite` is a normal
+// (or target-specific) dependency of am-store alone, so no other crate can
+// open the database and read a row by SQL; a dev-dependency (tests) is not
+// shipped. Written before the rules exist.
+
+/// The row records' definitions in am-store, and the data-free receipt.
+const STORE_RECORDS: &str = "pub struct RowRecord {\n    pub table_id: String,\n    pub data: String,\n}\npub struct RowHistoryRecord {\n    pub version: i64,\n    pub data: String,\n}\npub struct RowReceipt {\n    pub version: i64,\n}\n";
+
+/// The store slice's allowed sites, plus the records' definitions and
+/// re-export in am-store, a shipped engine file that reads the receipt and
+/// names the records only in a comment and a literal, and a test that
+/// names both records.
+fn record_files() -> Vec<(&'static str, &'static str)> {
+    let mut files = store_slice_files();
+    files.extend([
+        ("crates/am-store/src/records.rs", STORE_RECORDS),
+        (
+            "crates/am-store/src/export.rs",
+            "pub use crate::records::{RowHistoryRecord, RowReceipt, RowRecord};\n",
+        ),
+        (
+            "crates/am-engine/src/journal.rs",
+            "// The engine reads a RowReceipt, never a RowRecord or a RowHistoryRecord.\nconst WHY: &str = \"RowRecord and RowHistoryRecord stay in am-store\";\nfn version(r: &am_store::RowReceipt) -> i64 {\n    r.version\n}\n",
+        ),
+        (
+            "crates/am-app/tests/run_rows.rs",
+            "fn t(r: &am_store::RowRecord, h: &am_store::RowHistoryRecord) -> usize {\n    r.data.len() + h.data.len()\n}\n",
+        ),
+    ]);
+    files
+}
+
+/// `check-deps` on a tree of [`record_files`] with `(file, source)` planted
+/// fails with a finding that names, on one stderr line, `file:<line>` for
+/// a line of `source` holding `record` and the exact `record`; no allowed
+/// site is a finding.
+fn record_refused(what: &str, file: &str, source: &str, record: &str) {
+    let tmp = tempfile::tempdir().unwrap();
+    for (f, text) in record_files().iter().filter(|(f, _)| *f != file) {
+        common::write(tmp.path(), f, text);
+    }
+    common::write(tmp.path(), file, source);
+    let out = deps_at(tmp.path());
+    let err = stderr(&out);
+    assert!(!out.status.success(), "{what}: must fail: {err}");
+    let lines = lines_holding(source, &[record]);
+    assert!(!lines.is_empty(), "{what}: the source holds {record}");
+    assert!(
+        err.lines().any(|finding| {
+            lines
+                .iter()
+                .any(|n| finding.contains(&format!("{file}:{n}:")))
+                && names_token(finding, record)
+        }),
+        "{what}: a finding names {file} at a line holding {record} ({lines:?}) and `{record}`: {err}"
+    );
+    for (allowed, _) in record_files() {
+        if allowed != file {
+            assert!(
+                !err.contains(allowed),
+                "{what}: an allowed site is not a finding ({allowed}): {err}"
+            );
+        }
+    }
+}
+
+/// Row 43 (owner condition b): the records that carry row data are named
+/// in shipped code only in am-store. The allowed tree passes (the
+/// definitions, the re-export, the receipt read in the engine, comments,
+/// literals and tests). Each planted form fails, naming `file:line` and
+/// the record: a parameter in the engine's driver; a reference in
+/// am-providers; a `use` in am-app; a `use … as` alias in am-server; a path
+/// spaced around `::` in am-tools; a path split over lines; a raw
+/// identifier; inside a generic; a `type` alias. On the shipped tree no
+/// file outside `crates/am-store/src/` names either record.
+#[test]
+fn row_content_is_read_only_in_the_store() {
+    let tmp = tempfile::tempdir().unwrap();
+    for (f, text) in record_files() {
+        common::write(tmp.path(), f, text);
+    }
+    let out = deps_at(tmp.path());
+    assert!(
+        out.status.success(),
+        "the store's records, the receipt, comments, literals and tests pass: {}",
+        stderr(&out)
+    );
+
+    for (what, file, source, record) in [
+        (
+            "a parameter in the engine's driver",
+            "crates/am-engine/src/run.rs",
+            "fn peek(rows: Vec<am_store::RowRecord>) -> usize {\n    rows.len()\n}\n",
+            "RowRecord",
+        ),
+        (
+            "a reference in am-providers",
+            "crates/am-providers/src/common.rs",
+            "pub(crate) fn render(h: &am_store::RowHistoryRecord) -> String {\n    h.data.clone()\n}\n",
+            "RowHistoryRecord",
+        ),
+        (
+            "a use in am-app",
+            "crates/am-app/src/run.rs",
+            "use am_store::RowRecord;\nfn input(r: RowRecord) -> String {\n    r.data\n}\n",
+            "RowRecord",
+        ),
+        (
+            "a use-as alias in am-server",
+            "crates/am-server/src/runs.rs",
+            "use am_store::RowHistoryRecord as Image;\nfn peek(i: &Image) -> usize {\n    i.data.len()\n}\n",
+            "RowHistoryRecord",
+        ),
+        (
+            "a path spaced around ::",
+            "crates/am-tools/src/lib.rs",
+            "fn peek(r: &am_store :: RowRecord) -> usize {\n    r.data.len()\n}\n",
+            "RowRecord",
+        ),
+        (
+            "a path split over lines",
+            "crates/am-engine/src/gate.rs",
+            "fn peek(r: &am_store::\n    RowRecord) -> usize {\n    r.data.len()\n}\n",
+            "RowRecord",
+        ),
+        (
+            "a raw identifier",
+            "crates/am-mcp/src/lib.rs",
+            "fn peek(r: &am_store::r#RowHistoryRecord) -> usize {\n    r.data.len()\n}\n",
+            "RowHistoryRecord",
+        ),
+        (
+            "inside a generic",
+            "crates/am-engine/src/prompt.rs",
+            "fn peek(r: Option<Vec<am_store::RowHistoryRecord>>) -> usize {\n    r.map(|v| v.len()).unwrap_or(0)\n}\n",
+            "RowHistoryRecord",
+        ),
+        (
+            "a type alias",
+            "crates/am-connectors/src/lib.rs",
+            "type Row = am_store::RowRecord;\nfn peek(r: &Row) -> usize {\n    r.data.len()\n}\n",
+            "RowRecord",
+        ),
+    ] {
+        record_refused(what, file, source, record);
+    }
+
+    let sources = shipped_sources();
+    let elsewhere: Vec<(&String, &str)> = sources
+        .iter()
+        .filter(|(rel, _)| !rel.starts_with("crates/am-store/src/"))
+        .flat_map(|(rel, code)| {
+            ["RowRecord", "RowHistoryRecord"]
+                .into_iter()
+                .filter(|record| names_token(code, record))
+                .map(move |record| (rel, record))
+        })
+        .collect();
+    assert!(
+        elsewhere.is_empty(),
+        "no shipped record of row content outside am-store: {elsewhere:?}"
+    );
+}
+
+/// True when the manifest names rusqlite in a normal, build or
+/// target-specific dependency table (as a key, a dotted table or through
+/// `package =`); a dev-dependency (tests) does not count.
+fn links_rusqlite(manifest: &str) -> bool {
+    let mut inside = false;
+    for line in manifest.lines() {
+        let t = line.trim();
+        if t.starts_with('[') {
+            let header = t.trim_start_matches('[').trim_end_matches(']');
+            inside = is_dependency_table(t)
+                && !header
+                    .split('.')
+                    .any(|part| part.trim().trim_matches('"') == "dev-dependencies");
+            if inside && header.ends_with(".rusqlite") {
+                return true;
+            }
+            continue;
+        }
+        if !inside {
+            continue;
+        }
+        let key = t
+            .split(['=', '.', ' '])
+            .next()
+            .unwrap_or("")
+            .trim_matches('"');
+        let renamed = t.replace(' ', "").contains("package=\"rusqlite\"");
+        if key == "rusqlite" || renamed {
+            return true;
+        }
+    }
+    false
+}
+
+/// Row 43 (owner condition b): only am-store links rusqlite. check-deps on
+/// a graph where the engine, am-config (target-specific), am-providers and
+/// am-app depend on rusqlite fails, naming each edge and the rule ("only
+/// am-store may depend on rusqlite"); am-store's own edge and the
+/// dev-dependencies of the engine, am-tools and am-e2e (tests) are not
+/// findings. On the workspace, no member's manifest but am-store's names
+/// rusqlite outside its dev-dependencies, and the scan reads every kind of
+/// table.
+#[test]
+fn only_the_store_links_rusqlite() {
+    let out = xtask(&["check-deps", "--metadata", &metadata("rusqlite_user.json")]);
+    let err = stderr(&out);
+    assert!(!out.status.success(), "{err}");
+    for edge in [
+        "am-engine -> rusqlite",
+        "am-config -> rusqlite",
+        "am-providers -> rusqlite",
+        "am-app -> rusqlite",
+    ] {
+        assert!(err.contains(edge), "names {edge}: {err}");
+    }
+    assert!(
+        err.contains("only am-store may depend on rusqlite"),
+        "states the rule: {err}"
+    );
+    for allowed in [
+        "am-store -> rusqlite",
+        "am-tools -> rusqlite",
+        "am-e2e -> rusqlite",
+    ] {
+        assert!(!err.contains(allowed), "{allowed} is allowed: {err}");
+    }
+
+    for manifest in [
+        "[dependencies]\nrusqlite.workspace = true\n",
+        "[build-dependencies]\nrusqlite = { workspace = true }\n",
+        "[target.'cfg(unix)'.dependencies]\nrusqlite.workspace = true\n",
+        "[dependencies.rusqlite]\nworkspace = true\n",
+        "[dependencies]\ndb = { package = \"rusqlite\", version = \"0.43\" }\n",
+    ] {
+        assert!(links_rusqlite(manifest), "{manifest}");
+    }
+    for manifest in [
+        "[dev-dependencies]\nrusqlite.workspace = true\n",
+        "[target.'cfg(unix)'.dev-dependencies]\nrusqlite = \"0.43\"\n",
+        "[package]\nname = \"rusqlite\"\n",
+        "[features]\nrusqlite = []\n",
+    ] {
+        assert!(!links_rusqlite(manifest), "{manifest}");
+    }
+    let mut linking = Vec::new();
+    for member in workspace_members() {
+        let manifest = repo_root().join(&member).join("Cargo.toml");
+        let text = std::fs::read_to_string(&manifest)
+            .unwrap_or_else(|e| panic!("{}: {e}", manifest.display()));
+        if links_rusqlite(&text) {
+            linking.push(member);
+        }
+    }
+    assert_eq!(linking, ["crates/am-store"]);
+}
+
+// ---------------------------- ToolGate slice, review round 1 (R2, 3.23)
+//
+// Review triage round 1 (manager, 2026-11-25), R2: the row rules pin one
+// call site, not one file. The store's row command is called exactly once
+// in shipped code outside am-store: as `.apply_row_write(`, inside `fn
+// write_row` of `crates/am-engine/src/row_writer.rs`. The port's method is
+// called exactly once: one `.write_row(` in ToolGate's write path in
+// `crates/am-engine/src/toolgate.rs`. And `StoreRowWriter`'s public items
+// are only `new` and the trait's `write_row`. Written before the patch.
+
+/// The engine's port implementation as shipped: `new` and the trait impl.
+const ROW_WRITER_WITH_NEW: &str = "use am_domain::rows::{RowWrite, RowWriteError, RowWriter, RowWritten};\nuse am_domain::Actor;\npub struct StoreRowWriter {\n    writer: am_store::Writer,\n}\nimpl StoreRowWriter {\n    pub fn new(store: &am_store::Store) -> StoreRowWriter {\n        StoreRowWriter { writer: store.writer() }\n    }\n}\nimpl RowWriter for StoreRowWriter {\n    fn write_row(&self, actor: Actor, write: RowWrite) -> Result<RowWritten, RowWriteError> {\n        let key = (write.step_run_id.clone(), write.call_seq);\n        self.writer.apply_row_write(actor, write).map_err(refused)?;\n        self.read_back(&key)\n    }\n}\n";
+
+/// R2: one call site each. The allowed tree (with `new` on the port
+/// implementation) passes. Each planted form fails: a second method of
+/// `row_writer.rs` that calls the row command (naming the file, a line of
+/// that method, `apply_row_write` and AD-21); a second call of it inside
+/// `fn write_row`; a second `.write_row(` in another method of
+/// `toolgate.rs` (naming `write_row` and AD-21); and a public item on
+/// `StoreRowWriter` beyond `new` and the trait impl, a method or a field
+/// (naming the file, its line and `StoreRowWriter`).
+#[test]
+fn the_row_rules_pin_one_call_site() {
+    let tmp = rows_tree(&[("crates/am-engine/src/row_writer.rs", ROW_WRITER_WITH_NEW)]);
+    let out = deps_at(tmp.path());
+    assert!(
+        out.status.success(),
+        "one call each, and `new`, pass: {}",
+        stderr(&out)
+    );
+
+    let second_method = format!(
+        "{ROW_WRITER_WITH_NEW}impl StoreRowWriter {{\n    fn sneak(&self, a: Actor, x: RowWrite) {{\n        let _ = self.writer.apply_row_write(a, x);\n    }}\n}}\n"
+    );
+    rows_refused(
+        "a second method of row_writer.rs calling the row command",
+        "crates/am-engine/src/row_writer.rs",
+        &second_method,
+        &["apply_row_write(a, x)", "fn sneak"],
+        &["apply_row_write", "AD-21"],
+    );
+    let twice = ROW_WRITER_WITH_NEW.replace(
+        "        self.read_back(&key)\n",
+        "        let _ = self.writer.apply_row_write(actor, again);\n        self.read_back(&key)\n",
+    );
+    assert_ne!(twice, ROW_WRITER_WITH_NEW);
+    rows_refused(
+        "a second call inside fn write_row",
+        "crates/am-engine/src/row_writer.rs",
+        &twice,
+        &["apply_row_write"],
+        &["apply_row_write", "AD-21"],
+    );
+    let toolgate_twice = format!(
+        "{TOOLGATE}impl ToolGate {{\n    fn again(&self, a: Actor, x: RowWrite) {{\n        let _ = self.rows.write_row(a, x);\n    }}\n}}\n"
+    );
+    rows_refused(
+        "a second .write_row( in toolgate.rs",
+        "crates/am-engine/src/toolgate.rs",
+        &toolgate_twice,
+        &["write_row"],
+        &["write_row", "AD-21"],
+    );
+    let public_method = ROW_WRITER_WITH_NEW.replace(
+        "        StoreRowWriter { writer: store.writer() }\n    }\n",
+        "        StoreRowWriter { writer: store.writer() }\n    }\n    pub fn raw_writer(&self) -> &am_store::Writer {\n        &self.writer\n    }\n",
+    );
+    assert_ne!(public_method, ROW_WRITER_WITH_NEW);
+    rows_refused(
+        "a public method on StoreRowWriter",
+        "crates/am-engine/src/row_writer.rs",
+        &public_method,
+        &["pub fn raw_writer"],
+        &["StoreRowWriter"],
+    );
+    let public_field = ROW_WRITER_WITH_NEW.replace(
+        "    writer: am_store::Writer,\n",
+        "    pub writer: am_store::Writer,\n",
+    );
+    assert_ne!(public_field, ROW_WRITER_WITH_NEW);
+    rows_refused(
+        "a public field on StoreRowWriter",
+        "crates/am-engine/src/row_writer.rs",
+        &public_field,
+        &["pub writer"],
+        &["StoreRowWriter"],
+    );
+}
+
+/// R2 on the shipped tree: `row_writer.rs` calls the row command once, in
+/// `fn write_row`; `toolgate.rs` calls the port's method once; and
+/// `StoreRowWriter`'s only public items are the struct and `new` (the
+/// trait's `write_row` is the impl's). `cargo xtask check-deps` passes on
+/// the real workspace (`the_shipped_tree_passes_the_rules`).
+#[test]
+fn the_shipped_tree_has_one_call_site_each() {
+    let writer = shipped_code("crates/am-engine/src/row_writer.rs");
+    assert_eq!(writer.matches(".apply_row_write(").count(), 1, "{writer}");
+    let in_write_row = writer
+        .split("fn write_row(")
+        .nth(1)
+        .expect("row_writer.rs defines write_row");
+    assert!(in_write_row.contains(".apply_row_write("), "{writer}");
+    let gate = shipped_code("crates/am-engine/src/toolgate.rs");
+    let shipped_gate = gate.split("#[cfg(test)]").next().unwrap_or_default();
+    assert_eq!(shipped_gate.matches(".write_row(").count(), 1);
+    let public: Vec<&str> = writer
+        .match_indices("pub ")
+        .map(|(at, _)| {
+            writer[at..]
+                .split(['(', '{', ';', ':'])
+                .next()
+                .unwrap_or("")
+        })
+        .collect();
+    assert_eq!(
+        public,
+        ["pub struct StoreRowWriter ", "pub fn new"],
+        "StoreRowWriter's public items: {writer}"
+    );
+}
+
+// ---------------------------- ToolGate slice, review round 2 (T1, 3.23)
+//
+// Review triage round 2 (manager, 2026-11-25), T1: ToolGate's one call of
+// the port's method sits inside its write path, `fn write`, as the row
+// command's one call sits inside `fn write_row` of `row_writer.rs`. A
+// file with one `.write_row(` elsewhere (a new `pub fn` that `fn write`
+// calls) hands the port on and fails. Written before the patch.
+
+/// T1: a planted `toolgate.rs` whose only `.write_row(` stands in a new
+/// `pub fn write_through`, which `fn write` calls, fails check-deps, naming
+/// the file, a line of that function, `write_row` and AD-21. The allowed
+/// tree (the call inside `fn write`) passes, and on the shipped tree the
+/// one call is inside `fn write`.
+#[test]
+fn toolgates_one_port_call_is_inside_fn_write() {
+    let tmp = rows_tree(&[]);
+    let out = deps_at(tmp.path());
+    assert!(
+        out.status.success(),
+        "the call inside fn write passes: {}",
+        stderr(&out)
+    );
+
+    let moved = "use std::sync::Arc;\nuse am_domain::rows::{RowTool, RowWrite, RowWriteError, RowWriter, RowWritten};\nuse am_domain::{Actor, EngineResult};\npub struct ToolGate {\n    rows: Arc<dyn RowWriter>,\n    tool: Option<Arc<dyn RowTool>>,\n}\nimpl ToolGate {\n    pub fn write_through(&self, actor: Actor, write: RowWrite) -> Result<RowWritten, RowWriteError> {\n        self.rows.write_row(actor, write)\n    }\n    fn write(&self, actor: Actor, write: RowWrite) -> Result<EngineResult, String> {\n        match self.write_through(actor, write) {\n            Ok(written) => Ok(EngineResult::row_written(&written)),\n            Err(e) => Err(words(e)),\n        }\n    }\n}\n";
+    assert_eq!(
+        moved.matches(".write_row(").count(),
+        1,
+        "one call in the file"
+    );
+    rows_refused(
+        "the only call in a new pub fn",
+        "crates/am-engine/src/toolgate.rs",
+        moved,
+        &["write_row(actor, write)", "fn write_through"],
+        &["write_row", "AD-21"],
+    );
+
+    let gate = shipped_code("crates/am-engine/src/toolgate.rs");
+    let shipped_gate = gate.split("#[cfg(test)]").next().unwrap_or_default();
+    let body = shipped_gate
+        .split("fn write(")
+        .nth(1)
+        .expect("toolgate.rs defines fn write");
+    let body = &body[..body.find(" fn ").unwrap_or(body.len())];
+    assert!(
+        body.contains(".write_row("),
+        "the shipped call is inside fn write"
+    );
 }

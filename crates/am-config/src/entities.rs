@@ -351,6 +351,23 @@ pub struct Step {
     /// with the defaults where a key is absent. Raising one is
     /// privilege-widening (epic 4 story 17).
     pub limits: StepLimits,
+    /// Story 3.6 (AD-21, owner Q3): `table:`, the one table the step writes,
+    /// of its seat's team; it binds `table_write`, never grants it (only the
+    /// Tables capability does, AD-46). Kept on a fan-out step too (which
+    /// cannot write a table until story 3.14). Adding or changing it takes
+    /// effect at Reload or startup without the two-step confirmation until
+    /// epic 4 story 17 classifies it as widening (owner Q3, accepted).
+    pub table: Option<String>,
+    /// Whether the step fans out (AD-40): it declares `seats:` or
+    /// `over_folder:` with a value. Decided once, here, for `agentic
+    /// validate` and `agentic run` alike (the ToolGate slice's review round
+    /// 1, R8).
+    pub fan_out: bool,
+    /// A fan-out step's `seats:` (AD-40), the seat ids as written; empty on
+    /// a step with one `seat:`. Story 3.6 reads it only to warn that a
+    /// fan-out step whose seats hold `table_write` cannot write a table
+    /// until story 3.14; 3.14 checks and runs it.
+    pub seats: Vec<String>,
 }
 
 /// A step's loop-back (AD-36): when its output's `reasons` field lists

@@ -97,6 +97,11 @@ fn step(
         provider,
         prompt: am_engine::prompt::StepPrompt::default(),
         output_schema: None,
+        // Story 3.6: no grant, no table, no document, no row read.
+        grants: Default::default(),
+        seat_team: "core".into(),
+        table: None,
+        document: None,
     }
 }
 
@@ -106,6 +111,7 @@ fn plan(steps: Vec<StepPlan>) -> RunPlan {
         config_hash: HASH.into(),
         steps,
         clock: am_testkit::FakeClock::at("2026-11-24T10:00:00Z"),
+        row_tool: None,
     }
 }
 
@@ -606,10 +612,13 @@ async fn a_provider_error_fails_the_step_and_the_run() {
     );
 }
 
-/// Tool request: no tools exist in this version, so a turn that asks for
-/// one fails the step and the run, and says so; the request offered none.
+/// Tool request, superseded by story 3.6 (AD-11): every tool request goes
+/// through ToolGate. The seat is granted nothing, so a turn that asks for
+/// `web_search` is refused in ToolGate's words (not granted); the call is
+/// journaled `refused` and audited `toolgate.refused`; the step and the run
+/// fail and say so; the request offered no tool.
 #[tokio::test]
-async fn a_tool_request_fails_the_step_because_no_tools_exist_yet() {
+async fn a_tool_request_is_refused_by_toolgate_when_the_seat_is_not_granted_it() {
     let p = project();
     let llm = Arc::new(FakeLlm::new(vec![
         ScriptedTurn::text("let me look that up")
@@ -623,13 +632,11 @@ async fn a_tool_request_fails_the_step_because_no_tools_exist_yet() {
         .unwrap();
 
     assert_eq!(outcome.status, "failed");
-    let reason = outcome
-        .reason
-        .clone()
-        .expect("the reason, in words")
-        .to_lowercase();
+    let reason = outcome.reason.clone().expect("the reason, in words");
     assert!(
-        reason.contains("tool") && reason.contains("not available"),
+        reason.contains("web_search")
+            && reason.contains("not granted")
+            && reason.contains("seat-only"),
         "{reason}"
     );
     assert_eq!(llm.calls(), 1, "one turn, no tool loop");
@@ -649,10 +656,19 @@ async fn a_tool_request_fails_the_step_because_no_tools_exist_yet() {
         (after.calls[0].input_tokens, after.calls[0].output_tokens),
         (Some(9), Some(4))
     );
+    let reader = Reader::open(&p.db).unwrap();
+    let tools = reader.tool_calls(&after.steps[0].id).unwrap();
+    assert_eq!(tools.len(), 1, "{tools:#?}");
     assert_eq!(
-        actions(&after.audit).last().map(String::as_str),
-        Some("run.finished")
+        (tools[0].tool.as_str(), tools[0].status.as_str()),
+        ("web_search", "refused")
     );
+    let actions = actions(&after.audit);
+    assert!(
+        actions.iter().any(|a| a == "toolgate.refused"),
+        "{actions:?}"
+    );
+    assert_eq!(actions.last().map(String::as_str), Some("run.finished"));
 }
 
 /// `MaxTokens` and `Cancelled`: a turn cut off at its output limit, or

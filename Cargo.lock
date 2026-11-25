@@ -310,6 +310,7 @@ dependencies = [
  "am-domain",
  "am-testkit",
  "hex",
+ "serde_json",
  "sha2 0.11.1",
  "tempfile",
  "thiserror 2.0.21",

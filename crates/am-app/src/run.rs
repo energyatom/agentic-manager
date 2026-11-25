@@ -27,8 +27,10 @@
 //!    no error (the snapshot is loaded once, here; the run pins its hash
 //!    and its plan is built from it only, AD-16);
 //! 7. check 3 again, on the snapshot the run pins;
-//! 8. the workflow exists, and no step declares what this version cannot
-//!    honour yet (a run-graph key such as `review`, `handoff` or `seats`):
+//! 8. the workflow exists; no fan-out step would write a table (story 3.6:
+//!    refused first, in `agentic validate`'s warning words, until story
+//!    3.14); and no step declares what this version cannot honour yet (a
+//!    run-graph key such as `review`, `handoff` or `seats`):
 //!    such a step is never run as a plain turn. A step's `output_schema` is
 //!    honoured since story 3.5: its final message is checked, repaired
 //!    once and failed in words (AD-36), and a schema the engine cannot
@@ -49,8 +51,11 @@
 //! there was one, and the store's error.
 //!
 //! Story 3.3: each step's `loop_back` and `limits` go to the engine's plan
-//! as they are; the binary hands the engine no tool (a tool request fails
-//! its step in words).
+//! as they are. Story 3.6 (owner Q1; AD-11, AD-21, AD-46): each step's seat
+//! grants and team and its declared table (columns from the snapshot) go to
+//! the plan too, with am-tools' `table_write` as the row tool, so the
+//! binary's one tool runs through the engine's shipped ToolGate; every
+//! other tool request is refused by ToolGate in its words.
 //!
 //! The binary's factory ([`unwired_providers`]) wires no provider yet and
 //! refuses every model in words; tests pass am-testkit's `FakeLlm` through
@@ -70,6 +75,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use am_config::{ConfigSnapshot, ModelRef, Severity};
+use am_domain::rows::{ColumnKind, ColumnSpec, DeclaredTable, RowTool};
 use am_domain::{
     BoxFuture, CancelSignal, ChatOutcome, ChatRequest, Clock, EventSink, Instruction, LlmProvider,
     ModelCapabilities, ProjectIdentity, ProviderError, Terminal,
@@ -78,6 +84,7 @@ use am_engine::prompt::{self, StepPrompt};
 use am_engine::run::{HandOff, Limits, RunError, RunOutcome, RunPlan, StepPlan, run_plan};
 use am_engine::schema::OutputSchema;
 use am_store::{InboxItemRow, RunRow, StepRow};
+use am_tools::table_write::TableWrite;
 use tokio_util::sync::CancellationToken;
 
 use crate::cli::{EXIT_ERRORS, EXIT_OK, EXIT_USAGE};
@@ -406,6 +413,15 @@ pub(crate) fn plan_of(
             "this project has no workflow `{workflow}`; {known}. {not_done}"
         ));
     };
+    // Story 3.6 (row 40), first: a fan-out step that would write a table,
+    // in `agentic validate`'s words, until story 3.14.
+    for step in &wf.steps {
+        if let Some((message, fix)) = am_config::fan_out_table_refusal(snapshot, step) {
+            return Err(format!(
+                "workflow `{workflow}`: {message}; fix: {fix}. {not_done}"
+            ));
+        }
+    }
     // Before any provider is asked for: a step this version would run as
     // one plain turn, with its gate, hand-off, fan-out or schema skipped.
     for step in &wf.steps {
@@ -444,6 +460,10 @@ pub(crate) fn plan_of(
             tool_calls: step.limits.tool_calls,
             wall_clock: step.limits.wall_clock,
         };
+        // Story 3.6 (AD-21, AD-46): the seat's grants and team, and the
+        // table the step declares, with its columns as the snapshot holds
+        // them.
+        let table = table_of(snapshot, step, workflow, not_done)?;
         // A gate makes no model call (AD-36): its seat needs no model, and
         // no provider is asked for it.
         if step.gate.is_some() {
@@ -463,6 +483,10 @@ pub(crate) fn plan_of(
                 // A gate makes no model call and assembles nothing.
                 prompt: StepPrompt::default(),
                 output_schema: None,
+                grants: seat.grants.clone(),
+                seat_team: seat.team.clone(),
+                table,
+                document: None,
             });
             continue;
         }
@@ -495,14 +519,62 @@ pub(crate) fn plan_of(
             provider,
             prompt: prompt_of(snapshot, seat),
             output_schema,
+            grants: seat.grants.clone(),
+            seat_team: seat.team.clone(),
+            table,
+            document: None,
         });
     }
+    // Owner Q1: am-tools' `table_write`; only a step whose seat is granted
+    // it and that declares a table is offered it (the engine's ToolGate).
+    let row_tool: Arc<dyn RowTool> = Arc::new(TableWrite::new());
     Ok(RunPlan {
         workflow: workflow.to_string(),
         config_hash: snapshot.hash().to_string(),
         steps,
         clock: Arc::new(SystemClock),
+        row_tool: Some(row_tool),
     })
+}
+
+/// The table `step` declares (story 3.6, AD-21): its id, its owning team and
+/// its columns (ids, types, required flags, a status column's values), as
+/// the snapshot holds them; `None` when it declares none.
+fn table_of(
+    snapshot: &ConfigSnapshot,
+    step: &am_config::Step,
+    workflow: &str,
+    not_done: &str,
+) -> Result<Option<DeclaredTable>, String> {
+    let Some(id) = &step.table else {
+        return Ok(None);
+    };
+    let Some(table) = snapshot.tables().get(id) else {
+        return Err(format!(
+            "step `{}` of the workflow `{workflow}` declares the table `{id}`, which this project does not have. {not_done}",
+            step.id
+        ));
+    };
+    let mut columns = Vec::new();
+    for column in &table.columns {
+        let Some(kind) = ColumnKind::parse(&column.column_type) else {
+            return Err(format!(
+                "the table `{id}` declares the column `{}` of type `{}`, which this version cannot write. {not_done}",
+                column.id, column.column_type
+            ));
+        };
+        columns.push(ColumnSpec {
+            id: column.id.clone(),
+            kind,
+            required: column.required,
+            values: column.values.clone(),
+        });
+    }
+    Ok(Some(DeclaredTable {
+        id: id.clone(),
+        team: table.team.clone(),
+        columns,
+    }))
 }
 
 /// The project's config snapshot (check 5), or why no run starts on it.

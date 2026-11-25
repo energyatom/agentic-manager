@@ -6,7 +6,9 @@
 //! of model turns with its caps, and adds the `next`, `loop_back` and gate
 //! hand-offs, Inbox items and taint carrying (AD-10, AD-11, AD-28, AD-36).
 //! Story 4 adds [`gate`], the engine's apply of a decision a person made on
-//! a gate's Review item, and [`run::continue_run`] (AD-8, AD-15).
+//! a gate's Review item, and [`run::continue_run`] (AD-8, AD-15). Story 6's
+//! ToolGate slice adds [`row_writer`], the row-writer port over the store,
+//! which only ToolGate calls (AD-21).
 #![forbid(unsafe_code)]
 
 pub mod cancel;
@@ -14,6 +16,7 @@ pub mod gate;
 pub mod journal;
 mod parts;
 pub mod prompt;
+pub mod row_writer;
 pub mod run;
 pub mod scheduler;
 pub mod schema;

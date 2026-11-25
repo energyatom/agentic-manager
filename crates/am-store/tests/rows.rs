@@ -1195,8 +1195,11 @@ fn a_repeated_call_sequence_writes_once() {
         insert_op(Uuid::now_v7(), &json!({ "ref": "r-2" })),
     )
     .expect("a replay is no error");
+    // ToolGate slice, review round 1 (R4): a write of another op kind at
+    // the key is no replay; it is refused (`a_replay_is_the_same_write_or_
+    // refused`), and nothing changes either way.
     r.write_at(&a, 1, &call, update_op(first, 1, &json!({ "ref": "r-3" })))
-        .expect("a replay is no error");
+        .expect_err("another op kind at a used key is no replay");
 
     assert_eq!(r.state(), once, "the second write wrote nothing");
     let written = r
@@ -3694,4 +3697,306 @@ fn a_new_attempt_is_inserted_only_queued_and_unstarted() {
     assert_eq!((next.attempt, next.status.as_str()), (2, "queued"));
     assert_eq!(next.started_at, None);
     assert_eq!(r.reader().attempt_writes(&next.id).unwrap(), None);
+}
+
+// ------------------------------------- ToolGate slice, review round 1 (3.23)
+//
+// The ToolGate slice's review triage round 1 (manager, 2026-11-25):
+// - R1: the store's refusals of a write's data (a key repeated at any
+//   depth, a row or patch past `ROW_MAX_BYTES` or `ROW_MAX_COLUMNS`) are
+//   `StoreError::RowRefused`, words the model may act on, never `Invalid`
+//   (which stops the step); the guards themselves are unchanged.
+// - R4: a key that holds its write answers only the same write again: the
+//   same tool call id, actor, table and op kind. Anything else at the key
+//   is refused in words, and nothing changes.
+// Written before the patches.
+
+/// R1: every refusal of the data itself is `StoreError::RowRefused`, in
+/// the words the earlier tests pin (`duplicate`, `byte`, `column`), never
+/// echoing the data, with nothing changed and the call left `issued`: an
+/// insert repeating a nested key, an insert past either cap, a patch
+/// repeating a key or past either cap, and an update whose merged row
+/// passes either cap.
+#[test]
+fn a_refusal_of_the_data_is_row_refused() {
+    let bytes = am_store::ROW_MAX_BYTES;
+    let cols = am_store::ROW_MAX_COLUMNS;
+    let r = rig();
+    let a = r.begin(&r.run, "collect", Some(TABLE), None, Taint::Clean);
+    let columns = |from: usize, n: usize| {
+        let cells: Vec<String> = (from..from + n).map(|i| format!(r#""c{i}":{i}"#)).collect();
+        format!("{{{}}}", cells.join(","))
+    };
+    // A row near the byte cap, and a row at the column cap.
+    let big = r.insert(
+        &a,
+        1,
+        &json!({ "ref": "r-big", "title": "b".repeat(bytes / 2 + 100) }),
+    );
+    let call = r.issue(&a, 2);
+    let wide = Uuid::now_v7();
+    r.write_at(
+        &a,
+        2,
+        &call,
+        RowOp::Insert {
+            row_id: wide,
+            data_json: columns(0, cols),
+        },
+    )
+    .unwrap();
+    let big_id = Uuid::parse_str(&big).unwrap();
+
+    let cases: Vec<(&str, RowOp, &str)> = vec![
+        (
+            "an insert repeating a nested key",
+            RowOp::Insert {
+                row_id: Uuid::now_v7(),
+                data_json: r#"{"ref":"r-1","extra":{"canary_k":1,"canary_k":2}}"#.into(),
+            },
+            "duplicate",
+        ),
+        (
+            "an insert past the byte cap",
+            RowOp::Insert {
+                row_id: Uuid::now_v7(),
+                data_json: format!(r#"{{"ref":"{}"}}"#, "q".repeat(bytes)),
+            },
+            "byte",
+        ),
+        (
+            "an insert past the column cap",
+            RowOp::Insert {
+                row_id: Uuid::now_v7(),
+                data_json: columns(0, cols + 1),
+            },
+            "column",
+        ),
+        (
+            "a patch repeating a key",
+            RowOp::Update {
+                row_id: big_id,
+                expected_version: 1,
+                patch_json: r#"{"canary_k":"x","canary_k":"y"}"#.into(),
+            },
+            "duplicate",
+        ),
+        (
+            "a patch past the byte cap",
+            RowOp::Update {
+                row_id: big_id,
+                expected_version: 1,
+                patch_json: format!(r#"{{"title":"{}"}}"#, "q".repeat(bytes)),
+            },
+            "byte",
+        ),
+        (
+            "a patch past the column cap",
+            RowOp::Update {
+                row_id: big_id,
+                expected_version: 1,
+                patch_json: columns(1000, cols + 1),
+            },
+            "column",
+        ),
+        (
+            "an update whose merged row passes the byte cap",
+            RowOp::Update {
+                row_id: big_id,
+                expected_version: 1,
+                patch_json: format!(r#"{{"extra":"{}"}}"#, "m".repeat(bytes / 2)),
+            },
+            "byte",
+        ),
+        (
+            "an update whose merged row passes the column cap",
+            RowOp::Update {
+                row_id: wide,
+                expected_version: 1,
+                patch_json: r#"{"one_more":1}"#.into(),
+            },
+            "column",
+        ),
+    ];
+    for (n, (what, op, word)) in cases.into_iter().enumerate() {
+        let seq = 3 + n as i64;
+        let call = r.issue(&a, seq);
+        let before = r.state();
+        let refused = r.write_at(&a, seq, &call, op).expect_err(what);
+        match &refused {
+            StoreError::RowRefused(words) => {
+                assert!(words.contains(word), "{what}: names `{word}`: {words}");
+                for canary in ["canary_k", "qqqqqqqq", "mmmmmmmm"] {
+                    assert!(!words.contains(canary), "{what}: echoes: {words}");
+                }
+            }
+            other => panic!("{what}: RowRefused, not {other:?}"),
+        }
+        assert_eq!(r.state(), before, "{what}: nothing changed");
+        assert_eq!(r.tool_call(&a, &call).status, "issued", "{what}");
+    }
+}
+
+/// R4: at a key that holds its write (call 1, an insert), the same write
+/// again (the same tool call id, the attempt's own seat, the same table,
+/// an insert, with another row id and other data) is a replay: `Ok`,
+/// nothing written. Each other write at the key is refused in words
+/// (`refused`), never echoing its data, and nothing changes: another tool
+/// call id, another seat of the run, the engine's own actor, a Human,
+/// another table, and an update. After the attempt finished, the same
+/// write is still a replay, and another tool call id is still refused.
+#[test]
+fn a_replay_is_the_same_write_or_refused() {
+    let r = rig();
+    let a = r.begin(&r.run, "collect", Some(TABLE), None, Taint::Clean);
+    let call = r.issue(&a, 1);
+    let first = Uuid::now_v7();
+    r.write_at(&a, 1, &call, insert_op(first, &json!({ "ref": "r-1" })))
+        .unwrap();
+    let once = r.state();
+    let other_seat = Actor::Seat {
+        seat: "another-seat".into(),
+        run: a.run.uuid,
+        step: a.key.clone(),
+    };
+    let replay = |actor: Actor, tool_call: &str, table: &str, op: RowOp| {
+        r.apply(actor, row_write(&a, 1, tool_call, table, op, Taint::Clean))
+    };
+    let new_insert = || insert_op(Uuid::now_v7(), &json!({ "ref": CANARY_DATA }));
+
+    replay(a.actor(), &call, TABLE, new_insert()).expect("the same write again is a replay");
+    assert_eq!(r.state(), once, "a replay writes nothing");
+
+    let other_call = new_id();
+    for (what, actor, tool_call, table, op) in [
+        (
+            "another tool call id",
+            a.actor(),
+            other_call.as_str(),
+            TABLE,
+            new_insert(),
+        ),
+        (
+            "another seat",
+            other_seat,
+            call.as_str(),
+            TABLE,
+            new_insert(),
+        ),
+        ("the engine", engine(), call.as_str(), TABLE, new_insert()),
+        (
+            "a Human",
+            you_reviewer(),
+            call.as_str(),
+            TABLE,
+            new_insert(),
+        ),
+        (
+            "another table",
+            a.actor(),
+            call.as_str(),
+            OTHER_TABLE,
+            new_insert(),
+        ),
+        (
+            "an update",
+            a.actor(),
+            call.as_str(),
+            TABLE,
+            update_op(first, 1, &json!({ "title": CANARY_PATCH })),
+        ),
+    ] {
+        let words = replay(actor, tool_call, table, op)
+            .expect_err(what)
+            .to_string();
+        assert!(words.contains("refused"), "{what}: in words: {words}");
+        for canary in [CANARY_DATA, CANARY_PATCH] {
+            assert!(!words.contains(canary), "{what}: echoes: {words}");
+        }
+        assert_eq!(r.state(), once, "{what}: nothing changed");
+    }
+
+    r.finish(&a);
+    let finished = r.state();
+    replay(a.actor(), &call, TABLE, new_insert())
+        .expect("the same write is a replay after the attempt finished");
+    replay(a.actor(), &other_call, TABLE, new_insert())
+        .expect_err("another tool call id is refused after the attempt finished");
+    assert_eq!(r.state(), finished);
+}
+
+// ------------------------------------- ToolGate slice, review round 2 (3.23)
+//
+// Review triage round 2 (manager, 2026-11-25), T3: since R1 the store's
+// refusal of an update whose merged row passes `ROW_MAX_BYTES` reaches the
+// model as an untrusted result, so its words must not tell the model the
+// size of a stored row it cannot read. They may name the caps and the
+// patch's own size. Written before the patch.
+
+/// The decimal numbers standing as words of their own in `text` (digit
+/// runs between non-alphanumeric characters), as written.
+fn numbers_in(text: &str) -> Vec<String> {
+    text.split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|w| !w.is_empty() && w.chars().all(|c| c.is_ascii_digit()))
+        .map(str::to_string)
+        .collect()
+}
+
+/// T3: a row of about half the byte cap, then an update whose patch (also
+/// about half, within the cap on its own) would merge it past
+/// `ROW_MAX_BYTES`. The refusal is `RowRefused` and names `byte` (R1), and
+/// no number in it is derived from the stored row: not the row's size, not
+/// the merged row's (within a margin), not how far it would pass the cap,
+/// and not the room the row has left. The caps and the patch's own size
+/// may stand in it. Nothing changes.
+#[test]
+fn a_merged_row_refusal_names_no_stored_size() {
+    let cap = am_store::ROW_MAX_BYTES;
+    let r = rig();
+    let a = r.begin(&r.run, "collect", Some(TABLE), None, Taint::Clean);
+    let id = r.insert(
+        &a,
+        1,
+        &json!({ "ref": "r-big", "title": "b".repeat(cap / 2 + 333) }),
+    );
+    let stored = r.row(&id).data.len();
+    let patch = format!(r#"{{"extra":"{}"}}"#, "m".repeat(cap / 2 - 77));
+    assert!(patch.len() < cap && stored < cap && stored + patch.len() > cap);
+    let call = r.issue(&a, 2);
+    let before = r.state();
+
+    let refused = r
+        .write_at(
+            &a,
+            2,
+            &call,
+            RowOp::Update {
+                row_id: Uuid::parse_str(&id).unwrap(),
+                expected_version: 1,
+                patch_json: patch.clone(),
+            },
+        )
+        .expect_err("a merged row past the byte cap");
+
+    let words = match &refused {
+        StoreError::RowRefused(words) => words.clone(),
+        other => panic!("RowRefused (R1), not {other:?}"),
+    };
+    assert!(words.contains("byte"), "{words}");
+    let merged = stored + patch.len();
+    let mut derived: Vec<usize> = vec![stored, cap - stored];
+    derived.extend(merged - 16..=merged + 16);
+    derived.extend(merged - 16 - cap..=merged + 16 - cap);
+    let derived: Vec<String> = derived
+        .into_iter()
+        .filter(|n| *n != cap && *n != patch.len())
+        .map(|n| n.to_string())
+        .collect();
+    for number in numbers_in(&words) {
+        assert!(
+            !derived.contains(&number),
+            "`{number}` is derived from the stored row's size ({stored} bytes): {words}"
+        );
+    }
+    assert_eq!(r.state(), before, "nothing changed");
 }

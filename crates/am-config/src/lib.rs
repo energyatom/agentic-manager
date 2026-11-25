@@ -77,6 +77,7 @@ mod skills;
 mod snapshot;
 pub mod user_accounts;
 mod writer;
+mod writes;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -102,6 +103,7 @@ pub use writer::{
     ConfigCreate, ConfigEdit, ConfigIdentityAssign, ConfigWriter, EditOp, ReconcileReport,
     WriteError, canonical_bytes, config_files, sha256_hex,
 };
+pub use writes::{fan_out_table_refusal, fan_out_table_words};
 
 use finding::Report;
 use refs::{Known, Refs};
@@ -663,6 +665,16 @@ impl Loader {
     fn finish(mut self) -> Loaded {
         let mut known = std::mem::take(&mut self.declared);
         known.builtin_tools = am_domain::tool_manifest::builtin_tool_ids();
+        // Story 3.6: what a step's `table:` is checked against.
+        for (id, seat) in &self.seats {
+            known.seat_teams.insert(id.clone(), seat.team.clone());
+            if seat.grants.contains(writes::TABLE_WRITE) {
+                known.table_writers.insert(id.clone());
+            }
+        }
+        for (id, table) in &self.tables {
+            known.table_teams.insert(id.clone(), table.team.clone());
+        }
         if let Some(list) = &self.user_accounts {
             known.user_list = true;
             for a in list.accounts() {

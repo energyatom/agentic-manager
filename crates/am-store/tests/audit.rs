@@ -783,3 +783,94 @@ fn an_audit_entrys_named_args_are_stored_and_exported() {
     verify_jsonl(text.as_bytes()).unwrap();
     assert_eq!(reader.verify_audit_chain().unwrap(), None);
 }
+
+// ------------------------------------- ToolGate slice, review round 1 (3.23)
+//
+// Story 3.6's ToolGate slice, review triage round 1 (manager, 2026-11-25),
+// R9: ToolGate audits each refusal as `toolgate.refused` with the call's
+// taint as an argument. Only that entry's `taint` becomes the 0/1 flag
+// every other entry writes; another `Audit` command's `taint` argument is
+// kept as given (text); and a `toolgate.refused` taint other than `0` or
+// `1` is refused, with nothing written. Written before the patch.
+
+/// An `Audit` command of `action` whose one argument is `taint`.
+fn with_taint(action: &str, taint: &str) -> WriteCommand {
+    WriteCommand::Audit {
+        action: action.into(),
+        target: "tool:table_write run:r step:s".into(),
+        outcome: "refused".into(),
+        hash: None,
+        args: [("taint".to_string(), taint.to_string())]
+            .into_iter()
+            .collect(),
+    }
+}
+
+/// The `args.taint` of the last exported entry of `action`.
+fn last_taint(store: &Store, action: &str) -> Value {
+    let (text, _, _) = export(store);
+    entries(&text)
+        .into_iter()
+        .rev()
+        .find(|e| e["action"] == action)
+        .unwrap_or_else(|| panic!("no {action} entry"))["args"]["taint"]
+        .clone()
+}
+
+/// R9: `toolgate.refused` with taint `1` or `0` exports `args.taint` as the
+/// number 1 or 0 (the flag `row.written` and `model_call.reserved` write),
+/// and the chain verifies.
+#[test]
+fn a_toolgate_refusals_taint_is_a_flag() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, _) = open_project(dir.path()).unwrap();
+    for (given, flag) in [("1", 1), ("0", 0)] {
+        store
+            .writer()
+            .exec(sys(), with_taint("toolgate.refused", given))
+            .unwrap();
+        assert_eq!(
+            last_taint(&store, "toolgate.refused"),
+            json!(flag),
+            "{given}"
+        );
+    }
+    let (text, _, _) = export(&store);
+    verify_jsonl(text.as_bytes()).unwrap();
+}
+
+/// R9: another `Audit` command's `taint` argument stays as given, text:
+/// `1`, `0` and a word alike.
+#[test]
+fn another_audit_entrys_taint_stays_as_given() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, _) = open_project(dir.path()).unwrap();
+    for given in ["1", "0", "high"] {
+        store
+            .writer()
+            .exec(sys(), with_taint("egress.blocked", given))
+            .unwrap();
+        assert_eq!(
+            last_taint(&store, "egress.blocked"),
+            json!(given),
+            "kept as given: {given}"
+        );
+    }
+}
+
+/// R9: a `toolgate.refused` taint other than `0` or `1` is refused, and
+/// nothing is appended.
+#[test]
+fn a_toolgate_refusals_taint_other_than_0_or_1_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, _) = open_project(dir.path()).unwrap();
+    let (_, before, _) = export(&store);
+    for given in ["2", "true", "", " 1", "01", "tainted"] {
+        let result = store
+            .writer()
+            .exec(sys(), with_taint("toolgate.refused", given));
+        assert!(result.is_err(), "`{given}` is refused: {result:?}");
+    }
+    let (_, after, _) = export(&store);
+    assert_eq!(after, before, "nothing was appended");
+}

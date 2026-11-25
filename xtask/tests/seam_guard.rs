@@ -764,3 +764,195 @@ fn am_engine_names_tool_runner_only_in_toolgate() {
         );
     }
 }
+
+// ------------------------------ story 3.23 review round 1 (R3, ToolGate)
+//
+// The ToolGate slice's review triage round 1 (manager, 2026-11-25), R3:
+// `ToolGate::shipped`, `ToolGate::admit` and `ToolGate::run`, and
+// `StoreRowWriter::new`, are public, so shipped code could build a gate or
+// a row writer and forge a step's facts (`StepTools`, `seat_team`) or a
+// call's place (`CallPlace`). The mechanism (tester's choice, recorded in
+// the plan): seam-guard pins the names. In shipped code, `ToolGate` is
+// named only in `crates/am-engine/src/toolgate.rs` (its definition) and
+// `crates/am-engine/src/run.rs` (the one user); `StoreRowWriter` only in
+// `crates/am-engine/src/row_writer.rs` and `run.rs`; and a call of
+// `.admit(` stands only in `run.rs` and `toolgate.rs`. A gate's `run`
+// needs a `Permit`, which only `admit` makes, on a gate reached only where
+// `ToolGate` is named. Tests, comments and literals are not shipped code.
+// The tests accept a finding from either guard (seam-guard or check-deps,
+// `failures` above), naming the file and one of the names. Written before
+// the patch.
+
+/// The allowed sites: the definitions, the engine's driver (which builds
+/// the shipped gate over the store's row writer, admits and runs), tests
+/// that call everything, and a comment and a literal in am-app.
+const GATE_SITES: [(&str, &str); 7] = [
+    (
+        "crates/am-engine/src/toolgate.rs",
+        "use std::sync::Arc;\nuse am_domain::rows::{RowTool, RowWrite, RowWriter};\npub struct Permit {\n    gate: u64,\n}\npub struct ToolGate {\n    rows: Arc<dyn RowWriter>,\n}\nimpl ToolGate {\n    pub fn shipped(rows: Arc<dyn RowWriter>, tool: Option<Arc<dyn RowTool>>, audit: Arc<dyn AuditSink>) -> ToolGate {\n        ToolGate { rows }\n    }\n    pub fn admit(&self, actor: &Actor, step: &StepTools, place: &CallPlace, call: &ToolCall) -> Result<Permit, String> {\n        Ok(Permit { gate: 1 })\n    }\n    pub fn run(&self, permit: Permit, actor: Actor, write: RowWrite) -> bool {\n        self.write(actor, write)\n    }\n    fn write(&self, actor: Actor, write: RowWrite) -> bool {\n        self.rows.write_row(actor, write).is_ok()\n    }\n}\n#[cfg(test)]\nmod tests {\n    fn t(g: &super::ToolGate, a: &Actor, s: &StepTools, p: &CallPlace, c: &ToolCall) {\n        let _ = g.admit(a, s, p, c);\n    }\n}\n",
+    ),
+    (
+        "crates/am-engine/src/row_writer.rs",
+        "use am_domain::rows::{RowWrite, RowWriteError, RowWriter, RowWritten};\nuse am_domain::Actor;\npub struct StoreRowWriter {\n    writer: am_store::Writer,\n}\nimpl StoreRowWriter {\n    pub fn new(store: &am_store::Store) -> StoreRowWriter {\n        StoreRowWriter { writer: store.writer() }\n    }\n}\nimpl RowWriter for StoreRowWriter {\n    fn write_row(&self, actor: Actor, write: RowWrite) -> Result<RowWritten, RowWriteError> {\n        self.writer.apply_row_write(actor, write).map_err(refused)?;\n        todo!()\n    }\n}\n",
+    ),
+    (
+        "crates/am-engine/src/run.rs",
+        "use std::sync::Arc;\nuse crate::row_writer::StoreRowWriter;\nuse crate::toolgate::{CallPlace, StepTools, ToolGate};\nfn tooling(store: &am_store::Store, audit: Arc<dyn AuditSink>) -> ToolGate {\n    ToolGate::shipped(Arc::new(StoreRowWriter::new(store)), None, audit)\n}\nfn call(gate: &ToolGate, a: &Actor, s: &StepTools, p: &CallPlace, c: &ToolCall, w: RowWrite) -> bool {\n    match gate.admit(a, s, p, c) {\n        Ok(permit) => gate.run(permit, a.clone(), w),\n        Err(_) => false,\n    }\n}\n",
+    ),
+    (
+        "crates/am-engine/src/lib.rs",
+        "pub mod row_writer;\npub mod run;\npub mod toolgate;\n",
+    ),
+    (
+        "crates/am-engine/tests/toolgate.rs",
+        "fn t(rows: Arc<dyn RowWriter>, a: &Actor, s: &StepTools, p: &CallPlace, c: &ToolCall, w: RowWrite) {\n    let gate = am_engine::toolgate::ToolGate::shipped(rows, None, CollectAudit::new());\n    let permit = gate.admit(a, s, p, c).unwrap();\n    let _ = gate.run(permit, a.clone(), w);\n}\n",
+    ),
+    (
+        "crates/am-e2e/tests/engine/rows_idempotent.rs",
+        "fn t(store: &am_store::Store) {\n    let _ = am_engine::row_writer::StoreRowWriter::new(store);\n}\n",
+    ),
+    (
+        "crates/am-app/src/run.rs",
+        "// agentic run never builds a ToolGate or a StoreRowWriter; am-engine's run.rs does.\nconst WHY: &str = \"ToolGate::shipped, gate.admit( and StoreRowWriter::new are the engine's\";\n",
+    ),
+];
+
+/// A tree of [`GATE_SITES`] with `(file, source)` added or put in place of
+/// the file at the same path.
+fn gate_tree(file: &str, source: &str) -> tempfile::TempDir {
+    let tmp = tempfile::tempdir().unwrap();
+    for (f, text) in GATE_SITES.iter().filter(|(f, _)| *f != file) {
+        write(tmp.path(), f, text);
+    }
+    if !file.is_empty() {
+        write(tmp.path(), file, source);
+    }
+    tmp
+}
+
+/// R3: the allowed sites pass both guards. Each planted site fails one of
+/// them, with a finding naming the file and one of `names`: am-app building
+/// the shipped gate; a server handler admitting a call on a gate it is
+/// handed; another am-engine file building a gate; `admit` called on a gate
+/// reached without naming `ToolGate`; `run` called on an aliased gate;
+/// am-app building the row writer; `StoreRowWriter :: new` spaced; and
+/// `ToolGate` with `::shipped` on the next line.
+#[test]
+fn only_the_engines_driver_builds_admits_and_runs_a_gate() {
+    let tmp = gate_tree("", "");
+    clean(
+        "the definitions, the driver, tests, comments and literals",
+        tmp.path(),
+    );
+
+    for (what, file, source, names) in [
+        (
+            "agentic run builds the shipped gate",
+            "crates/am-app/src/run.rs",
+            "fn gate(rows: Arc<dyn RowWriter>, audit: Arc<dyn AuditSink>) -> am_engine::toolgate::ToolGate {\n    am_engine::toolgate::ToolGate::shipped(rows, None, audit)\n}\n",
+            &["ToolGate"][..],
+        ),
+        (
+            "a server handler admits a call",
+            "crates/am-server/src/runs.rs",
+            "fn decide(gate: &am_engine::toolgate::ToolGate, a: &Actor, s: &StepTools, p: &CallPlace, c: &ToolCall) -> bool {\n    gate.admit(a, s, p, c).is_ok()\n}\n",
+            &["ToolGate", "admit"][..],
+        ),
+        (
+            "another am-engine file builds a gate",
+            "crates/am-engine/src/scheduler.rs",
+            "fn gate(rows: Arc<dyn RowWriter>, audit: Arc<dyn AuditSink>) -> crate::toolgate::ToolGate {\n    crate::toolgate::ToolGate::shipped(rows, None, audit)\n}\n",
+            &["ToolGate"][..],
+        ),
+        (
+            "admit on a gate reached without naming it",
+            "crates/am-engine/src/journal.rs",
+            "fn decide(t: &crate::run::Tooling, a: &Actor, s: &StepTools, p: &CallPlace, c: &ToolCall) -> bool {\n    t.gate.admit(a, s, p, c).is_ok()\n}\n",
+            &["admit"][..],
+        ),
+        (
+            "run on an aliased gate",
+            "crates/am-app/src/gate.rs",
+            "use am_engine::toolgate::ToolGate as Gate;\nfn go(g: &Gate, p: am_engine::toolgate::Permit, a: Actor, w: RowWrite) -> bool {\n    g.run(p, a, w)\n}\n",
+            &["ToolGate"][..],
+        ),
+        (
+            "agentic run builds the row writer",
+            "crates/am-app/src/run.rs",
+            "fn rows(store: &am_store::Store) -> Arc<dyn RowWriter> {\n    Arc::new(am_engine::row_writer::StoreRowWriter::new(store))\n}\n",
+            &["StoreRowWriter"][..],
+        ),
+        (
+            "StoreRowWriter :: new, spaced",
+            "crates/am-engine/src/gate.rs",
+            "fn rows(store: &am_store::Store) -> Arc<dyn RowWriter> {\n    Arc::new(crate::row_writer::StoreRowWriter :: new(store))\n}\n",
+            &["StoreRowWriter"][..],
+        ),
+        (
+            "ToolGate, then ::shipped on the next line",
+            "crates/am-server/src/inbox.rs",
+            "fn gate(r: Arc<dyn RowWriter>, a: Arc<dyn AuditSink>) {\n    let _ = am_engine::toolgate::ToolGate\n        ::shipped(r, None, a);\n}\n",
+            &["ToolGate"][..],
+        ),
+    ] {
+        let tmp = gate_tree(file, source);
+        let said = failures(tmp.path());
+        assert!(
+            said.iter()
+                .any(|err| err.contains(file) && names.iter().any(|n| err.contains(n))),
+            "{what}: a finding naming {file} and one of {names:?}; found {said:#?}"
+        );
+    }
+}
+
+/// R3 on the repository: no shipped file but `toolgate.rs` and `run.rs`
+/// names `ToolGate` or calls `.admit(`, and none but `row_writer.rs` and
+/// `run.rs` names `StoreRowWriter` (comment lines left out); both guards
+/// pass on the real workspace.
+#[test]
+fn the_repository_builds_gates_only_in_the_engines_driver() {
+    let root = common::repo_root();
+    let mut found = Vec::new();
+    for krate in std::fs::read_dir(root.join("crates")).unwrap().flatten() {
+        let mut stack = vec![krate.path().join("src")];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for e in entries.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                    continue;
+                }
+                if p.extension().is_none_or(|x| x != "rs") {
+                    continue;
+                }
+                let rel = p
+                    .strip_prefix(&root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                let code: String = std::fs::read_to_string(&p)
+                    .unwrap()
+                    .lines()
+                    .filter(|l| !l.trim_start().starts_with("//"))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let engine = |name: &str| rel == format!("crates/am-engine/src/{name}");
+                if code.contains("ToolGate") && !engine("toolgate.rs") && !engine("run.rs") {
+                    found.push(format!("{rel}: ToolGate"));
+                }
+                if code.contains(".admit(") && !engine("toolgate.rs") && !engine("run.rs") {
+                    found.push(format!("{rel}: admit"));
+                }
+                if code.contains("StoreRowWriter") && !engine("row_writer.rs") && !engine("run.rs")
+                {
+                    found.push(format!("{rel}: StoreRowWriter"));
+                }
+            }
+        }
+    }
+    assert!(found.is_empty(), "{found:#?}");
+    clean("the repository", &root);
+}

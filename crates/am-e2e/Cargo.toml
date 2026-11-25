@@ -193,6 +193,52 @@ path = "tests/trust/taint_prompt_names_only.rs"
 name = "taint_prompt_repair"
 path = "tests/trust/taint_prompt_repair.rs"
 
+# Story 3.6: rows and documents written with provenance (AD-8, AD-10 as
+# amended 2026-11-24, AD-11, AD-21, AD-29, AD-43, AD-46). The engine's
+# row writes, idempotency and document versions are engine tests
+# (tests/engine/); the Tables grant, the declared-table binding, taint at
+# rest, the engine result, the row reader, untrusted Markdown and RULE-16's
+# row provenance are trust tests (tests/trust/).
+[[test]]
+name = "rows_table_write"
+path = "tests/engine/rows_table_write.rs"
+
+[[test]]
+name = "rows_idempotent"
+path = "tests/engine/rows_idempotent.rs"
+
+[[test]]
+name = "capabilities_tables_grant"
+path = "tests/trust/capabilities_tables_grant.rs"
+
+[[test]]
+name = "taint_rows_declared_table"
+path = "tests/trust/taint_rows_declared_table.rs"
+
+[[test]]
+name = "taint_rows_at_rest"
+path = "tests/trust/taint_rows_at_rest.rs"
+
+[[test]]
+name = "taint_tool_result_engine_values"
+path = "tests/trust/taint_tool_result_engine_values.rs"
+
+[[test]]
+name = "rule_16_row_provenance"
+path = "tests/trust/rule_16_row_provenance.rs"
+
+# Story 3.6's ToolGate slice: the engine result journaled on its tool
+# call's row and rebuilt from the writer's record (AD-8, AD-10 with
+# Winston's wording; row 44), and no row content reaching a model call
+# (owner conditions a and b; row 43).
+[[test]]
+name = "engine_result_journal"
+path = "tests/engine/engine_result_journal.rs"
+
+[[test]]
+name = "taint_rows_no_read_path"
+path = "tests/trust/taint_rows_no_read_path.rs"
+
 [dev-dependencies]
 am-app.workspace = true
 # Story 3.2: the error envelope and the run and event DTOs (AD-14).

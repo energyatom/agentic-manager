@@ -26,8 +26,20 @@
 //! Story 3.3 (owner condition 2, AD-11) adds am-engine's tool seam: the
 //! engine takes a tool runner only through `run_plan_with_tools`, defined
 //! in `crates/am-engine/src/run.rs` and named nowhere else in shipped code
-//! (am-app's `agentic run` included), so the binary never runs a tool; its
-//! one runner is am-testkit's `FixtureTool`, in tests.
+//! (am-app's `agentic run` included), so the binary runs no runner tool;
+//! its one runner is am-testkit's `FixtureTool`, in tests. Since story 3.6
+//! the binary's only tool is the built-in `table_write`, which the
+//! engine's shipped ToolGate runs through the row-writer port, not a
+//! runner.
+//!
+//! Story 3.6's ToolGate slice, review round 1 (R3): the gate and the row
+//! writer are built, and a call admitted, only by the engine's driver, so
+//! no other shipped code can hand ToolGate a forged step (`StepTools`, a
+//! seat's team) or call place (`CallPlace`). `ToolGate` is named only in
+//! `crates/am-engine/src/toolgate.rs` and `run.rs`; `StoreRowWriter` only
+//! in `crates/am-engine/src/row_writer.rs` and `run.rs`; `admit` only in
+//! `toolgate.rs` and `run.rs`. A gate's `run` needs a `Permit`, which only
+//! `admit` makes.
 
 use std::path::Path;
 
@@ -55,7 +67,7 @@ struct Seam {
     why: &'static str,
 }
 
-const SEAMS: [Seam; 5] = [
+const SEAMS: [Seam; 8] = [
     Seam {
         name: "with_seams",
         homes: &["crates/am-net/src/"],
@@ -94,6 +106,36 @@ const SEAMS: [Seam; 5] = [
         definition: None,
         also: Some(("crates/am-engine/src/run.rs", "run_plan_with_tools")),
         why: "names am_domain::ToolRunner outside am-domain (its definition), ToolGate (crates/am-engine/src/toolgate.rs, its only caller), run_plan_with_tools' signature and am-testkit (its one runner, FixtureTool, a dev-dependency); the binary has no tool (story 3.3, owner condition 2, AD-11)",
+    },
+    Seam {
+        name: "ToolGate",
+        homes: &[
+            "crates/am-engine/src/toolgate.rs",
+            "crates/am-engine/src/run.rs",
+        ],
+        definition: None,
+        also: None,
+        why: "names ToolGate outside its definition and the engine's driver (crates/am-engine/src/run.rs), the one place a gate is built and given a step's facts and a call's place; other shipped code could forge them (story 3.6, review round 1, R3; AD-11)",
+    },
+    Seam {
+        name: "StoreRowWriter",
+        homes: &[
+            "crates/am-engine/src/row_writer.rs",
+            "crates/am-engine/src/run.rs",
+        ],
+        definition: None,
+        also: None,
+        why: "names StoreRowWriter outside its definition and the engine's driver (crates/am-engine/src/run.rs), which alone hands it to ToolGate, its only caller (story 3.6, review round 1, R3; AD-21)",
+    },
+    Seam {
+        name: "admit",
+        homes: &[
+            "crates/am-engine/src/toolgate.rs",
+            "crates/am-engine/src/run.rs",
+        ],
+        definition: None,
+        also: None,
+        why: "names admit, ToolGate's admission of a call, outside ToolGate and the engine's driver (crates/am-engine/src/run.rs), which alone admits a call with its step's facts and its journaled place (story 3.6, review round 1, R3; AD-11)",
     },
 ];
 
@@ -286,7 +328,7 @@ pub fn run(root: &Path) -> Result<String, Failure> {
     }
     if findings.is_empty() {
         Ok(format!(
-            "{scanned} files clean: only tests and their definitions name NetEgress::with_seams, router_with_fixture, FixtureRoute and run_plan_with_tools; ToolRunner only in am-domain, ToolGate, run_plan_with_tools' signature and am-testkit; no #[path], include! or macro_rules!; no symlink, unreadable file or manifest target outside the scanned source under crates/"
+            "{scanned} files clean: only tests and their definitions name NetEgress::with_seams, router_with_fixture, FixtureRoute and run_plan_with_tools; ToolRunner only in am-domain, ToolGate, run_plan_with_tools' signature and am-testkit; ToolGate, StoreRowWriter and admit only in their definitions and the engine's driver; no #[path], include! or macro_rules!; no symlink, unreadable file or manifest target outside the scanned source under crates/"
         ))
     } else {
         Err(Failure::Findings(findings))
