@@ -153,7 +153,14 @@ async fn a_scripted_table_write_lands_rows_with_version_taint_and_history() {
         assert_eq!(number(&entry["args"]["version"]), Some(n as i64 + 1));
         assert_eq!(number(&entry["args"]["call_seq"]), Some(n as i64 + 1));
         assert!(audited_clean(&entry["args"]["taint"]), "{entry}");
-        let text = entry.to_string();
+        // `at` is a real wall-clock stamp, so its digits can hold a canary
+        // such as "2.5" (14:51:32.52…); the row data is checked everywhere
+        // else in the entry.
+        let mut scrubbed = entry.clone();
+        if let Some(fields) = scrubbed.as_object_mut() {
+            fields.remove("at");
+        }
+        let text = scrubbed.to_string();
         for value in ["first", "second", "2.5", "r-1"] {
             assert!(!text.contains(value), "no row data in the audit: {text}");
         }
