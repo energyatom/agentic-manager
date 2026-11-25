@@ -96,7 +96,9 @@ pub use finding::{Finding, Severity};
 pub use migrate::{MigrationOffer, accept_migrations, migration_offers};
 pub use session::{ConfigEvent, ConfigSession, ReloadError, SessionError};
 pub use snapshot::ConfigSnapshot;
-pub use user_accounts::{LEGACY_ACCOUNTS_FILE, USER_ACCOUNTS_FILE, UserAccounts, key_ref};
+pub use user_accounts::{
+    KeyState, LEGACY_ACCOUNTS_FILE, USER_ACCOUNTS_FILE, UserAccounts, key_ref, key_state,
+};
 #[cfg(feature = "test-support")]
 pub use writer::FailPoint;
 pub use writer::{

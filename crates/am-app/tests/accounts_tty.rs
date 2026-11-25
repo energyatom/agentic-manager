@@ -176,7 +176,14 @@ fn unconfirmed_account(e: &Env) -> String {
             },
             am_config::ConfigCreate {
                 file: "accounts.yaml".into(),
-                bytes: am_config::new_accounts_file(&id, "anthropic", None, None).unwrap(),
+                bytes: am_config::new_accounts_file(
+                    &id,
+                    "anthropic",
+                    None,
+                    None,
+                    am_config::KeyState::Stored,
+                )
+                .unwrap(),
                 audit: Vec::new(),
             },
         )

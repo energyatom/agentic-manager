@@ -1,6 +1,6 @@
-//! `agentic accounts change <id> [--provider P] [--base-url U]` (story
-//! 2.14; AD-15 *Change*, *Terminal*, *Open*, *Record*, *Key use*): the
-//! CLI's only way to confirm or re-confirm an Account on this Mac.
+//! `agentic accounts change <id> [--provider P] [--base-url U] [--no-key]`
+//! (story 2.14; AD-15 *Change*, *Terminal*, *Open*, *Record*, *Key use*):
+//! the CLI's only way to confirm or re-confirm an Account on this Mac.
 //!
 //! Before any prompt, holding no lock, in this order (the first that fails
 //! is what the owner reads; nothing is read from the terminal, written or
@@ -35,6 +35,16 @@
 //!   record, so no key is used until `change` runs again; after (2), the
 //!   words name the exact flags, and `change <id>` with no flags finishes at
 //!   that destination.
+//! - **Story 2.10 (AD-15 *Keyless loopback Account*, owner Q5):** a keyless
+//!   Account's address change stays keyless and makes no Keychain call. A
+//!   provider change or first confirmation to `http://127.0.0.1:<port>`
+//!   may take `--no-key`: no key prompt and no Keychain call, `secret_ref`
+//!   removed, and `account_removed` (`provider_change`, no `key_for_…`) and
+//!   `account_added` (`key: none`) commit with the write in one
+//!   transaction. A keyed confirmation writes `secret_ref: <id>` when the
+//!   entry lacks it. `--no-key` is refused for a remote endpoint and on a
+//!   keyed Account's address change (a key is dropped only by `remove`,
+//!   then `add --no-key`).
 //!
 //! The sentence shows the old values (the live record's; for a first
 //! confirmation, the file's) beside the new, and every reference found,
@@ -46,17 +56,17 @@
 use std::collections::BTreeMap;
 use std::io::Write;
 
-use am_config::{AccountsFile, USER_ACCOUNTS_FILE};
-use am_domain::{AuditNote, EgressDirectory, SecretString, TerminalError};
+use am_config::{AccountsFile, KeyState, USER_ACCOUNTS_FILE};
+use am_domain::{AuditNote, SecretString, TerminalError};
 
 use super::{
     AccountEndpoint, AccountsContext, CONFIRM_WITHIN, PROVIDERS, Stop, endpoint_of, interrupted,
-    is_model_provider, lock, no_owner_child, not_checked, refuse, reserved, stand, write_words,
-    written_pending,
+    is_model_provider, lock, no_key_refusal, no_owner_child, not_a_taken_port, not_checked, refuse,
+    reserved, stand, write_words, written_pending,
 };
 use crate::cli::EXIT_ERRORS;
 use crate::key_use::{self, Destination};
-use crate::runtime::{Places, owner};
+use crate::runtime::owner;
 use crate::user::{Scan, shown};
 
 /// What a refused `change` did not do, while no key has been read yet.
@@ -71,7 +81,7 @@ struct Old {
     scheme: String,
     host: String,
     port: String,
-    key: String,
+    key: KeyState,
 }
 
 impl Old {
@@ -81,7 +91,7 @@ impl Old {
             scheme: d.scheme.clone(),
             host: d.host.clone(),
             port: d.port.clone(),
-            key: d.key.clone(),
+            key: d.key_state(),
         }
     }
 
@@ -121,13 +131,20 @@ fn note(action: &str, id: &str, args: Vec<(&str, String)>) -> AuditNote {
     }
 }
 
-/// True when the file's entry for `id` already holds `provider` and the
-/// `base_url` the endpoint writes.
-fn holds(file: &AccountsFile, id: &str, provider: &str, endpoint: &AccountEndpoint) -> bool {
-    file.accounts
-        .iter()
-        .find(|a| a.id == id)
-        .is_some_and(|a| a.provider == provider && a.base_url.as_deref() == endpoint.written())
+/// True when the file's entry for `id` already holds `provider`, the
+/// `base_url` the endpoint writes and the key state `key` (story 2.10).
+fn holds(
+    file: &AccountsFile,
+    id: &str,
+    provider: &str,
+    endpoint: &AccountEndpoint,
+    key: KeyState,
+) -> bool {
+    file.accounts.iter().find(|a| a.id == id).is_some_and(|a| {
+        a.provider == provider
+            && a.base_url.as_deref() == endpoint.written()
+            && am_config::key_state(a) == key
+    })
 }
 
 pub(super) fn change(
@@ -135,6 +152,7 @@ pub(super) fn change(
     id: &str,
     provider_flag: Option<&str>,
     base_url_flag: Option<&str>,
+    no_key: bool,
     out: &mut dyn Write,
 ) -> Result<(), Stop> {
     super::require_terminal(&ctx, "change", NOT_CHANGED)?;
@@ -171,9 +189,9 @@ pub(super) fn change(
             shown(&current.provider)
         ));
     }
-    if am_config::key_ref(&current) != Some(id) {
+    if current.secret_ref.as_deref().is_some_and(|e| e != id) {
         return refuse(format!(
-            "the Account '{id_shown}' has a `secret_ref` that names another Keychain entry; a key is kept only under the Account's own id. Set `secret_ref: {id_shown}` (or remove the line) in {USER_ACCOUNTS_FILE} first. {NOT_CHANGED}"
+            "the Account '{id_shown}' has a `secret_ref` that names another Keychain entry; a key is kept only under the Account's own id. Set `secret_ref: {id_shown}` in {USER_ACCOUNTS_FILE} first. {NOT_CHANGED}"
         ));
     }
     if standing.last.is_none() {
@@ -189,8 +207,9 @@ pub(super) fn change(
         ));
     }
     // An interrupted provider change (review fix Adversarial 1): with no
-    // flags, `change` finishes it at the destination its key was typed for.
-    let pending = if provider_flag.is_none() && base_url_flag.is_none() {
+    // flags, `change` finishes it at the destination its key was typed for
+    // (never with `--no-key`, which types no key).
+    let pending = if !no_key && provider_flag.is_none() && base_url_flag.is_none() {
         key_use::pending_change(&places, id).map_err(stop(NOT_CHANGED))?
     } else {
         None
@@ -210,7 +229,9 @@ pub(super) fn change(
         (None, None) => (None, "--base-url"),
     };
     let endpoint = endpoint_of(&new_provider, new_base, flag).map_err(stop(NOT_CHANGED))?;
-    not_the_app(&places, &endpoint, NOT_CHANGED)?;
+    // The app's own ports and the reserved local Accounts' (story 2.10,
+    // review K4), as `add` refuses them.
+    not_a_taken_port(&places, &endpoint, NOT_CHANGED)?;
     // The live confirmation record decides the path, and the old values.
     // Both from one read of the notes (review follow-up).
     let (live, record_seq) = key_use::record_state(&places, id).map_err(stop(NOT_CHANGED))?;
@@ -224,20 +245,40 @@ pub(super) fn change(
                 scheme: e.scheme.to_string(),
                 host: e.host.clone(),
                 port: e.port.to_string(),
-                key: "stored".into(),
+                key: am_config::key_state(&current),
             }
         }
     };
     let address = live
         .as_ref()
         .is_some_and(|(d, _)| d.provider == new_provider);
-    // Keyless Accounts arrive with story 2.10: none may become remote.
-    if old.key == "none" && !endpoint.loopback {
+    // A confirmed keyless Account (story 2.10) never becomes remote.
+    if live.is_some() && old.key == KeyState::None && !endpoint.loopback {
         return refuse(format!(
             "the Account '{id_shown}' has no key, and an Account with no key stays on this Mac; a remote endpoint needs an Account with a key. {NOT_CHANGED}"
         ));
     }
-    let file_holds = holds(&standing.file, id, &new_provider, &endpoint);
+    // Story 2.10: `--no-key` only on this Mac, and never drops the key of
+    // an address change (a key state changes only where a key would be
+    // replaced).
+    if no_key {
+        if let Some(why) = no_key_refusal(&new_provider, &endpoint, NOT_CHANGED) {
+            return refuse(why);
+        }
+        if address && old.key == KeyState::Stored {
+            return refuse(format!(
+                "`--no-key` is not accepted for a new address of '{id_shown}': an address change keeps the key state, and '{id_shown}' has a key. {NOT_CHANGED}; to drop its key, remove the Account (`agentic accounts remove {id_shown}`) and add it again with `--no-key`"
+            ));
+        }
+    }
+    // The key state the change writes: an address change keeps the
+    // confirmed one; otherwise a new key, or none with `--no-key`.
+    let new_key_state = match (address, no_key) {
+        (true, _) => old.key,
+        (false, true) => KeyState::None,
+        (false, false) => KeyState::Stored,
+    };
+    let file_holds = holds(&standing.file, id, &new_provider, &endpoint, new_key_state);
     if address
         && file_holds
         && live
@@ -254,7 +295,12 @@ pub(super) fn change(
     before_story_18(&scan, id, &old, &new_provider, &endpoint, NOT_CHANGED)?;
 
     // The sentence.
-    let how = if address {
+    let how = if address && old.key == KeyState::None {
+        format!(
+            "The provider stays {new_provider} and the Account stays keyless: its calls to the new endpoint, {}, carry no credential. No key is asked for, and no Keychain entry is read or changed.",
+            endpoint.base_url
+        )
+    } else if address {
         format!(
             "The provider stays {new_provider}: the key stored under '{id_shown}' in this Mac's Keychain will now be sent to the new endpoint, {}. No key is asked for, and the Keychain entry is not read or changed.",
             endpoint.base_url
@@ -267,16 +313,23 @@ pub(super) fn change(
                 "'{id_shown}' has no confirmation on this Mac (it was never confirmed, was moved here unconfirmed, was removed, or an earlier change did not finish), so this confirms it"
             )
         };
-        let held = match &pending {
-            Some(p) => format!(
-                " This Mac's Keychain entry for '{id_shown}' already holds a key typed for {} by an earlier change that did not finish; it is replaced by the key you type now.",
-                p.dest.words()
-            ),
-            None => String::new(),
-        };
-        format!(
-            "{why}: the key stored under '{id_shown}' will not be sent to the new provider. After you confirm, you type a new key now, and the old key is deleted from this Mac's Keychain and not kept.{held}"
-        )
+        if no_key {
+            format!(
+                "{why}, with no key: its calls go to {} and carry no credential. No key is asked for, and no Keychain entry is read, changed or deleted.",
+                endpoint.goes_to()
+            )
+        } else {
+            let held = match &pending {
+                Some(p) => format!(
+                    " This Mac's Keychain entry for '{id_shown}' already holds a key typed for {} by an earlier change that did not finish; it is replaced by the key you type now.",
+                    p.dest.words()
+                ),
+                None => String::new(),
+            };
+            format!(
+                "{why}: the key stored under '{id_shown}' will not be sent to the new provider. After you confirm, you type a new key now, and the old key is deleted from this Mac's Keychain and not kept.{held}"
+            )
+        }
     };
     let from = if live.is_some() {
         "confirmed now"
@@ -308,7 +361,7 @@ pub(super) fn change(
             "the change was not confirmed (`yes` was not typed). {NOT_CHANGED}"
         ));
     }
-    let new_key = if address {
+    let new_key = if address || no_key {
         None
     } else {
         ctx.terminal.show(&format!(
@@ -328,7 +381,7 @@ pub(super) fn change(
     };
 
     // Under `user.lock`: the file, the Account's records and the scan again.
-    let did_not = if address {
+    let did_not = if address || no_key {
         NOT_CHANGED
     } else {
         NOT_CHANGED_NOR_STORED
@@ -352,8 +405,9 @@ pub(super) fn change(
             "this Mac's confirmation of '{id_shown}' changed while this command waited. {again}"
         ));
     }
-    // Review fix Adversarial 6: the app's own ports, again.
-    not_the_app(&places, &endpoint, did_not)?;
+    // Review fix Adversarial 6: the app's own ports (and the reserved
+    // local Accounts'), again.
+    not_a_taken_port(&places, &endpoint, did_not)?;
     // The address path stands on the live record the sentence showed: the
     // same record (sequence and destination) under the lock (review
     // follow-up).
@@ -394,13 +448,19 @@ pub(super) fn change(
         None
     } else {
         Some(
-            am_config::change_account_edit(&now.file, id, &new_provider, endpoint.written())
-                .ok_or_else(|| {
-                    Stop(
-                        EXIT_ERRORS,
-                        format!("there is no Account '{id_shown}' on this Mac any more. {again}"),
-                    )
-                })?,
+            am_config::change_account_edit(
+                &now.file,
+                id,
+                &new_provider,
+                endpoint.written(),
+                new_key_state,
+            )
+            .ok_or_else(|| {
+                Stop(
+                    EXIT_ERRORS,
+                    format!("there is no Account '{id_shown}' on this Mac any more. {again}"),
+                )
+            })?,
         )
     };
     // Every check of the write (a secret-looking value, an error it adds)
@@ -416,32 +476,61 @@ pub(super) fn change(
     }
 
     let Some(key) = new_key else {
-        // Address change: no Keychain call; the record with the write.
-        let args = vec![
-            ("kind", "account_changed".to_string()),
-            ("old_provider", old.provider.clone()),
-            ("old_scheme", old.scheme.clone()),
-            ("old_host", old.host.clone()),
-            ("old_port", old.port.clone()),
-            ("new_provider", new_provider.clone()),
-            ("new_scheme", endpoint.scheme.to_string()),
-            ("new_host", endpoint.host.clone()),
-            ("new_port", endpoint.port.to_string()),
-            ("references", references),
-            ("key", old.key.clone()),
-            ("confirmation", "typed_id_yes".to_string()),
-        ];
-        let changed = note("config.widened", id, args);
+        // Address change, or (story 2.10) a confirmation with no key: no
+        // Keychain call; the records with the write.
+        let notes = if address {
+            let args = vec![
+                ("kind", "account_changed".to_string()),
+                ("old_provider", old.provider.clone()),
+                ("old_scheme", old.scheme.clone()),
+                ("old_host", old.host.clone()),
+                ("old_port", old.port.clone()),
+                ("new_provider", new_provider.clone()),
+                ("new_scheme", endpoint.scheme.to_string()),
+                ("new_host", endpoint.host.clone()),
+                ("new_port", endpoint.port.to_string()),
+                ("references", references),
+                ("key", old.key.recorded().to_string()),
+                ("confirmation", "typed_id_yes".to_string()),
+            ];
+            vec![note("config.widened", id, args)]
+        } else {
+            // The old confirmation ends and the new one starts in the
+            // write's transaction: no Keychain step sits between them, and
+            // no key is replaced (so no `key_for_…`).
+            let removed = vec![
+                ("kind", "account_removed".to_string()),
+                ("reason", "provider_change".to_string()),
+            ];
+            let replaces = live_now
+                .as_ref()
+                .map_or_else(|| "none".to_string(), |(d, _)| d.replaces());
+            let added = vec![
+                ("kind", "account_added".to_string()),
+                ("provider", new_provider.clone()),
+                ("scheme", endpoint.scheme.to_string()),
+                ("host", endpoint.host.clone()),
+                ("port", endpoint.port.to_string()),
+                ("references", references),
+                ("key", KeyState::None.recorded().to_string()),
+                ("replaces", replaces),
+                ("confirmation", "typed_id_yes_new_key".to_string()),
+            ];
+            vec![
+                note("config.narrowed", id, removed),
+                note("config.widened", id, added),
+            ]
+        };
         // The confirmation commits with its History entry (review fix
         // G-record): an entry whose before equals its after when the file
         // already holds the values.
         let written = match edit {
             None => locked
                 .writer
-                .apply_unchanged_with_audit(owner(), &built_on, vec![changed]),
+                .apply_unchanged_with_audit(owner(), &built_on, notes),
             Some(edit) => locked
                 .writer
-                .apply_with_audit(owner(), edit, &built_on, vec![changed]),
+                .apply_with_audit(owner(), edit, &built_on, notes),
         };
         let entry = {
             match written {
@@ -462,11 +551,21 @@ pub(super) fn change(
                 }
             }
         };
-        let _ = writeln!(
-            out,
-            "agentic: changed the Account '{id_shown}' to {} ({entry}); the key the Keychain holds for it now goes there",
-            new_words(&new_provider, &endpoint)
-        );
+        let said = match (address, old.key) {
+            (false, _) => format!(
+                "confirmed the Account '{id_shown}' for {} with no key ({entry}); its calls carry no credential, and no Keychain entry was read or changed",
+                new_words(&new_provider, &endpoint)
+            ),
+            (true, KeyState::None) => format!(
+                "changed the Account '{id_shown}' to {} ({entry}); it stays keyless, and its calls carry no credential",
+                new_words(&new_provider, &endpoint)
+            ),
+            (true, KeyState::Stored) => format!(
+                "changed the Account '{id_shown}' to {} ({entry}); the key the Keychain holds for it now goes there",
+                new_words(&new_provider, &endpoint)
+            ),
+        };
+        let _ = writeln!(out, "agentic: {said}");
         return Ok(());
     };
 
@@ -583,19 +682,6 @@ pub(super) fn change(
         new_words(&new_provider, &endpoint),
         places.user.accounts_file().display()
     );
-    Ok(())
-}
-
-/// The app's own ports (every running `agentic serve`, and the one each
-/// runtime folder records): an Account never reaches the app itself.
-fn not_the_app(places: &Places, endpoint: &AccountEndpoint, did_not: &str) -> Result<(), Stop> {
-    let directory = crate::egress::ProjectDirectory::for_accounts(places);
-    if endpoint.loopback && directory.own_ports().contains(&endpoint.port) {
-        return refuse(format!(
-            "the new endpoint is not accepted: {}, and an Account never reaches the app itself. {did_not}",
-            crate::egress::own_server_words(endpoint.port)
-        ));
-    }
     Ok(())
 }
 

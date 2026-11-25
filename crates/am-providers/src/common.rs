@@ -160,7 +160,9 @@ pub async fn send_cancellable(
             .await
             .unwrap_or_default();
         let mut text = String::from_utf8_lossy(&body).to_string();
-        text.truncate(2000);
+        // At most 2,000 bytes, cut on a character boundary (story 2.10,
+        // review K2: a cut inside a character panicked).
+        text.truncate(text.floor_char_boundary(2000));
         return Err(ProviderError::Http {
             status: resp.status,
             body: text,

@@ -118,12 +118,17 @@ pub fn reserved_local_account(account: &str) -> Option<Endpoint> {
 }
 
 /// An Account's confirmation as a directory states it (AD-15 *Key use*):
-/// the endpoint it is confirmed for and a version naming the Accounts
-/// file's hash and the latest confirmation record. Never a secret.
+/// the endpoint it is confirmed for, a version naming the Accounts file's
+/// hash and the latest confirmation record, and whether it is confirmed
+/// with a key. Never a secret.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccountStamp {
     pub endpoint: Endpoint,
     pub version: String,
+    /// False for a keyless Account (story 2.10, AD-15 *Keyless loopback
+    /// Account*): a request for it never carries a credential, and the
+    /// client refuses one that names it before any Keychain read.
+    pub keyed: bool,
 }
 
 /// The one place the egress client learns what a caller may reach (AD-12,
@@ -147,11 +152,14 @@ pub trait EgressDirectory: Send + Sync {
     /// not answered. The client takes it before resolving and again right
     /// after its own key read, and sends the key only when both are present,
     /// equal and name the endpoint the request goes to. A directory that
-    /// keeps no confirmations answers with its endpoint and no version.
+    /// keeps no confirmations answers with its endpoint and no version, and
+    /// keyed (the safe side: a key is still only read for a request that
+    /// names it).
     fn account_stamp(&self, account: &str) -> Option<AccountStamp> {
         self.account_endpoint(account).map(|endpoint| AccountStamp {
             endpoint,
             version: String::new(),
+            keyed: true,
         })
     }
     /// The ports the app's own servers are listening on (every running

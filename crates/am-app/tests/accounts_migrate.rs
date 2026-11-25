@@ -1950,8 +1950,14 @@ async fn a_change_on_the_user_list_since_the_sentence_refuses() {
         let writer =
             am_config::ConfigWriter::for_user_accounts(places.user.dir(), Arc::new(guard)).unwrap();
         let file = am_config::accounts_file(places.user.dir());
-        let edit =
-            am_config::add_account_edit(&file, "spare", "anthropic", Some("Spare account"), None);
+        let edit = am_config::add_account_edit(
+            &file,
+            "spare",
+            "anthropic",
+            Some("Spare account"),
+            None,
+            am_config::KeyState::Stored,
+        );
         writer.apply(owner(), edit).unwrap();
     });
     kit.term.line("spare");

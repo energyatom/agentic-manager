@@ -10,7 +10,9 @@
 //!   provider and `base_url` rules apply unchanged. A missing file is an
 //!   empty list with no finding (the first add on a Mac).
 //! - [`key_ref`] is the one predicate every key reader uses: the Keychain
-//!   entry an Account's key is read from, which is only ever its own id.
+//!   entry an Account's key is read from, which is only ever its own id,
+//!   and only when `secret_ref` names it; [`key_state`] says whether the
+//!   entry has the line at all (story 2.10: an entry without it is keyless).
 //! - The writer of the file is [`crate::ConfigWriter::for_user_accounts`].
 
 use std::path::Path;
@@ -57,13 +59,44 @@ impl UserAccounts {
     }
 }
 
+/// Whether an Account's entry names a Keychain entry (story 2.10, AD-15
+/// *Keyless loopback Account*): `Stored` when it has a `secret_ref` line,
+/// `None` (keyless) when it has none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyState {
+    Stored,
+    None,
+}
+
+impl KeyState {
+    /// The state as an `account_added` or `account_changed` record names
+    /// it in its `key` field: `stored` or `none`.
+    pub fn recorded(self) -> &'static str {
+        match self {
+            KeyState::Stored => "stored",
+            KeyState::None => "none",
+        }
+    }
+}
+
+/// The key state of `account`'s entry: the presence of its `secret_ref`
+/// line, whatever it names (the loader refuses a line naming another
+/// entry).
+pub fn key_state(account: &Account) -> KeyState {
+    match account.secret_ref {
+        Some(_) => KeyState::Stored,
+        None => KeyState::None,
+    }
+}
+
 /// The Keychain entry the key of `account` is read from: its own id, and
-/// only that. An Account whose `secret_ref` names anything else has none,
-/// so no key reader ever reads another entry (AD-17).
+/// only when its `secret_ref` names it. An Account with no `secret_ref` is
+/// keyless (story 2.10) and one whose `secret_ref` names anything else has
+/// none, so no key reader ever reads another entry (AD-17).
 pub fn key_ref(account: &Account) -> Option<&str> {
     match &account.secret_ref {
-        Some(entry) if *entry != account.id => None,
-        _ => Some(account.id.as_str()),
+        Some(entry) if *entry == account.id => Some(account.id.as_str()),
+        _ => None,
     }
 }
 

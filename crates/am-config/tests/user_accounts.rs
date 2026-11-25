@@ -34,8 +34,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use am_config::{
-    ConfigCreate, ConfigWriter, EditOp, Finding, LEGACY_ACCOUNTS_FILE, LoadOptions, Severity,
-    USER_ACCOUNTS_FILE, UserAccounts, WriteError, key_ref, load_in, user_accounts,
+    ConfigCreate, ConfigWriter, EditOp, Finding, KeyState, LEGACY_ACCOUNTS_FILE, LoadOptions,
+    Severity, USER_ACCOUNTS_FILE, UserAccounts, WriteError, key_ref, key_state, load_in,
+    user_accounts,
 };
 use am_domain::capability::AccountKind;
 use am_domain::{Actor, ConfigHistory, HistoryKind};
@@ -182,6 +183,58 @@ fn a_secret_ref_must_equal_the_id() {
     let bad = list.get("cloud").expect("still listed, with its error");
     assert_eq!(key_ref(bad), None, "never another entry's key");
     assert_eq!(key_ref(list.get("fine").unwrap()), Some("fine"));
+}
+
+/// Story 2.10 (AD-15 *Keyless loopback Account*, AD-17): `key_ref` names
+/// the Keychain entry only when `secret_ref` names the Account's own id. An
+/// entry with no `secret_ref` is keyless (from this story on, absence no
+/// longer means the id's own entry), and one naming another entry has
+/// none, as before. `key_state` reads the line's presence: `Stored` when
+/// the entry has a `secret_ref`, `None` when it has none. Written before
+/// the change.
+#[test]
+fn key_ref_names_the_id_only_when_secret_ref_names_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(USER_ACCOUNTS_FILE);
+    std::fs::write(
+        &path,
+        "schema_version: 2\naccounts:\n  - id: keyed\n    provider: anthropic\n    secret_ref: keyed\n  - id: local\n    provider: openai-compatible\n    base_url: http://127.0.0.1:8080/v1\n  - id: elsewhere\n    provider: anthropic\n    secret_ref: other\n",
+    )
+    .unwrap();
+    let list = user_accounts::load(&path).accounts;
+    let (keyed, local, elsewhere) = (
+        list.get("keyed").unwrap(),
+        list.get("local").unwrap(),
+        list.get("elsewhere").expect("listed, with its error"),
+    );
+    assert_eq!(key_ref(keyed), Some("keyed"));
+    assert_eq!(key_ref(local), None, "no secret_ref: keyless, no entry");
+    assert_eq!(key_ref(elsewhere), None, "never another entry's key");
+    assert_eq!(key_state(keyed), KeyState::Stored);
+    assert_eq!(key_state(local), KeyState::None);
+    assert_eq!(
+        key_state(elsewhere),
+        KeyState::Stored,
+        "the line is there; the loader refuses what it names"
+    );
+}
+
+/// Story 2.10 (matrix row 25): a `secret_ref` naming another entry on a
+/// keyed Account is a validate error whose fix is to write `secret_ref:
+/// <id>`. It no longer offers "or remove the line": without the line the
+/// Account would be keyless.
+#[test]
+fn the_secret_ref_fix_never_tells_a_keyed_account_to_drop_the_line() {
+    let found = user_findings(
+        "schema_version: 2\naccounts:\n  - id: cloud\n    provider: anthropic\n    secret_ref: other\n",
+    );
+    let f = at_line(&found, USER_ACCOUNTS_FILE, 5, "secret_ref");
+    assert_eq!(f.severity, Severity::Error);
+    assert!(f.fix.contains("secret_ref: cloud"), "{f:?}");
+    assert!(
+        !f.fix.to_lowercase().contains("remove"),
+        "the fix never says to remove the line: {f:?}"
+    );
 }
 
 /// A missing file is an empty list with no finding: the first add on a Mac.
@@ -332,7 +385,8 @@ fn the_user_writer_creates_then_edits_the_accounts_file() {
     let history = Arc::new(InMemoryConfigHistory::default());
     let w = ConfigWriter::for_user_accounts(dir.path(), history.clone()).unwrap();
 
-    let bytes = am_config::new_accounts_file("cloud", "anthropic", None, None).unwrap();
+    let bytes =
+        am_config::new_accounts_file("cloud", "anthropic", None, None, KeyState::Stored).unwrap();
     let created = w
         .create(
             owner(),
@@ -352,7 +406,7 @@ fn the_user_writer_creates_then_edits_the_accounts_file() {
     let edited = w
         .apply_with_audit(
             owner(),
-            am_config::add_account_edit(&now, "oa", "openai", None, None),
+            am_config::add_account_edit(&now, "oa", "openai", None, None, KeyState::Stored),
             now.sha256.as_deref().unwrap(),
             Vec::new(),
         )
@@ -785,6 +839,7 @@ fn undo_or_restore_that_moves_an_account_is_refused_naming_change() {
                     "openai-compatible",
                     Some("Router"),
                     Some("https://openrouter.example/api/v1"),
+                    KeyState::Stored,
                 )
                 .unwrap(),
                 audit: Vec::new(),
@@ -884,7 +939,8 @@ fn undo_or_restore_that_adds_or_drops_an_account_is_refused() {
         owner(),
         ConfigCreate {
             file: USER_ACCOUNTS_FILE.into(),
-            bytes: am_config::new_accounts_file("cloud", "anthropic", None, None).unwrap(),
+            bytes: am_config::new_accounts_file("cloud", "anthropic", None, None, KeyState::Stored)
+                .unwrap(),
             audit: Vec::new(),
         },
     )
@@ -899,6 +955,7 @@ fn undo_or_restore_that_adds_or_drops_an_account_is_refused() {
                 "openai-compatible",
                 None,
                 Some("https://elsewhere.example/v1"),
+                KeyState::Stored,
             ),
             now.sha256.as_deref().unwrap(),
             Vec::new(),
@@ -923,6 +980,7 @@ fn undo_or_restore_that_adds_or_drops_an_account_is_refused() {
             "openai-compatible",
             None,
             Some("https://openrouter.example/api/v1"),
+            KeyState::Stored,
         ),
         now.sha256.as_deref().unwrap(),
         Vec::new(),

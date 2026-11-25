@@ -401,7 +401,14 @@ fn listed_unconfirmed(env: &Env, id: &str) {
         Some(built_on) => writer
             .apply_with_audit(
                 owner(),
-                am_config::add_account_edit(&now, id, "anthropic", None, None),
+                am_config::add_account_edit(
+                    &now,
+                    id,
+                    "anthropic",
+                    None,
+                    None,
+                    am_config::KeyState::Stored,
+                ),
                 built_on,
                 vec![note],
             )
@@ -411,7 +418,14 @@ fn listed_unconfirmed(env: &Env, id: &str) {
                 owner(),
                 am_config::ConfigCreate {
                     file: USER_FILE.into(),
-                    bytes: am_config::new_accounts_file(id, "anthropic", None, None).unwrap(),
+                    bytes: am_config::new_accounts_file(
+                        id,
+                        "anthropic",
+                        None,
+                        None,
+                        am_config::KeyState::Stored,
+                    )
+                    .unwrap(),
                     audit: vec![note],
                 },
             )
@@ -1122,7 +1136,14 @@ async fn an_account_whose_record_a_remove_ended_is_confirmed_by_change() {
         writer
             .apply_with_audit(
                 owner(),
-                am_config::add_account_edit(&now, "cloud", "anthropic", None, None),
+                am_config::add_account_edit(
+                    &now,
+                    "cloud",
+                    "anthropic",
+                    None,
+                    None,
+                    am_config::KeyState::Stored,
+                ),
                 now.sha256.as_deref().unwrap(),
                 Vec::new(),
             )
