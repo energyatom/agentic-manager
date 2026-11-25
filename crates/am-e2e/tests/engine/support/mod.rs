@@ -17,6 +17,7 @@ use std::sync::{Arc, Mutex};
 use am_app::cli::RunContext;
 use am_app::runtime::{OpenRequest, Places, Prompt, open_project};
 use am_config::ModelRef;
+use am_domain::money::{CallPrice, Rate};
 use am_domain::rows::{ColumnKind, ColumnSpec, DeclaredTable, RowInput};
 use am_domain::{
     Actor, BoxFuture, CancelSignal, ChatOutcome, ChatRequest, EngineResult, EventSink, Instruction,
@@ -24,7 +25,7 @@ use am_domain::{
     UntrustedContent, UntrustedData,
 };
 use am_engine::prompt::{StepPrompt, heading};
-use am_engine::run::{HandOff, Limits, RunPlan, StepPlan};
+use am_engine::run::{HandOff, Limits, RunMoney, RunPlan, StepPlan};
 use am_engine::schema::OutputSchema;
 use am_store::{
     CallRow, InboxItemRow, LedgerRow, PromptPartRow, Reader, RowHistoryRecord, RowRecord, RunRow,
@@ -100,6 +101,9 @@ pub fn step(key: &str, provider: Arc<dyn LlmProvider>) -> StepPlan {
         table: None,
         document: None,
         row_inputs: vec![],
+        // Story 3.7: a seat on this Mac, so every call is 0 (Conventions,
+        // Money); the cost tests price their own steps.
+        price: Some(CallPrice::local()),
     }
 }
 
@@ -188,6 +192,23 @@ pub fn plan(steps: Vec<StepPlan>) -> RunPlan {
         steps,
         clock: am_testkit::FakeClock::at(CLOCK),
         row_tool: Some(Arc::new(TableWrite::new())),
+        money: money(),
+    }
+}
+
+/// Story 3.7: the money of every plan [`plan`] makes: a company in EUR on
+/// UTC whose weeks start on Monday, with no price file and so no rate (the
+/// snapshot `none`), enough for steps on this Mac.
+pub fn money() -> RunMoney {
+    RunMoney {
+        rate: Rate {
+            currency: "EUR".into(),
+            company_micro_per_usd: None,
+            snapshot: "none".into(),
+            prices_updated: None,
+        },
+        timezone: jiff::tz::TimeZone::UTC,
+        week_start: jiff::civil::Weekday::Monday,
     }
 }
 

@@ -14,7 +14,9 @@
 //! Mac ([`user`]) and makes [`key_use`] the one check before any key read.
 //! Story 3.2 adds [`serving`]: `agentic serve`'s owner-only check at start
 //! and its per-launch CLI token file. Story 3.4 adds `agentic gate`
-//! ([`gate`]): the owner decides open Inbox items on a terminal.
+//! ([`gate`]): the owner decides open Inbox items on a terminal. Story 3.7
+//! prices a run's steps from its pinned snapshot (`prices`) and adds spend
+//! to `agentic status` (`spend`).
 #![forbid(unsafe_code)]
 
 // The composition root depends on every adapter (Design Paradigm table); the
@@ -32,9 +34,11 @@ pub mod egress;
 pub mod gate;
 pub mod identity;
 pub mod key_use;
+mod prices;
 pub mod run;
 pub mod runtime;
 pub mod serving;
+mod spend;
 pub mod spike;
 pub mod terminal;
 pub mod user;

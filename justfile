@@ -79,14 +79,15 @@ register:
 # AD-16, AD-33: `agentic validate --template` on every valid fixture project
 # and every shipped template (the Blank department, the role templates and
 # the sample company; each must exit 0; story 3.6: the sample and the
-# rows-documents fixture with their one fan-out warning each): reference files are checked against
+# rows-documents fixture with their one fan-out warning each; story 3.7: the
+# costs fixture): reference files are checked against
 # each folder's runtime-seed/, and a `project_id` is refused (story 1.13). The
 # broken fixtures are asserted by the am-config and cli_validate tests instead.
 validate:
     #!/usr/bin/env bash
     set -euo pipefail
     cargo build -q -p am-app --bin agentic
-    for project in fixtures/projects/valid*/ fixtures/projects/anatomy/ fixtures/projects/one-step/ fixtures/projects/hand-offs/ fixtures/projects/prompt-parts/ fixtures/projects/rows-documents/ templates/departments/*/ templates/roles/*/ templates/samples/*/; do
+    for project in fixtures/projects/valid*/ fixtures/projects/anatomy/ fixtures/projects/one-step/ fixtures/projects/hand-offs/ fixtures/projects/prompt-parts/ fixtures/projects/rows-documents/ fixtures/projects/costs/ templates/departments/*/ templates/roles/*/ templates/samples/*/; do
         "$CARGO_TARGET_DIR/debug/agentic" validate --template "$project"
     done
 

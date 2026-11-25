@@ -45,6 +45,7 @@ pub mod host;
 pub mod inbox;
 pub mod llm;
 pub mod mcp;
+pub mod money;
 pub mod net;
 pub mod rows;
 pub mod runtime;
@@ -52,6 +53,7 @@ pub mod secrets;
 pub mod terminal;
 pub mod text;
 pub mod tool_manifest;
+pub mod week;
 pub mod workspace;
 
 use std::future::Future;

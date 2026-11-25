@@ -10,13 +10,21 @@
 //! the journal holds it (also on resume): a clean producer's output is a
 //! trusted input labelled `step:<key>@<attempt>`, a tainted one's is fenced
 //! `UntrustedData` with the same label and taints the step.
+//!
+//! Story 3.7 (AD-9): the spike prices its calls with am-domain's one money
+//! function. Each call is reserved from its request's counted prompt tokens
+//! ([`crate::count`]) and `max_output_tokens` at the workflow's price and
+//! rate; the writer computes the amounts and settles the usage at the
+//! reserved terms. The spike has no clock or company: its week is the UTC
+//! week of the system time, and it names no team.
 
 use std::path::Path;
 use std::sync::Arc;
 
+use am_domain::money::{CallPrice, Rate};
 use am_domain::{
     Actor, ChatRequest, EventSink, Instruction, LlmProvider, Message, Part, Role, StopReason,
-    StreamEvent, Usage,
+    StreamEvent,
 };
 use am_store::{
     AttemptWrites, CallPurpose, Reader, StepInput, StepRow, StoreError, WriteCommand, Writer,
@@ -26,29 +34,16 @@ use tokio_util::sync::CancellationToken;
 
 use crate::TokenSignal;
 
-/// Prices in micro-USD per million tokens, with the rate-snapshot id (AD-9).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Price {
-    pub input_micro_per_mtok: i64,
-    pub output_micro_per_mtok: i64,
-    pub snapshot: String,
-}
-
-impl Price {
-    pub fn cost(&self, input_tokens: u64, output_tokens: u64) -> i64 {
-        (input_tokens as i64 * self.input_micro_per_mtok
-            + output_tokens as i64 * self.output_micro_per_mtok)
-            / 1_000_000
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct LinearWorkflow {
     pub workflow: String,
     pub steps: Vec<String>,
     pub model: String,
     pub max_output_tokens: u32,
-    pub price: Price,
+    /// The model's price terms (story 3.7).
+    pub price: CallPrice,
+    /// The company currency's rate, with the rate-snapshot id (AD-9).
+    pub rate: Rate,
     /// The system part of every step's request. The caller builds it:
     /// am-engine authors no `Instruction` (AD-10, story 3.5).
     pub system: Instruction,
@@ -176,22 +171,6 @@ pub async fn drive_run(
         }
         let call_seq = step_calls.iter().map(|c| c.call_seq).max().unwrap_or(0) + 1;
         let prompt = (wf.step_prompt)(&step.step_key, &wf.workflow);
-        let est_input = (prompt.text().len() as u64 / 4).max(1);
-        let reserved = wf.price.cost(est_input, wf.max_output_tokens as u64);
-        let call_id = new_id();
-        writer.exec(
-            system("engine"),
-            WriteCommand::ReserveCall {
-                step_run_id: step.id.clone(),
-                call_id: call_id.clone(),
-                call_seq,
-                reserved_micro_usd: reserved,
-                rate_snapshot: wf.price.snapshot.clone(),
-                taint,
-                purpose: CallPurpose::Turn,
-                prompt: Vec::new(),
-            },
-        )?;
         let mut parts = vec![Part::Instruction(prompt)];
         parts.extend(trusted);
         parts.extend(fenced);
@@ -205,6 +184,29 @@ pub async fn drive_run(
             tools: vec![],
             max_output_tokens: wf.max_output_tokens,
         };
+        let call_id = new_id();
+        let week = am_domain::week::budget_week(
+            jiff::Timestamp::now(),
+            &jiff::tz::TimeZone::UTC,
+            jiff::civil::Weekday::Monday,
+        );
+        writer.exec(
+            system("engine"),
+            WriteCommand::ReserveCall {
+                step_run_id: step.id.clone(),
+                call_id: call_id.clone(),
+                call_seq,
+                price: wf.price.clone(),
+                rate: wf.rate.clone(),
+                counted_input_tokens: crate::count::prompt_tokens(&request),
+                max_output_tokens: wf.max_output_tokens,
+                week: week.key(),
+                team: String::new(),
+                taint,
+                purpose: CallPurpose::Turn,
+                prompt: Vec::new(),
+            },
+        )?;
         let outcome = provider
             .stream(
                 request,
@@ -214,16 +216,12 @@ pub async fn drive_run(
             .await;
         match outcome {
             Ok(out) => {
-                let cost = out
-                    .usage
-                    .map(|u: Usage| wf.price.cost(u.input_tokens, u.output_tokens));
                 if out.stop == StopReason::Cancelled {
                     writer.exec(
                         system("engine"),
                         WriteCommand::SettleAndFinishStep {
                             call_id,
                             usage: out.usage,
-                            cost_micro_usd: cost,
                             step_run_id: step.id.clone(),
                             status: "cancelled".into(),
                             output: None,
@@ -245,7 +243,6 @@ pub async fn drive_run(
                     WriteCommand::SettleAndFinishStep {
                         call_id,
                         usage: out.usage,
-                        cost_micro_usd: cost,
                         step_run_id: step.id.clone(),
                         status: "succeeded".into(),
                         output: Some(out.text),
@@ -264,7 +261,6 @@ pub async fn drive_run(
                     WriteCommand::SettleAndFinishStep {
                         call_id,
                         usage: None,
-                        cost_micro_usd: None,
                         step_run_id: step.id.clone(),
                         status: "failed".into(),
                         output: Some(e.to_string()),

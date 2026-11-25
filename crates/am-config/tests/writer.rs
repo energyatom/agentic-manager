@@ -85,10 +85,14 @@ fn values(s: &ConfigSnapshot) -> String {
     for src in sources.values_mut() {
         src.text.clear();
     }
+    // Story 3.7: the price file's sha256 is a hash of its bytes, which a
+    // canonical emit changes by design; the values it loads are compared.
+    let mut prices = s.prices().clone();
+    prices.sha256 = None;
     format!(
         "{:?}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}",
         s.company(),
-        s.prices(),
+        prices,
         s.capabilities(),
         s.tools(),
         s.seats(),

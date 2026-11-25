@@ -1,0 +1,11 @@
+schema_version: 2
+name: Pair
+team: core
+description: A step on a cloud model, then a step on a model on this Mac.
+steps:
+  - id: draft
+    seat: writer
+    instruction: Draft one short line.
+  - id: check
+    seat: checker
+    instruction: Check the line in one word.

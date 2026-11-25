@@ -10,10 +10,12 @@
 //! ToolGate slice adds [`row_writer`], the row-writer port over the store,
 //! which only ToolGate calls (AD-21). Story 22 adds `row_inputs`, the
 //! crate's own read site of a row's content: the rows a step reads at its
-//! start, as fenced untrusted data (AD-10, AD-43).
+//! start, as fenced untrusted data (AD-10, AD-43). Story 7 adds [`count`],
+//! the prompt-token count a call's reservation is priced from (AD-9).
 #![forbid(unsafe_code)]
 
 pub mod cancel;
+pub mod count;
 pub mod gate;
 pub mod journal;
 mod parts;

@@ -181,10 +181,43 @@ struct StreamState {
     tool_calls: Vec<ToolCall>,
     /// (block index, id, name, json so far)
     open_tool: Option<(u64, String, String, String)>,
-    usage: Option<Usage>,
-    /// True once `message_delta` reported the final output tokens.
-    final_usage: bool,
+    /// The input count, from `message_start` (or `message_delta`).
+    input_tokens: Option<u64>,
+    /// The final output count, from `message_delta`.
+    output_tokens: Option<u64>,
+    /// Story 3.7, M1: a usage count was given but is not a non-negative
+    /// integer, so no usage is reported.
+    bad_usage: bool,
     stop: Option<StopReason>,
+}
+
+impl StreamState {
+    /// The call's usage (story 3.7, M1; AD-9): only when the input count
+    /// and the final output count are both valid; otherwise none, so the
+    /// call settles at its reservation, never at a made-up 0.
+    fn usage(&self) -> Option<Usage> {
+        match (self.bad_usage, self.input_tokens, self.output_tokens) {
+            (false, Some(input_tokens), Some(output_tokens)) => Some(Usage {
+                input_tokens,
+                output_tokens,
+            }),
+            _ => None,
+        }
+    }
+}
+
+/// The count `key` of the usage object `u`: `None` when absent or null; a
+/// value that is not a non-negative integer also gives `None` and marks
+/// the usage bad.
+fn count(u: &Value, key: &str, bad: &mut bool) -> Option<u64> {
+    match u.get(key) {
+        None | Some(Value::Null) => None,
+        Some(v) => {
+            let n = v.as_u64();
+            *bad |= n.is_none();
+            n
+        }
+    }
 }
 
 fn on_event(
@@ -203,12 +236,16 @@ fn on_event(
     match kind.as_str() {
         "message_start" => {
             let u = &v["message"]["usage"];
-            let usage = Usage {
-                input_tokens: u["input_tokens"].as_u64().unwrap_or(0),
-                output_tokens: u["output_tokens"].as_u64().unwrap_or(0),
-            };
-            st.usage = Some(usage);
-            sink.on_event(StreamEvent::Usage(usage));
+            st.input_tokens = count(u, "input_tokens", &mut st.bad_usage);
+            // The output count here is provisional; the final one comes
+            // in `message_delta`.
+            let provisional = count(u, "output_tokens", &mut st.bad_usage);
+            if let (Some(input_tokens), Some(output_tokens)) = (st.input_tokens, provisional) {
+                sink.on_event(StreamEvent::Usage(Usage {
+                    input_tokens,
+                    output_tokens,
+                }));
+            }
         }
         "content_block_start" => {
             let block = &v["content_block"];
@@ -266,15 +303,15 @@ fn on_event(
             }
         }
         "message_delta" => {
-            if let Some(out) = v["usage"]["output_tokens"].as_u64() {
-                let mut u = st.usage.unwrap_or_default();
-                u.output_tokens = out;
-                if let Some(inp) = v["usage"]["input_tokens"].as_u64() {
-                    u.input_tokens = inp;
-                }
-                st.usage = Some(u);
-                st.final_usage = true;
-                sink.on_event(StreamEvent::Usage(u));
+            let u = &v["usage"];
+            if let Some(input) = count(u, "input_tokens", &mut st.bad_usage) {
+                st.input_tokens = Some(input);
+            }
+            if let Some(output) = count(u, "output_tokens", &mut st.bad_usage) {
+                st.output_tokens = Some(output);
+            }
+            if let Some(usage) = st.usage() {
+                sink.on_event(StreamEvent::Usage(usage));
             }
             if let Some(reason) = v["delta"]["stop_reason"].as_str() {
                 st.stop = Some(match reason {
@@ -386,10 +423,11 @@ impl LlmProvider for AnthropicProvider {
             } else {
                 StopReason::ToolUse
             });
+            let usage = st.usage();
             Ok(ChatOutcome {
                 text: st.text,
                 tool_calls: st.tool_calls,
-                usage: st.usage,
+                usage,
                 stop,
             })
         })
@@ -400,10 +438,11 @@ impl LlmProvider for AnthropicProvider {
 /// missing, so the call settles at its reservation (AD-9, AD-20); the partial
 /// usage still reached the sink.
 fn cancelled_outcome(st: StreamState) -> ChatOutcome {
+    let usage = st.usage();
     ChatOutcome {
         text: st.text,
         tool_calls: st.tool_calls,
-        usage: if st.final_usage { st.usage } else { None },
+        usage,
         stop: StopReason::Cancelled,
     }
 }

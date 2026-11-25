@@ -103,6 +103,8 @@ fn step(
         table: None,
         document: None,
         row_inputs: vec![],
+        // Story 3.7: a model on this Mac (Conventions, Money: 0).
+        price: Some(am_domain::money::CallPrice::local()),
     }
 }
 
@@ -113,6 +115,13 @@ fn plan(steps: Vec<StepPlan>) -> RunPlan {
         steps,
         clock: am_testkit::FakeClock::at("2026-11-24T10:00:00Z"),
         row_tool: None,
+        // Story 3.7: a company in EUR with no price file (the snapshot
+        // `none`); every step here is on this Mac, so its calls cost 0.
+        money: am_engine::run::RunMoney {
+            rate: am_domain::money::Rate::none("EUR"),
+            timezone: jiff::tz::TimeZone::UTC,
+            week_start: jiff::civil::Weekday::Monday,
+        },
     }
 }
 
@@ -769,7 +778,6 @@ impl LlmProvider for SettlesItsOwnCall {
                 WriteCommand::SettleCall {
                     call_id: open.id,
                     usage: None,
-                    cost_micro_usd: None,
                 },
             )
             .unwrap();

@@ -329,7 +329,8 @@ fn read_plan(model: Arc<FakeLlm>, row: &str, clock: Arc<Racing>) -> am_engine::r
 /// again and starts once more, and succeeds: one attempt, started once,
 /// whose one `row` edge, one fenced part and the one request its model
 /// gets all name the row's current after-image (version 2), and nothing
-/// names version 1. The clock was read twice (two tries).
+/// names version 1. The clock was read twice at the start (two tries),
+/// then once by the one call's reservation (story 3.7: its budget week).
 #[tokio::test]
 async fn a_row_that_moves_before_the_start_is_read_again_once() {
     let p = project();
@@ -341,7 +342,11 @@ async fn a_row_that_moves_before_the_start_is_read_again_once() {
     let outcome = run(&p, &read_plan(model.clone(), &row.row_id, clock.clone())).await;
 
     assert_eq!(outcome.status, "succeeded", "{outcome:?}");
-    assert_eq!(clock.readings.load(Ordering::SeqCst), 2, "two tries");
+    assert_eq!(
+        clock.readings.load(Ordering::SeqCst),
+        3,
+        "two tries, then the call's reservation (story 3.7)"
+    );
     let now = only_row(&p.db, TABLE);
     assert_eq!(now.version, 2, "{now:?}");
     let image = history_of(&p.db, TABLE, &row.row_id)

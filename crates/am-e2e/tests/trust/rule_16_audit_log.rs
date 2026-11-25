@@ -85,8 +85,23 @@ fn populated(root: &Path) -> Store {
             step_run_id: a.clone(),
             call_id: "call-1".into(),
             call_seq: 1,
-            reserved_micro_usd: 5000,
-            rate_snapshot: "rates-1".into(),
+            // Story 3.7: the writer prices the call from its terms (fake:
+            // 3.00 and 15.00 USD per million tokens, 0.92 EUR per USD).
+            price: am_domain::money::CallPrice {
+                input_micro_usd_per_mtok: 3_000_000,
+                output_micro_usd_per_mtok: 15_000_000,
+                local: false,
+            },
+            rate: am_domain::money::Rate {
+                currency: "EUR".into(),
+                company_micro_per_usd: Some(920_000),
+                snapshot: "rates-1".into(),
+                prices_updated: Some("2026-11-01".into()),
+            },
+            counted_input_tokens: 1_000,
+            max_output_tokens: 4_096,
+            week: "2026-11-23".into(),
+            team: "core".into(),
             // Story 3.3: the attempt's taint, raised (never lowered) with
             // the reservation (AD-10).
             taint: Taint::Clean,
@@ -103,7 +118,6 @@ fn populated(root: &Path) -> Store {
                 input_tokens: 11,
                 output_tokens: 7,
             }),
-            cost_micro_usd: Some(420),
             step_run_id: a,
             status: "succeeded".into(),
             output: Some(CONTENT_CANARY.into()),
@@ -371,8 +385,12 @@ fn a_resolution_is_audited_as_you_reviewer_without_the_note() {
             step_run_id: draft.clone(),
             call_id: "call-g".into(),
             call_seq: 1,
-            reserved_micro_usd: 0,
-            rate_snapshot: "none".into(),
+            price: am_domain::money::CallPrice::local(),
+            rate: am_domain::money::Rate::none("EUR"),
+            counted_input_tokens: 0,
+            max_output_tokens: 0,
+            week: "2026-11-23".into(),
+            team: "core".into(),
             taint: Taint::Clean,
             purpose: am_store::CallPurpose::Turn,
             prompt: vec![],
@@ -384,7 +402,6 @@ fn a_resolution_is_audited_as_you_reviewer_without_the_note() {
         WriteCommand::SettleAndFinishStep {
             call_id: "call-g".into(),
             usage: None,
-            cost_micro_usd: None,
             step_run_id: draft.clone(),
             status: "succeeded".into(),
             output: Some("the version".into()),

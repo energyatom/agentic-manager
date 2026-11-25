@@ -7,13 +7,14 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use am_domain::money::{CallPrice, Rate};
 use am_domain::{
     Access, Actor, AuditSink, BoxFuture, CancelSignal, ChatOutcome, ChatRequest, EventSink,
     FileKind, Instruction, LlmProvider, Message, ModelCapabilities, Part, ProviderError, Role,
     StopReason, StreamEvent, ToolCall, ToolSpec, Usage,
 };
 use am_engine::TokenSignal;
-use am_engine::journal::{LinearWorkflow, Price, create_run, drive_run};
+use am_engine::journal::{LinearWorkflow, create_run, drive_run};
 use am_store::Store;
 use tokio_util::sync::CancellationToken;
 
@@ -71,11 +72,12 @@ pub fn spike_workflow(steps: usize) -> LinearWorkflow {
         steps: (1..=steps).map(|i| format!("step-{i}")).collect(),
         model: "spike-delay".into(),
         max_output_tokens: 200,
-        price: Price {
-            input_micro_per_mtok: 3_000_000,
-            output_micro_per_mtok: 15_000_000,
-            snapshot: "spike-2026-11-19".into(),
+        price: CallPrice {
+            input_micro_usd_per_mtok: 3_000_000,
+            output_micro_usd_per_mtok: 15_000_000,
+            local: false,
         },
+        rate: usd_rate("spike-2026-11-19"),
         system: Instruction::authored("You are a step in a test workflow."),
         step_prompt: spike_step_prompt,
     }
@@ -297,7 +299,7 @@ pub struct ModelUnderTest {
     pub provider: Arc<dyn LlmProvider>,
     pub model: String,
     /// `None` for local models (cost 0, AD-9 conventions).
-    pub price: Option<Price>,
+    pub price: Option<CallPrice>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -461,7 +463,16 @@ pub async fn files_to_models(
                 }
             };
             let cost = match (&m.price, usage) {
-                (Some(p), Some(u)) => p.cost(u.input_tokens, u.output_tokens),
+                (Some(p), Some(u)) => {
+                    am_domain::money::cost(
+                        p,
+                        &usd_rate(SPIKE_PRICES),
+                        u.input_tokens,
+                        u.output_tokens,
+                    )
+                    .map_err(|e| e.to_string())?
+                    .usd_micro
+                }
                 _ => 0,
             };
             rows.push(C4Row {
@@ -592,18 +603,32 @@ pub fn c4_verdict(rows: &[C4Row]) -> Result<(), String> {
     }
 }
 
+/// The spike's own price list (story 3.7: its snapshot label).
+const SPIKE_PRICES: &str = "anthropic-list-2026-11-19";
+
+/// The spike's company is in USD: its company amounts are its USD amounts
+/// (rate 1), priced by am-domain's one money function (story 3.7).
+fn usd_rate(snapshot: &str) -> Rate {
+    Rate {
+        currency: "USD".into(),
+        company_micro_per_usd: Some(1_000_000),
+        snapshot: snapshot.into(),
+        prices_updated: None,
+    }
+}
+
 /// Anthropic list prices for the spike's frontier model (USD per MTok, from
-/// the provider's price list on 2026-11-19); the price file lands in epic 2.
-pub fn anthropic_price(model: &str) -> Price {
+/// the provider's price list on 2026-11-19); the spike reads no price file.
+pub fn anthropic_price(model: &str) -> CallPrice {
     let (i, o) = match model {
         "claude-opus-5-5" => (4_000_000, 20_000_000),
         "claude-sonnet-5-5" => (2_000_000, 10_000_000),
         "claude-haiku-5-5" => (100_000, 500_000),
         _ => (4_000_000, 20_000_000),
     };
-    Price {
-        input_micro_per_mtok: i,
-        output_micro_per_mtok: o,
-        snapshot: "anthropic-list-2026-11-19".into(),
+    CallPrice {
+        input_micro_usd_per_mtok: i,
+        output_micro_usd_per_mtok: o,
+        local: false,
     }
 }
