@@ -1,0 +1,25 @@
+# Planted epic 3, listed second in build order; entry 2 is the planted gate.
+
+[[entry]]
+id = 1
+type = "story"
+title = "Story three-one"
+after = ["1.4"]
+hitl = false
+risk = "low"
+
+[[entry]]
+id = 2
+type = "story"
+title = "Story three-two, the planted gate"
+after = [1]
+hitl = false
+risk = "low"
+
+[[entry]]
+id = 3
+type = "story"
+title = "Story three-three"
+after = [2]
+hitl = false
+risk = "low"

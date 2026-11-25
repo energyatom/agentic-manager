@@ -1,0 +1,47 @@
+# Planted epic 1. Table order is build order: entries 1, 2, 5, 3, 4.
+# Entry 4 holds a comment that names an id; it is not an entry, so there is no 1.9.
+
+[[entry]]
+id = 1
+type = "spike"
+title = "Spike one"
+after = []
+hitl = false
+risk = "low"
+
+[[entry]]
+id = 2
+type = "story"
+title = "Story two"
+after = [1]
+hitl = false
+risk = "low"
+
+[[entry]]
+id = 5
+type = "story"
+title = "Story five, built before three"
+verify = "a value whose text holds id = 7 is still not an id"
+after = [2, "1.1"]
+hitl = false
+risk = "low"
+
+[[entry]]
+id = 3
+type = "story"
+title = "Story three"
+after = [5]
+hitl = false
+risk = "low"
+
+[[entry]]
+# id = 9 is not an entry
+id = 4
+type = "story"
+title = "Story four"
+after = [
+  3,
+  "1.1",
+]
+hitl = false
+risk = "low"

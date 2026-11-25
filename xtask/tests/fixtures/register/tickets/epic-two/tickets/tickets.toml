@@ -1,0 +1,17 @@
+# Planted epic 2, listed last in build order although its id is lower than epic 3's.
+
+[[entry]]
+id = 1
+type = "story"
+title = "Story two-one"
+after = ["3.3"]
+hitl = false
+risk = "low"
+
+[[entry]]
+id = 2
+type = "story"
+title = "Story two-two"
+after = [1]
+hitl = false
+risk = "low"

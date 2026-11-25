@@ -5,6 +5,7 @@
 # (the `compile_fail` proof that a write needs an Actor, story 1.6) and `agentic validate`
 # over the valid fixture projects (story 1.4; story 3.3 adds hand-offs/) and
 # templates/ (story 1.5). Story 3.24: `test` runs am-e2e's `golden_so_far`.
+# Story 3.25: `register` checks docs/deferred-register.md (normal mode).
 # `just supply-chain` runs the licence, bans and sources policy (cargo-deny)
 # and cargo-audit.
 
@@ -14,7 +15,7 @@ export CARGO_TARGET_DIR := env_var_or_default("CARGO_TARGET_DIR", env_var("HOME"
 default: check
 
 # The story gate: format, lints, every offline test and the repo checks.
-check: fmt-check clippy test doctest check-deps check-forbid denylist runtime-paths fixed-hosts seam-guard validate
+check: fmt-check clippy test doctest check-deps check-forbid denylist runtime-paths fixed-hosts seam-guard register validate
 
 fmt-check:
     cargo fmt --all -- --check
@@ -68,6 +69,12 @@ fixed-hosts:
 # am-engine's tool seam (run_plan_with_tools).
 seam-guard:
     cargo xtask seam-guard
+
+# Story 3.25: docs/deferred-register.md against the ticket tree; every entry
+# still marked (assumed) is a warning by id. The release mode (`--release
+# --gate <epic>.<id>`) is run by the release gates, stories 4.13 and 11.8.
+register:
+    cargo xtask register
 
 # AD-16, AD-33: `agentic validate --template` on every valid fixture project
 # and every shipped template (the Blank department, the role templates and

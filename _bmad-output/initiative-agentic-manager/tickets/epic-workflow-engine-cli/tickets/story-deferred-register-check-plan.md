@@ -3,7 +3,7 @@ title: 'Deferred register check'
 type: feature
 ticket: 25
 created: '2026-11-25'
-status: approved
+status: built
 baseline_revision: 'e0a2115bd3babcdc05a5170b579a0d6e810174c8'
 after: [24]
 route: full
@@ -11,8 +11,8 @@ route_source: pinned
 risk: low
 review: quick
 review_source: pinned
-lenses_ran: []
-review_loop_iteration: 0
+lenses_ran: [correctness]
+review_loop_iteration: 1
 followup_review_recommended: false
 context:
   - '{project-root}/docs/owner-standing-rules.md'
@@ -468,3 +468,198 @@ Every test asserts words, not only an exit code. So tests that expect exit 2 are
 - **Merge** only with both CI jobs green after review triage.
 
 ## Implementation Notes
+
+### API the tests fix
+
+Written by the tester from the matrix, 2026-11-25. Tests: `xtask/tests/register.rs` (20 tests, about 950 lines after `cargo fmt`). Fixtures: `xtask/tests/fixtures/register/` (13 register files, 201 lines; the planted tree, 4 files, 116 lines).
+
+- **Task and options:** `cargo xtask register [--root <dir>] [--register <file>] [--tickets <dir>] [--release --gate <epic>.<id>]`. The usage holds `--release --gate <epic>.<id>`.
+- **Exit codes:** 0 pass; 1 findings, with main's existing `register: FAILED with <n> finding(s)` counting one line per finding; 2 setup.
+- **Finding lines (stderr):** `<register path>:<line>: DR-NNN…`. The tests match the tail `/<file>:<line>: DR-NNN`, so the path may be shown relative to the root or in full. Pinned words:
+  - `Target names 1.9, which is not an entry of epic 1's tickets.toml`; `Target names 4.1: there is no epic 4 in tickets.toml`; one finding per entry (`3.1, 2.7` gives one, naming 2.7).
+  - `has 7 cells; the header defines 8 (Id, Kind, Source, Item, Decision, Target, Must close, Status)`, and the same with 9; nothing else on that row.
+  - `duplicate id, first at line <n>`, on the later copy's line.
+  - `unknown Status `done`; allowed: open, accepted, closed`.
+  - Kind and Must close: the column name, the value in backticks, and the allowed list `deferred, accepted risk, residual, owner question` or `yes, no, yes (assumed), no (assumed)`; `yes(assumed)` and `assumed` are no warning.
+  - Malformed cells: one finding per row, naming the column (`Target`, `Item`, `Decision`, `Source`) and the cell's text. A malformed id: every finding on that line holds `DR-7`, and its Status `done` is still reported (two findings).
+  - `no-table.md: no "## Register" table`; `<file>:<line>: …the register table's header is not…` on the header's line; `<file>:<line>: …a table row after the register table ended at line…` on the stray row's line.
+  - Release: `still marked (assumed)` with the Target and `gate <g>`; `due by gate <g>` with the Target and one reason: `a decision is pending` (owner), `no story is named yet` (unassigned), `names no story` (none), `every story it names builds by the gate`. An assumed and due entry has exactly two findings.
+- **Warnings (normal mode only):** `warning: DR-NNN…`, one per assumed entry in register order, holding the whole Must close cell (`yes (assumed)`) and the Target cell. A passing run has nothing else on stderr; release mode prints no `warning:` line.
+- **stdout, normal:** `register: <n> entries checked against <m> stories in <k> epics; <a> still marked (assumed), listed as warnings` (planted: 7 entries, 10 stories, 3 epics; row 1 computes the numbers from the files).
+- **stdout, release:** `carried forward past gate <g>: DR-NNN (Target <cell>; after the gate: <stories>)`, one line each in register order, on a failing run too; a failing run prints nothing else on stdout. A passing run ends with `register: release gate 3.2: 16 entries; 0 still marked (assumed); 0 due; 3 carried forward`, and stderr is empty.
+- **Ticket tree refusals:** exit 2; the first stderr line starts `register: <path>:<line>: `, where `<path>` is the `--tickets` directory as given joined with the file (the tests pass a canonical temporary path); no `FAILED` and no `DR-` anywhere. Lines:
+  - epic folder missing: the top-level file at that epic's `[[epic]]` or `slug` line, and the words name the folder (`epic-two`);
+  - an `[[entry]]` with no id: its `[[entry]]` line; with two: its `[[entry]]` line or the second `id` line;
+  - an entry id twice in one epic, an epic id twice: the later table's header line or its `id` line;
+  - `"""`: the line that opens it;
+  - an `[[epic]]` with no slug: its `[[epic]]` line;
+  - the top-level `tickets.toml` missing: its path, no line.
+  
+  An unchanged copy of the planted tree passes with `clean.md`.
+- **Option errors:** `--release` alone, `--gate 3.2` alone, `--gate 3`, `--gate x.y`, and `--gate 3.9` (not in the book) each exit 2; the first stderr line names the problem (`--gate`, `--release`, `gate` and the value, or `3.9`) and is not `unknown option`; the usage follows; stdout is empty.
+- **`just check` (row 20):** `check:` lists `register`; the recipe's body is exactly `cargo xtask register`; `xtask/Cargo.toml` has no `[features]`; the `.cargo/config.toml` alias is unchanged; xtask is a default member; no nextest default filter; `register.rs` holds no `#[ignore`, `#![cfg` or `#[cfg_attr`; CI runs `just check` and `cargo nextest run --workspace --exclude am-desktop`.
+- **Real gates (row 21):** `--release --gate 4.13` and `--gate 11.8` on the repository exit 0 or 1, and stdout or stderr holds `gate <g>`.
+
+### Red run (2026-11-25)
+
+`cargo nextest run -p xtask --test register --no-fail-fast` on HEAD 7713c28 with only the tests and fixtures added (no `xtask/src` change): **20 tests run, 0 passed, 20 failed**. `cargo clippy -p xtask --all-targets -- -D warnings` and `cargo fmt --all -- --check` are clean.
+
+| Test | Failing words |
+|---|---|
+| `the_repository_register_passes_and_warns_each_assumed_entry` | exit 2, not 0: `xtask: unknown task `register`` |
+| `a_register_with_every_value_confirmed_passes_with_no_warning` | exit 2, not 0: `xtask register: unknown option `--register`` |
+| `an_assumed_entry_is_a_warning_by_id_and_still_passes` | exit 2, not 0: same unknown option |
+| `a_target_naming_no_story_fails_with_the_entry_id` | exit 2, not 1: same |
+| `a_row_missing_or_adding_a_column_fails_with_the_entry_id` | exit 2, not 1: same |
+| `a_duplicate_id_fails_naming_it_and_the_first_line` | exit 2, not 1: same |
+| `an_unknown_status_fails_with_the_entry_id` | exit 2, not 1: same |
+| `an_unknown_kind_or_must_close_fails_with_the_entry_id` | exit 2, not 1: same |
+| `malformed_cells_fail_with_the_entry_id_or_line` | exit 2, not 1: same |
+| `the_table_must_be_the_one_the_header_defines` | exit 2, not 1: same (`no-table.md`) |
+| `build_order_is_table_order_never_id_order` | no `carried forward past gate 3.2: DR-011 …` line on stdout (empty) |
+| `an_unreadable_ticket_tree_stops_with_file_and_line` | the unchanged copy exits 2, not 0: same unknown option |
+| `release_mode_needs_a_known_gate` | `["--release"]`: the first line is `unknown option `--register`` |
+| `release_mode_fails_on_each_assumed_entry` | exit 2, not 1: same unknown option |
+| `release_mode_fails_on_each_open_must_close_entry_due_by_the_gate` | exit 2, not 1: same |
+| `release_mode_lists_entries_carried_forward_without_failing` | exit 2, not 1: same |
+| `release_mode_passes_once_each_entry_is_settled` | exit 2, not 0: same |
+| `release_mode_keeps_the_normal_findings` | exit 2, not 1: same |
+| `just_check_runs_the_register_check_in_normal_mode` | `check:` does not list `register` |
+| `the_real_release_gates_resolve` | gate 4.13 exits 2: `xtask register: unknown option `--release`` |
+
+A Python dry run of the plan's rules over the planted files agrees with the pinned numbers: at gate 3.2, 11 findings (3 assumed, 8 due, DR-009 twice) and DR-011, 012, 013 carried; at gate 1.3, DR-010 due and DR-006 carried; `release-confirmed.md` at 3.2, no finding and the same three carried; today's register, 176 rows and 76 assumed.
+
+**Not covered by a test:** row 22 (offline, read-only, no new crate) stays a review check; `--root` has no test of its own (row 1 uses the default root); the refusals outside the matrix (a second `## Register`, a missing separator, `'''`, a non-positive or quoted id) are in Design Notes only.
+
+### Implementation (2026-11-25)
+
+Built on `story/3-25` from HEAD 7713c28 with the tester's tests and fixtures in place. Nothing committed yet.
+
+- **What was built:**
+  - `xtask/src/stories.rs` (new): the story book, the strict line scan and every tree refusal in Design Notes; `parse_story` is shared with the gate option.
+  - `xtask/src/register.rs` (new): the table parse, the row checks, the warnings, the release mode and its carried-forward lines.
+  - `xtask/src/main.rs`: `mod register; mod stories;`, the module docs, the usage line, the dispatch, and the options `--register`, `--tickets`, `--release`, `--gate`.
+  - `justfile`: the header line, `register` in `check:` after `seam-guard` and before `validate`, and the `register` recipe (body `cargo xtask register`) with its comment naming 4.13 and 11.8.
+  - `xtask/Cargo.toml`: the description names `register`. `[dependencies]` stay `serde_json` only.
+- **Tests:** the 20 pinned tests passed on the first green run, with no change to them or to the fixtures. `cargo nextest run -p xtask`: 150 run, 150 passed, 2 skipped (ignored cargo-deny tests).
+- **Implementer-added tests** (appended to `xtask/tests/register.rs` under "implementer-added refusals", for the Design Notes refusals the matrix does not cover; additions only):
+  - `a_second_register_heading_fails_naming_its_line`;
+  - `a_missing_separator_fails_naming_the_header_line` (no separator, and a 7-cell separator);
+  - `a_literal_multi_line_string_or_a_quoted_or_non_positive_id_stops_the_tree_scan` (`'''`; the quoted key `"id" = 3`, which is not read, so its table has no id; the quoted value `id = "3"`; `id = 0`; an epic `id = -3`).
+  
+  They build their inputs in a tempdir from `clean.md` and the planted tree, so no fixture file was added.
+- **On the repository:**
+  - `cargo xtask register`: exit 0, `register: 176 entries checked against 194 stories in 12 epics; 76 still marked (assumed), listed as warnings`, and 76 warning lines (52 `yes (assumed)`, 24 `no (assumed)`), as the dry run said.
+  - `--release --gate 4.13`: exit 1, 127 findings: 76 assumed and 51 due (3 `owner`: DR-017, 075, 135; 10 `unassigned`: DR-039, 052, 058, 076, 081, 091, 109, 146, 151, 168), and 13 carried forward: DR-005, 010, 022, 036, 057, 121, 138, 144, 149, 156, 157, 158, 173. This matches Intent's dry run.
+  - `--release --gate 11.8`: exit 1, 140 findings: 76 assumed, 64 due, 0 carried forward. This matches too.
+  - By hand, on temporary copies passed with `--register`: Status `done` on DR-004 fails naming DR-004; Target `3.99` on DR-001 fails with `Target names 3.99, which is not an entry of epic 3's tickets.toml`; DR-004 without its last cell fails with `has 7 cells`. Each exits 1 with one finding.
+- **Choices inside the plan (coder's call, "error and fix wording"):**
+  - The ticket-tree refusal words show each path relative to the root when it lies under it, as the register path is shown. A path outside the root, as in the tests, is shown as given.
+  - `--release` without `--gate`, `--gate` without `--release`, and a gate that is not `<epic>.<id>` are refused in `main` before any file is read, in the same form as the other option errors (`xtask register: …`, then the usage). A well-formed gate that is not in the book is refused after the tree loads, as a setup failure (exit 2) with the usage appended.
+  - Normal findings are listed in line order, then release findings in register order. In a failing normal run the warnings are still printed, before the findings.
+  - When the separator is missing, the line after the header is read as the first row, so it is still checked. When the first non-blank line after `## Register` is not a table line, that line gets the header finding, and any later `|` line is a stray row.
+  - A duplicate id is checked on every row whose first cell is an id, including rows with the wrong cell count.
+  - A `slug` must be a plain, non-empty `"…"` string with no escape; anything else exits 2.
+- **Mechanical edits:** `cargo fmt` over the new files and the appended tests. One clippy fix (`needless_late_init`): the table's end is now a `let end = if …` expression.
+- **Size:**
+  - Code: 925 lines added, 8 removed. `register.rs` 612, `stories.rs` 261, `main.rs` +43/−6, `justfile` +8/−1, `xtask/Cargo.toml` 1 line changed. That is above the plan's estimate of 520-650, mostly doc comments and `cargo fmt` line breaks. It is far below the stop at about 4,000.
+  - Tests: `xtask/tests/register.rs` is 1,100 lines (the tester's 950, plus 150 implementer-added).
+  - Fixtures are unchanged: 13 register files (201 lines) and the planted tree (116 lines).
+- **Unchanged:** `git diff --stat docs/ _bmad-output/ crates/ .github/` shows only this plan. No new dependency, no `cargo clean`, and no workspace copy was built.
+- **`just check`:** exit 0. Every recipe passed: fmt-check, clippy, nextest (1,598 run, 1,598 passed, 8 skipped), doctest, check-deps, check-forbid, denylist, runtime-paths, fixed-hosts, seam-guard, `register` (the summary above, with its 76 warnings), and validate.
+
+### Review triage round 1 (manager, 2026-11-25)
+
+One Opus review ran. It confirms that build order across epics and the gate counts are exact (4.13: 76/51/13; 11.8: 76/64/0), that `just check` runs normal mode on every PR, and that a warning never fails it and an error never passes it. The fixes below are done tests first:
+
+| Id | From | Finding | Decision |
+|----|------|---------|----------|
+| R1 | F1 (medium) | GitHub renders a non-blank line straight after the table as another row, even without a leading `\|`. The check ends the table there, so a planted row with a bad target, must-close or status passes both modes. | Fix: a non-blank line directly after the last row is a finding naming its line. Test: a row without its leading `\|` fails. |
+| R2 | F2 | The TOML line scan skips a `[` line it does not recognise (`[["entry"]]`, `[entry . meta]`), which can drop an entry or take a subtable's `id`. The `"""`/`'''` refusal runs before comments are skipped, so a comment quoting `'''` would block every PR. | Fix: refuse any `[` line that is not a recognised header. Skip comments before the multi-line string check. Tests for both. |
+| R3 | F3 | A slug is not limited to one folder name (`/x`, `../..`), and duplicate slugs are not refused. Shared slugs give each epic the same entries, so a nonexistent target resolves. | Fix: a slug must be one plain folder name, and slugs must be unique. Tests. |
+| R4 | F4 | Every task shares one option parser, so unused flags are ignored with exit 0. | Fix: each task accepts only its own flags and refuses the rest with exit 2. Tests. |
+| R5 | F5 | Two weak assertions. The DR-008 target check `"3.2"` always passes, and the repository story count uses the scan's own rule. | Fix: assert `Target 3.2:`, and derive the count independently, for example with a plain count of `id =` lines inside `[[entry]]` tables computed differently. Pinning it is acceptable if a story is never added without a test update; prefer deriving. |
+
+### Red run round 1 (2026-11-25)
+
+The tester's tests for R1–R5 are written first, with no `xtask/src` change. The new tests sit at the end of `xtask/tests/register.rs`, and the new fixture is `xtask/tests/fixtures/register/row-without-pipe.md`. Command: `cargo nextest run -p xtask --test register --no-fail-fast`. Result: **28 run, 23 passed, 5 failed**. `cargo fmt --all -- --check` and `cargo clippy -p xtask --all-targets -- -D warnings` are clean.
+
+| Test | Review row | Red reason (today's build) |
+|---|---|---|
+| `a_line_straight_after_the_table_fails_naming_its_line` | R1 | `row-without-pipe.md` has a row with no leading `\|` straight after the table (Target `1.9`, Must close `maybe`, Status `done`). It exits 0 in normal mode and in release mode at gate 3.2; it must exit 1, naming that line. |
+| `an_unrecognised_table_header_stops_the_tree_scan` | R2 | With `[["entry"]]` in place of epic 1's first header, entry 1.1 is dropped silently: exit 1 with `Target names 1.1, which is not an entry…`, not exit 2 naming the header line. With `[entry . meta]` inserted after `id = 2`, the line is skipped and the run exits 0. |
+| `a_comment_quoting_a_multi_line_delimiter_is_still_a_comment` | R2 | A comment line quoting `'''` and `"""` exits 2: `tickets.toml:1: a multi-line string (""" or '''), which the line scan cannot read`. It must pass with clean.md's summary. |
+| `a_slug_must_be_one_plain_folder_name_used_once` | R3 | Each of these exits 0 when it must exit 2, naming the slug line of the top-level `tickets.toml`: slug `../..` (it resolves to a readable epic file two folders up); an absolute slug pointing at a readable folder; epic 3 sharing `epic-one` (12 stories counted, so 3.5 would resolve). |
+| `each_task_refuses_a_flag_it_does_not_take` | R4 | `register --list x` exits 0 with the warnings, and `seam-guard --release --gate 4.13` exits 0 with its summary. Each must exit 2, naming the flag, with nothing on stdout. |
+
+Each loop's later cases were also run by hand against today's binary: each exits 0, so each is red in its own right.
+
+**R5 (assertions strengthened; green on arrival, as expected):**
+- The due-check loop in `release_mode_fails_on_each_open_must_close_entry_due_by_the_gate` now asserts `Target <t>:`, which covers DR-008's `Target 3.2:`.
+- Row 1 counts the epics as the folders that hold `tickets/tickets.toml`, and the stories as those files' lines that are exactly `id = <digits>`. No slug and no table header is used. It also cross-checks the folder count against the top-level file's `id = ` lines.
+
+**Not covered:** a literal slug `/x` is not planted. It already exits 2 today (an unreadable folder), so it could not show red; the planted absolute slug points at a readable folder instead.
+
+### Implementation round 1 (2026-11-25)
+
+All five red tests from round 1 are green, and the tests were not changed. `cargo nextest run -p xtask`: 155 run, 155 passed, 2 skipped. R5 needed no code change.
+
+- **R1** (`register.rs`): a non-blank line straight after the table's last row is a finding on that line, because GitHub renders it as one more row. It applies in both modes. Its words say to start the line with `|` or put a blank line before it.
+- **R2** (`stories.rs`):
+  - Blank and comment lines are skipped before the `"""`/`'''` refusal.
+  - A line starting with `[` that is not a recognised header is refused at its line (exit 2).
+  - A header name must now be bare keys joined by dots, with no empty segment and no spaces around a dot.
+- **R3** (`stories.rs`):
+  - A slug must be one plain folder name: letters, digits, `-`, `_` and `.`, not starting with a dot. That rules out `.`, `..`, a path and an absolute slug.
+  - A slug used by an earlier epic is refused at the later slug line.
+  - Both refusals exit 2 and name the slug line.
+- **R4** (`main.rs`):
+  - A new `flags(task)` table lists each task's flags. A `--` flag that the task does not take is refused before anything runs: exit 2, with ``xtask <task>: `<flag>` is not an option of `<task>`; it takes: …`` and then the usage.
+  - An unknown task is now named before its options are read.
+- **Mechanical edits:** `cargo fmt`. Module docs in `register.rs` and `stories.rs` updated to list the new refusals.
+- **Code lines this round:** about 75 added and 4 removed. `main.rs` +28/−2, `register.rs` +11 net, `stories.rs` +32 net. Code in total is now about 1,000 lines, far below the stop at about 4,000. I wrote no test lines this round; the tester's round 1 added 205.
+- **Unchanged:** only this plan changes under `docs/`, `_bmad-output/`, `crates/` and `.github/`. There is no new dependency and no `cargo clean`.
+- **`just check`:** exit 0. nextest ran 1,603 tests: 1,603 passed and 8 skipped. Every repo check passed. `register` printed its summary, `176 entries checked against 194 stories in 12 epics; 76 still marked (assumed), listed as warnings`, with its 76 warnings.
+
+## Auto Run Result
+
+**Status:** built (2026-11-25). Planned, tested, built and reviewed on Opus.
+
+**Summary:** `cargo xtask register` checks `docs/deferred-register.md` on every PR through `just check`.
+
+Normal mode:
+- It fails on any of these, naming the entry id or the line:
+  - a malformed row, or a row written after the table without its leading `|`;
+  - a duplicate id;
+  - an unknown kind, must-close or status value;
+  - a target that names no story in any epic.
+- It lists every entry still marked `(assumed)` as a warning, by id, without failing.
+
+Release mode (`--release --gate <epic>.<id>`) is run by 4.13 and 11.8. It fails on:
+- any `(assumed)` entry;
+- any open must-close entry due by the gate:
+  - the target is `owner`, `unassigned`, `none` or the gate itself;
+  - or every story the target names builds before the gate.
+
+It lists the entries carried forward. Build order is table order across all epics' `tickets.toml`; epic 12 builds between 8 and 9.
+
+The ticket files are read by a strict line scan. Any `[` line it does not recognise is refused, and so are multi-line strings outside comments. Each slug is one plain folder name, used by one epic only. Each xtask task refuses flags it does not take.
+
+**Today:** normal mode passes, with 76 warnings. Release mode reports:
+
+| Gate | Assumed | Due | Carried forward |
+|------|---------|-----|-----------------|
+| 4.13 | 76 | 51 | 13 |
+| 11.8 | 76 | 64 | 0 |
+
+Both gates will hold until the owner confirms those entries.
+
+**Size (owner rule):** 987 lines of code (xtask) and 1,636 lines of tests and fixtures.
+
+**Tests:** written first, with red runs logged.
+
+**`just check`:** 1603 passed, 8 skipped.
+
+**Review:** one Opus review confirmed the build order and gate counts. Round 1 fixed R1–R5, including the medium gap: a row without a leading `|`.
+
+**For Sofia's next replan:** align 4.13's and 11.8's wording of "due" with this story's "every story it names builds before the gate".
