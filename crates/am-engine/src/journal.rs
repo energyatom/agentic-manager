@@ -151,6 +151,7 @@ pub async fn drive_run(
                 kind: "step_output".into(),
                 from_step_run: Some(prev.id.clone()),
                 from_item: None,
+                from_row: None,
                 label,
                 taint: prev.taint,
             });

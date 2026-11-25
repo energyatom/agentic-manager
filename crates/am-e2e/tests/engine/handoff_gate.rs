@@ -227,6 +227,7 @@ async fn a_waiting_gate_survives_a_restart_without_a_duplicate() {
                 kind: "step_output".into(),
                 from_step_run: Some(draft.id.clone()),
                 from_item: None,
+                from_row: None,
                 label: "step:draft@1".into(),
                 taint: Taint::Clean,
             }],

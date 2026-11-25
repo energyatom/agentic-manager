@@ -20,6 +20,8 @@
 //!   no table") and the run fails;
 //! - a step that declares another team's table is a config error: nothing
 //!   runs and no row is written;
+//! - story 3.6c: the plan builder fills no step's `row_inputs` slot, so no
+//!   step of `agentic run` reads a row (3.15 and 7.2 fill it from config);
 //! - the fan-out workflow `spread` (its step `share` lists `writer`, which
 //!   holds `table_write`) is refused before any run or provider, in the
 //!   words of `agentic validate`'s warning (matrix row 40).
@@ -261,6 +263,62 @@ async fn agentic_run_offers_table_write_only_to_a_declaring_step() {
     let tools = reader.tool_calls(&plain.id).unwrap();
     assert_eq!(tools.len(), 1, "{tools:#?}");
     assert_eq!(tools[0].status, "refused");
+}
+
+/// Story 3.6c (plan Intent and Boundaries; owner Q4's reader condition):
+/// no config key names rows a step reads yet, so the shipped plan builder
+/// leaves every step's `row_inputs` slot empty (3.15 and 7.2 fill it).
+/// `collect` writes a row whose title holds a canary; `plain`, the step
+/// after it, journals no `row` edge and no `from_row`, its prompt holds no
+/// `row:` part, and neither request holds the canary (only `collect`'s own
+/// replayed call does, in its second request).
+#[tokio::test]
+async fn agentic_run_leaves_the_row_input_slot_empty() {
+    const CANARY: &str = "canary-cli-row-0c3e";
+    let env = env();
+    let root = env.fixture();
+    let insert = format!(r#"{{"table":"entries","data":{{"ref":"r-1","title":"{CANARY}"}}}}"#);
+    let llm = Arc::new(FakeLlm::new(vec![
+        ScriptedTurn::text("recording").tool_call("table_write", &insert),
+        ScriptedTurn::text("recorded"),
+        ScriptedTurn::text("One entry was recorded."),
+    ]));
+
+    let ran = env.run(&root, &llm).await;
+
+    assert_eq!(ran.code, 0, "{}", ran.all());
+    let reader = env.reader(&root).expect("the run's journal");
+    let rows = reader.table_rows_of("entries").unwrap();
+    assert_eq!(rows.len(), 1, "{rows:#?}");
+    assert!(rows[0].data.contains(CANARY));
+    let run_row = reader.runs().unwrap().remove(0);
+    for step in reader.steps(&run_row.id).unwrap() {
+        for input in reader.step_inputs(&step.id).unwrap() {
+            assert!(
+                input.kind != "row" && input.from_row.is_none(),
+                "{}: {input:?}",
+                step.step_key
+            );
+        }
+        for part in reader.prompt_parts(&step.id).unwrap() {
+            assert!(
+                !part.label.starts_with("row:"),
+                "{}: {part:?}",
+                step.step_key
+            );
+        }
+    }
+    let requests = llm.requests();
+    assert_eq!(requests.len(), 3, "collect's two turns, then plain's");
+    assert!(
+        !format!("{:?}", requests[0]).contains(CANARY),
+        "collect's first request"
+    );
+    assert!(
+        !format!("{:?}", requests[2]).contains(CANARY),
+        "plain's request holds no row text: {:#?}",
+        requests[2]
+    );
 }
 
 /// Row 7 (AD-21: a seat writes only its own team's tables): `collect`

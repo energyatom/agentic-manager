@@ -590,6 +590,7 @@ mod tests {
                     kind: "step_output".into(),
                     from_step_run: Some(make.clone()),
                     from_item: None,
+                    from_row: None,
                     label: "step:make@1".into(),
                     taint: Taint::Clean,
                 }],

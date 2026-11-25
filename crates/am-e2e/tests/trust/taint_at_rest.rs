@@ -21,6 +21,7 @@ fn untrusted_input() -> StepInput {
         kind: "untrusted".into(),
         from_step_run: None,
         from_item: None,
+        from_row: None,
         label: "test:poisoned-page".into(),
         taint: Taint::Tainted,
     }
@@ -177,6 +178,7 @@ fn no_command_clears_a_step_or_item_taint() {
                 kind: "step_output".into(),
                 from_step_run: Some(draft.clone()),
                 from_item: None,
+                from_row: None,
                 label: "step:draft@1".into(),
                 taint: Taint::Tainted,
             }],

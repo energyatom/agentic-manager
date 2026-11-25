@@ -72,19 +72,61 @@ fn neutralise_markers(text: &str) -> String {
     out
 }
 
-/// Escape every closing fence tag (`</untrusted-`, any letter case) in data.
+/// Escape every closing fence tag in data, in any letter case: the literal
+/// `</untrusted-` and, since story 3.22, the forms a model may read as one.
+/// Review triage round 1, R2: the JSON escapes data kept as written can
+/// hold, `<` written `\u003c` (either hex case) and `/` written `\/` or
+/// `\u002f`, alone or together. Review triage round 2, T5: ASCII
+/// whitespace before or after the `/`, and no hyphen after `untrusted`.
+/// The `<` (or its escape) becomes `&lt;`; the letters after it are kept,
+/// so the literal form comes out as it did (`&lt;/untrusted-`).
 pub fn neutralise(text: &str) -> String {
-    const NEEDLE: &str = "</untrusted-";
     let lower = text.to_ascii_lowercase();
+    let bytes = lower.as_bytes();
     let mut out = String::with_capacity(text.len());
     let mut last = 0;
-    for (i, _) in lower.match_indices(NEEDLE) {
-        out.push_str(&text[last..i]);
-        out.push_str("&lt;/");
-        last = i + 2; // keep the original letters after "</"
+    let mut i = 0;
+    while i < bytes.len() {
+        // `<` and `\` are ASCII, so `i` is a character boundary here.
+        let open = matches!(bytes[i], b'<' | b'\\')
+            .then(|| closing_tag_at(&lower[i..]))
+            .flatten();
+        match open {
+            Some(len) => {
+                out.push_str(&text[last..i]);
+                out.push_str("&lt;");
+                i += len;
+                last = i; // keep the original letters after the `<`
+            }
+            None => i += 1,
+        }
     }
     out.push_str(&text[last..]);
     out
+}
+
+/// The length of the `<` (or its JSON escape) that opens a closing fence
+/// tag at the start of `rest` (lower case), in any of [`neutralise`]'s
+/// forms: the `<`, optional whitespace, the `/`, optional whitespace, then
+/// `untrusted`. `None` when `rest` starts with none.
+fn closing_tag_at(rest: &str) -> Option<usize> {
+    const OPENS: [&str; 2] = ["<", "\\u003c"];
+    const SLASHES: [&str; 3] = ["/", "\\/", "\\u002f"];
+    const TAG: &str = "untrusted";
+    fn spaced(s: &str) -> &str {
+        s.trim_start_matches(|c: char| c.is_ascii_whitespace())
+    }
+    OPENS.into_iter().find_map(|open| {
+        let after = spaced(rest.strip_prefix(open)?);
+        SLASHES
+            .into_iter()
+            .any(|slash| {
+                after
+                    .strip_prefix(slash)
+                    .is_some_and(|t| spaced(t).starts_with(TAG))
+            })
+            .then_some(open.len())
+    })
 }
 
 /// The fence label that precedes a native file part (AD-27).

@@ -8,7 +8,9 @@
 //! Story 4 adds [`gate`], the engine's apply of a decision a person made on
 //! a gate's Review item, and [`run::continue_run`] (AD-8, AD-15). Story 6's
 //! ToolGate slice adds [`row_writer`], the row-writer port over the store,
-//! which only ToolGate calls (AD-21).
+//! which only ToolGate calls (AD-21). Story 22 adds `row_inputs`, the
+//! crate's own read site of a row's content: the rows a step reads at its
+//! start, as fenced untrusted data (AD-10, AD-43).
 #![forbid(unsafe_code)]
 
 pub mod cancel;
@@ -16,6 +18,7 @@ pub mod gate;
 pub mod journal;
 mod parts;
 pub mod prompt;
+pub(crate) mod row_inputs;
 pub mod row_writer;
 pub mod run;
 pub mod scheduler;

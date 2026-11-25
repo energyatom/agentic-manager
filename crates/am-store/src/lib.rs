@@ -57,6 +57,13 @@
 //! the attempt's own seat, with its after-image, its own taint and the
 //! `table_write` call's finish, in one transaction (see `rows`). A finished
 //! tool call carries its result's kind on its journal row.
+//!
+//! Epic 3 story 22, "Rows reaching later steps" (AD-10, AD-43; migration
+//! 0011): a step reads a row through a `row` input that names the
+//! after-image it read (`step_inputs.from_row`) and carries at least that
+//! image's taint; the row's text stays on the image, and its prompt part is
+//! fenced, never trusted. [`Reader::row_snapshot`] is the row's current
+//! after-image, the one content reader the engine names.
 #![forbid(unsafe_code)]
 
 use std::collections::BTreeMap;
@@ -86,7 +93,9 @@ pub use migrations::{AppliedMigration, OpenReport, PRE_MIGRATION_KEPT, SCHEMA_VE
 use project::ProjectLock;
 pub use project::{LockHolder, lock_holder, lock_is_held, open_runtime, open_runtime_unchanged};
 pub use prompt::{CallPurpose, NewPromptPart, PromptKind, PromptPartRow, PromptSlot};
-pub use rows::{ROW_MAX_BYTES, ROW_MAX_COLUMNS, RowHistoryRecord, RowReceipt, RowRecord};
+pub use rows::{
+    ROW_MAX_BYTES, ROW_MAX_COLUMNS, RowHistoryRecord, RowReceipt, RowRecord, RowSnapshot,
+};
 
 /// The project store's `application_id` (story 2.12, AD-7): stamped on
 /// every project database, so this Mac's user store
@@ -667,31 +676,22 @@ impl WriteCommand {
 
 /// One input of a step attempt (AD-43's `step_inputs`; story 3.3): the
 /// command's and the read's. `kind` is `step_output` (a `next` input),
-/// `loop_back` (a loop-back's reasons), `untrusted` (a plan input) or,
-/// since story 3.4, `gate_note` (a person's return note at a gate);
-/// `from_step_run` is the producing attempt (`None` for a plan input and a
-/// gate note), `from_item` the Inbox item a `gate_note` refers to (`None`
-/// otherwise). The text stays where it was written (AD-43: never stored
-/// twice): a note stays on its item.
-///
-/// The store slice of story 3.6 (owner: no read path for a step yet; matrix
-/// row 42): an input names no row. Story 3.6c adds `from_row` and removes
-/// this doctest.
-///
-/// ```compile_fail
-/// let _ = |i: am_store::StepInput| i.from_row;
-/// ```
-///
-/// while the input's other fields are read as before:
-///
-/// ```
-/// let _ = |i: am_store::StepInput| (i.kind, i.from_step_run, i.from_item, i.label, i.taint);
-/// ```
+/// `loop_back` (a loop-back's reasons), `untrusted` (a plan input), since
+/// story 3.4 `gate_note` (a person's return note at a gate) or, since
+/// story 3.22, `row` (a row the step read at its start); `from_step_run`
+/// is the producing attempt (`None` for a plan input, a gate note and a
+/// row), `from_item` the Inbox item a `gate_note` refers to and `from_row`
+/// the after-image (`row_history.seq`) a `row` input read (`None`
+/// otherwise). A `row` input's taint is at least its after-image's (AD-10:
+/// the row's mark is a floor). The text stays where it was written (AD-43:
+/// never stored twice): a note stays on its item, a row's data on its
+/// after-image.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StepInput {
     pub kind: String,
     pub from_step_run: Option<String>,
     pub from_item: Option<String>,
+    pub from_row: Option<i64>,
     pub label: String,
     pub taint: Taint,
 }
@@ -1745,9 +1745,9 @@ fn raise_taint(
     Ok(())
 }
 
-/// The kinds of input stories 3.3 and 3.4 journal (AD-43; story 3.17 adds
-/// the rest).
-const INPUT_KINDS: [&str; 4] = ["step_output", "loop_back", "untrusted", "gate_note"];
+/// The kinds of input stories 3.3, 3.4 and 3.22 journal (AD-43; story 3.17
+/// adds the rest).
+const INPUT_KINDS: [&str; 5] = ["step_output", "loop_back", "untrusted", "gate_note", "row"];
 
 /// Journals `inputs` of the attempt `step` and returns the attempt's taint
 /// (the highest of its own, `taint` and each input's) and how many rows
@@ -1767,6 +1767,25 @@ fn journal_inputs(
                 "refused: `{}` is not a kind of step input ({})",
                 input.kind,
                 INPUT_KINDS.join(", ")
+            )));
+        }
+        // Story 3.22 (AD-43): only a `row` input names an after-image, and
+        // it is checked on its own (AD-10: the row's mark is a floor, and
+        // reading any row taints the reader).
+        if input.kind == "row" {
+            let floor = row_input(tx, input)?;
+            let input_taint = input.taint.raise(floor);
+            attempt = attempt.raise(input_taint).raise(Taint::Tainted);
+            tx.execute(
+                "INSERT INTO step_inputs (step_run_id, kind, from_step_run, from_item, from_row, label, taint, created_at) VALUES (?1, 'row', NULL, NULL, ?2, ?3, ?4, ?5)",
+                params![step.id, input.from_row, input.label, flag(input_taint), now],
+            )?;
+            continue;
+        }
+        if input.from_row.is_some() {
+            return Err(StoreError::Invalid(format!(
+                "refused: a `{}` input names no after-image of a row (only a `row` input does); nothing was changed",
+                input.kind
             )));
         }
         // Story 3.4: only a gate note comes from an Inbox item, and it is
@@ -1812,6 +1831,47 @@ fn journal_inputs(
         )?;
     }
     Ok((attempt, inputs.len()))
+}
+
+/// Story 3.22 (AD-10, AD-43): a `row` input names, by `from_row`, an
+/// existing after-image, under that image's own label
+/// (`row:<table>/<row id>@<version>`), and comes from no step run and no
+/// Inbox item; anything else is refused in words that hold no row data.
+/// The image is the row's current one when the start commits (AD-8: what
+/// the step was sent is what its journal names): an older one is
+/// [`StoreError::RowRefused`], so the engine reads the row again. Returns
+/// the after-image's taint: the floor of the input's.
+fn row_input(tx: &rusqlite::Transaction, input: &StepInput) -> Result<Taint, StoreError> {
+    let refuse = |why: String| {
+        Err(StoreError::Invalid(format!(
+            "refused: the `row` input `{}` {why}; a row input names the after-image of a row the step read (AD-43); nothing was changed",
+            input.label
+        )))
+    };
+    if input.from_step_run.is_some() {
+        return refuse("comes from no step run".into());
+    }
+    if input.from_item.is_some() {
+        return refuse("comes from no Inbox item".into());
+    }
+    let Some(seq) = input.from_row else {
+        return refuse("names no after-image".into());
+    };
+    let Some((label, taint)) = rows::image_label(tx, seq)? else {
+        return refuse(format!("names after-image {seq}, which does not exist"));
+    };
+    if input.label != label {
+        return refuse(format!(
+            "names after-image {seq}, which is labelled `{label}`"
+        ));
+    }
+    if let Some(moved) = rows::image_moved(tx, seq)? {
+        return Err(StoreError::RowRefused(format!(
+            "refused: the row input `{}` names after-image {seq}, and {moved}; a row input names the row's current after-image (AD-8, AD-43); nothing was changed",
+            input.label
+        )));
+    }
+    Ok(taint)
 }
 
 /// Story 3.4 (AD-10 (b), AD-43): a `gate_note` input of the attempt `step`
@@ -2160,7 +2220,27 @@ fn check_attempt_prompt(
             }
             _ => {}
         }
-        if matches!(part.kind, PromptKind::Trusted | PromptKind::Untrusted) {
+        // Story 3.22 (AD-10, AD-43): a row the attempt reads is always a
+        // fenced part, whatever its mark, and carries no text (it stays on
+        // the after-image).
+        let row_edge: bool = matches!(part.kind, PromptKind::Trusted | PromptKind::Untrusted)
+            && tx.query_row(
+                "SELECT EXISTS (SELECT 1 FROM step_inputs WHERE step_run_id = ?1 AND label = ?2 AND kind = 'row')",
+                params![step_run_id, part.label],
+                |r| r.get(0),
+            )?;
+        if row_edge {
+            if part.kind != PromptKind::Untrusted {
+                return refuse(
+                    "names a row this attempt reads, and a row is always fenced untrusted data, never a trusted part (AD-10)",
+                );
+            }
+            if part.text.is_some() {
+                return refuse(
+                    "carries text, and a row's text stays on its after-image (AD-43: never stored twice)",
+                );
+            }
+        } else if matches!(part.kind, PromptKind::Trusted | PromptKind::Untrusted) {
             // The input's journaled taint decides the kind: a clean input is
             // a trusted part, a tainted one is fenced (AD-10).
             let named: bool = tx.query_row(
@@ -2413,6 +2493,7 @@ fn loop_back(
                         kind: "gate_note".into(),
                         from_step_run: None,
                         from_item: Some(item.to_string()),
+                        from_row: None,
                         label: format!("gate-note:{}@{}", producer.step_key, producer.attempt),
                         taint: Taint::Clean,
                     };
@@ -3327,15 +3408,16 @@ impl Reader {
     /// written (story 3.3, AD-43).
     pub fn step_inputs(&self, step_run_id: &str) -> Result<Vec<StepInput>, StoreError> {
         let mut st = self.conn.prepare(
-            "SELECT kind, from_step_run, from_item, label, taint FROM step_inputs WHERE step_run_id = ?1 ORDER BY id",
+            "SELECT kind, from_step_run, from_item, from_row, label, taint FROM step_inputs WHERE step_run_id = ?1 ORDER BY id",
         )?;
         let rows = st.query_map(params![step_run_id], |r| {
             Ok(StepInput {
                 kind: r.get(0)?,
                 from_step_run: r.get(1)?,
                 from_item: r.get(2)?,
-                label: r.get(3)?,
-                taint: taint_of(r.get(4)?),
+                from_row: r.get(3)?,
+                label: r.get(4)?,
+                taint: taint_of(r.get(5)?),
             })
         })?;
         Ok(rows.collect::<Result<_, _>>()?)

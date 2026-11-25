@@ -174,6 +174,7 @@ async fn no_instruction_row_is_ever_tainted_and_no_untrusted_row_is_clean() {
         kind: "untrusted".into(),
         from_step_run: None,
         from_item: None,
+        from_row: None,
         label: "test:page".into(),
         taint: Taint::Tainted,
     };

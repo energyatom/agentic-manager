@@ -102,6 +102,7 @@ fn step(
         seat_team: "core".into(),
         table: None,
         document: None,
+        row_inputs: vec![],
     }
 }
 

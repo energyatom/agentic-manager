@@ -1,27 +1,35 @@
 //! Trust test (AD-10, AD-21, AD-43; epic 3 story 6's ToolGate slice, owner
-//! conditions a and b of the second re-slice, plan matrix row 43): no row
-//! content reaches a model call.
+//! conditions a and b of the second re-slice, plan matrix row 43; widened
+//! by story 3.6c, matrix rows 38 and 47): a row's content reaches a model
+//! call only through a step's `row_inputs` slot, and there only fenced and
+//! tainting.
 //!
-//! The ToolGate slice lets a step write rows and gives no step a way to
-//! read them: no row-input slot, no `from_row`, no `row` input kind (the
-//! `compile_fail` doctests on `am_domain::rows`, `StepPlan` and
-//! `am_store::StepInput` pin the types; `cargo xtask check-deps` keeps the
-//! row-content readers and records in am-store and `rusqlite` in am-store
-//! alone, `xtask/tests/check_deps.rs`). This test runs the proof end to
-//! end, with a clean writer and with a tainted one:
+//! The ToolGate slice let a step write rows and gave no step a way to read
+//! them. Story 3.6c opens exactly one read path: the plan's `row_inputs`
+//! slot (tests fill it; 3.15 and 7.2 fill it from config), read at the
+//! attempt's start in am-engine's `row_inputs.rs`, the one shipped file
+//! outside am-store that `cargo xtask check-deps` lets name a row-content
+//! reader (`row_snapshot`); the other readers and records stay in am-store
+//! and `rusqlite` in am-store alone (`xtask/tests/check_deps.rs`). This
+//! test runs the proof end to end, with a clean writer and with a tainted
+//! one:
 //!
 //! - step A (`collect`) inserts two rows whose data holds canaries;
 //! - step B (`revise`, clean, also writing `entries`) updates a canary row
 //!   with a canary-free patch;
 //! - step C (`close`) has no tools.
 //!
-//! No later request holds a canary in any system, instruction, trusted,
-//! untrusted, tool-result or engine-result part (nor anywhere in its debug
-//! form): none at all in B's or C's requests, and in A's later turns only
-//! in A's own replayed `Part::ToolCall` arguments (the model's own words).
-//! Every engine result holds only the row id, the version and its word.
-//! The steps' journaled inputs are only the kinds of stories 3.3 and 3.4;
-//! none names a row.
+//! None of them fills `row_inputs`, so no later request holds a canary in
+//! any system, instruction, trusted, untrusted, tool-result or
+//! engine-result part (nor anywhere in its debug form): none at all in B's
+//! or C's requests, and in A's later turns only in A's own replayed
+//! `Part::ToolCall` arguments (the model's own words). Every engine result
+//! holds only the row id, the version and its word. B's and C's journaled
+//! inputs are only the kinds of stories 3.3 and 3.4; none names a row.
+//!
+//! Then a later step that names both rows in its slot gets each canary only
+//! inside its own row's fence, is tainted, and journals one `row` edge per
+//! row naming the after-image it read (3.6c).
 //!
 //! No network, no real model: `Live` models, whose turns the test makes
 //! from the journal (the test reads the row id; no step does).
@@ -276,11 +284,13 @@ async fn no_row_content_reaches_a_later_model_request() {
     }
 }
 
-/// Row 43 (owner condition a, at run time): no step's journaled input
-/// names a row. Every input of every attempt of B and C is one of the
-/// kinds of stories 3.3 and 3.4, from a step run of this run or a plan
-/// input, and none is labelled with a row's or a table's id. B, which read
-/// only a clean producer's output and its own engine result, stays clean.
+/// Row 43 (owner condition a, at run time; since 3.6c, for steps that fill
+/// no `row_inputs`): no such step's journaled input names a row. Every
+/// input of every attempt of B and C is one of the kinds of stories 3.3
+/// and 3.4, from a step run of this run or a plan input, names no
+/// after-image (`from_row`), and none is labelled with a row's or a
+/// table's id. B, which read only a clean producer's output and its own
+/// engine result, stays clean.
 #[tokio::test]
 async fn no_step_input_names_a_row() {
     for tainted_writer in [false, true] {
@@ -302,6 +312,7 @@ async fn no_step_input_names_a_row() {
                     INPUT_KINDS.contains(&input.kind.as_str()),
                     "{who}: {key}: {input:?}"
                 );
+                assert_eq!(input.from_row, None, "{who}: {key}: {input:?}");
                 if let Some(from) = &input.from_step_run {
                     assert!(attempts.contains(from), "{who}: {key}: {input:?}");
                 }
@@ -323,5 +334,100 @@ async fn no_step_input_names_a_row() {
             Taint::Clean
         };
         assert_eq!(revise.taint, expected, "{who}: {revise:?}");
+    }
+}
+
+/// Row 43 widened by story 3.6c (rows 38 and 47; owner Q4's reader
+/// condition): the slot is the one read path. After A, B and C, a later
+/// run's step `read` names both rows in its `row_inputs`. Each canary
+/// reaches `read`'s request in exactly one part: the fence of its own row,
+/// labelled `row:entries/<id>@<version>`; no system, instruction, trusted,
+/// tool-result or engine-result part holds one. `read` is tainted, with one
+/// `row` edge per row, in the order named, naming the row's current
+/// after-image and carrying at least its taint; A's, B's and C's inputs
+/// still name no row.
+#[tokio::test]
+async fn the_slot_is_the_one_read_path_and_it_fences_and_taints() {
+    for tainted_writer in [false, true] {
+        let ran = three_steps(tainted_writer).await;
+        let who = if tainted_writer {
+            "tainted A"
+        } else {
+            "clean A"
+        };
+        assert_eq!(ran.outcome.status, "succeeded", "{who}: {:?}", ran.outcome);
+        let rows = rows_of(&ran.p.db, TABLE);
+        let ids: Vec<&str> = rows.iter().map(|r| r.row_id.as_str()).collect();
+        let labels: Vec<String> = rows
+            .iter()
+            .map(|r| format!("row:{TABLE}/{}@{}", r.row_id, r.version))
+            .collect();
+        let d = texts(&["read both"]);
+
+        let outcome = run_plan(
+            &ran.p.store,
+            owner(),
+            "manual",
+            &plan(vec![reading(step("read", d.clone()), &ids)]),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome.status, "succeeded", "{who}: {outcome:?}");
+        let request = d.requests()[0].clone();
+        for canary in CANARIES {
+            let holders = carriers(&request, canary);
+            assert_eq!(holders.len(), 1, "{who}: `{canary}`: {holders:#?}");
+            match &holders[0] {
+                Part::Untrusted(data) => assert!(
+                    labels.contains(&data.label().to_string()),
+                    "{who}: `{canary}` in its row's fence: {}",
+                    data.label()
+                ),
+                other => panic!("{who}: `{canary}` only fenced, not {other:?}"),
+            }
+        }
+        for (canary, kind) in canaries_in(&request) {
+            assert_eq!(kind, "untrusted", "{who}: `{canary}`");
+        }
+        for instruction in &request.system {
+            for canary in CANARIES {
+                assert!(!instruction.text().contains(canary), "{who}: system");
+            }
+        }
+
+        let j = journal(&ran.p.db);
+        let read = j.attempt("read", 1);
+        assert_eq!(read.taint, Taint::Tainted, "{who}: the reader is tainted");
+        let edges: Vec<_> = j
+            .inputs_of(&read.id)
+            .into_iter()
+            .filter(|i| i.kind == "row")
+            .collect();
+        assert_eq!(edges.len(), rows.len(), "{who}: {edges:#?}");
+        for ((row, label), edge) in rows.iter().zip(&labels).zip(&edges) {
+            let image = history_of(&ran.p.db, TABLE, &row.row_id)
+                .last()
+                .unwrap()
+                .clone();
+            assert_eq!(&edge.label, label, "{who}");
+            assert_eq!(edge.from_row, Some(image.seq), "{who}: {edge:?}");
+            assert_eq!(edge.taint, row.taint, "{who}: the row's mark: {edge:?}");
+            assert_eq!(
+                (edge.from_step_run.as_deref(), edge.from_item.as_deref()),
+                (None, None),
+                "{who}"
+            );
+        }
+        for key in ["collect", "revise", "close"] {
+            let attempt = j.attempt(key, 1);
+            for input in j.inputs_of(&attempt.id) {
+                assert!(
+                    input.kind != "row" && input.from_row.is_none(),
+                    "{who}: {key}: {input:?}"
+                );
+            }
+        }
     }
 }

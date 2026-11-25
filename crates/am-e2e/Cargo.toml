@@ -224,6 +224,18 @@ name = "taint_tool_result_engine_values"
 path = "tests/trust/taint_tool_result_engine_values.rs"
 
 [[test]]
+name = "taint_rows_reader"
+path = "tests/trust/taint_rows_reader.rs"
+
+[[test]]
+name = "taint_rows_reader_fence"
+path = "tests/trust/taint_rows_reader_fence.rs"
+
+[[test]]
+name = "taint_rows_reader_start"
+path = "tests/trust/taint_rows_reader_start.rs"
+
+[[test]]
 name = "rule_16_row_provenance"
 path = "tests/trust/rule_16_row_provenance.rs"
 

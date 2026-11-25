@@ -38,6 +38,12 @@
 //! xtask check-deps`).
 //! [`Reader::row_receipt`] reads the typed record a result is rebuilt from,
 //! which holds no data.
+//!
+//! Story 3.22 (AD-10, AD-43): [`Reader::row_snapshot`] is a row's current
+//! after-image, [`RowSnapshot`]: the one content reader shipped code
+//! outside this crate names, and only in am-engine's `row_inputs` module,
+//! which hands a step the rows it reads as fenced untrusted data (`cargo
+//! xtask check-deps`).
 
 use am_domain::rows::{RowOp, RowWrite};
 use am_domain::{Actor, StepStatus, Taint};
@@ -123,6 +129,70 @@ pub struct RowReceipt {
     pub call_seq: i64,
     pub tool_call_id: String,
     pub columns: i64,
+}
+
+/// A row's current after-image (story 3.22): its `row_history.seq`, the
+/// version, the data as stored and the row's taint after that write. It
+/// carries the row's data, which its `Debug` never prints (review T6).
+#[derive(Clone, PartialEq, Eq)]
+pub struct RowSnapshot {
+    pub seq: i64,
+    pub version: i64,
+    /// The whole row, a JSON object.
+    pub data: String,
+    pub taint: Taint,
+}
+
+impl fmt::Debug for RowSnapshot {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RowSnapshot")
+            .field("seq", &self.seq)
+            .field("version", &self.version)
+            .field("data_bytes", &self.data.len())
+            .field("taint", &self.taint)
+            .finish()
+    }
+}
+
+/// The label a `row` input reading after-image `seq` carries
+/// (`row:<table>/<row id>@<version>`), with that image's taint; `None` when
+/// no after-image has that `seq`. Ids only, never the row's data.
+pub(crate) fn image_label(
+    conn: &Connection,
+    seq: i64,
+) -> Result<Option<(String, Taint)>, StoreError> {
+    Ok(conn
+        .query_row(
+            "SELECT table_id, row_id, version, taint FROM row_history WHERE seq = ?1",
+            params![seq],
+            |r| {
+                let (table, row, version): (String, String, i64) =
+                    (r.get(0)?, r.get(1)?, r.get(2)?);
+                Ok((format!("row:{table}/{row}@{version}"), taint_of(r.get(3)?)))
+            },
+        )
+        .optional()?)
+}
+
+/// `Some(words)` when the after-image `seq` is not its row's current one:
+/// the words name the row, its table and its version now (ids only).
+pub(crate) fn image_moved(conn: &Connection, seq: i64) -> Result<Option<String>, StoreError> {
+    Ok(conn
+        .query_row(
+            "SELECT h.table_id, h.row_id, t.version
+             FROM row_history h
+             JOIN table_rows t ON t.table_id = h.table_id AND t.row_id = h.row_id
+             WHERE h.seq = ?1 AND t.version <> h.version",
+            params![seq],
+            |r| {
+                let (table, row, version): (String, String, i64) =
+                    (r.get(0)?, r.get(1)?, r.get(2)?);
+                Ok(format!(
+                    "row {row} of table `{table}` is at version {version} now"
+                ))
+            },
+        )
+        .optional()?)
 }
 
 impl fmt::Debug for RowRecord {
@@ -700,6 +770,36 @@ impl Reader {
                         call_seq: r.get(6)?,
                         tool_call_id: r.get(7)?,
                         columns: r.get(8)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    /// The row's current after-image (story 3.22): the newest image of
+    /// `row_id` in `table_id`, which the row holds now; `None` when the
+    /// table holds no such row (an unknown id, or a row of another table).
+    /// The one content reader am-engine's `row_inputs` module names.
+    pub fn row_snapshot(
+        &self,
+        table_id: &str,
+        row_id: &str,
+    ) -> Result<Option<RowSnapshot>, StoreError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT h.seq, h.version, h.data, h.taint
+                 FROM table_rows t
+                 JOIN row_history h
+                   ON h.table_id = t.table_id AND h.row_id = t.row_id AND h.version = t.version
+                 WHERE t.table_id = ?1 AND t.row_id = ?2",
+                params![table_id, row_id],
+                |r| {
+                    Ok(RowSnapshot {
+                        seq: r.get(0)?,
+                        version: r.get(1)?,
+                        data: r.get(2)?,
+                        taint: taint_of(r.get(3)?),
                     })
                 },
             )

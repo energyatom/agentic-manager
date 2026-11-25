@@ -34,9 +34,9 @@ test:
 # `Writer::exec` needs an Actor (AD-24, story 1.6) and that only a
 # `HumanActor` resolves an Inbox item, never a `WriteCommand` (stories 3.3,
 # 3.4); am-domain's, that nothing converts into or out of a TrustedInput
-# (AD-10, story 3.3) and that an EngineResult has one constructor and no
-# row-input type exists (story 3.6); am-engine's, that a StepPlan has no
-# row-input slot (story 3.6).
+# (AD-10, story 3.3) and that an EngineResult has one constructor (story
+# 3.6); am-engine's, that a StepPlan's write fields are read like any other
+# (story 3.6). Story 3.22 removed the tripwires on a row-input type and slot.
 doctest:
     cargo test --doc -p am-store -p am-domain -p am-engine
 

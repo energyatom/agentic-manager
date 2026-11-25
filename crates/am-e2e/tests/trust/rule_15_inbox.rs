@@ -306,6 +306,7 @@ async fn the_same_resolve_over_the_api_is_audited_you_reviewer() {
                         kind: "gate_note".into(),
                         from_step_run: None,
                         from_item: Some(item.clone()),
+                        from_row: None,
                         label: "gate-note:approve@1".into(),
                         taint: Taint::Clean,
                     }]
@@ -600,6 +601,7 @@ async fn an_inbox_event_carries_only_the_id_and_status() {
                 kind: "step_output".into(),
                 from_step_run: Some(draft.clone()),
                 from_item: None,
+                from_row: None,
                 label: "step:draft@1".into(),
                 taint: Taint::Clean,
             }],
