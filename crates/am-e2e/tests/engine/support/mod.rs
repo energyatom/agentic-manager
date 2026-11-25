@@ -737,6 +737,8 @@ pub const OTHER_TEAM: &str = "side";
 pub const TABLE: &str = "entries";
 /// Another team's table (team `side`).
 pub const OTHER_TABLE: &str = "others";
+/// A document a document step declares.
+pub const DOCUMENT: &str = "summary-note";
 /// The label of every `table_write` result (AD-10 as amended 2026-11-24).
 pub const WRITE_LABEL: &str = "tool:table_write";
 
@@ -791,6 +793,14 @@ pub fn writing(step: StepPlan) -> StepPlan {
     StepPlan {
         grants: tables_on(),
         table: Some(entries()),
+        ..step
+    }
+}
+
+/// `step` declaring the document `document`.
+pub fn documenting(step: StepPlan, document: &str) -> StepPlan {
+    StepPlan {
+        document: Some(document.into()),
         ..step
     }
 }

@@ -1,20 +1,26 @@
-//! Epic 3 story 6's ToolGate slice (AD-21, AD-46; owner Q3; matrix rows 7,
-//! 8, 28 and 31, the table halves): a workflow step declares the one table
-//! it writes.
+//! Epic 3 story 6 (AD-21, AD-29, AD-35, AD-46; owner Q3; matrix rows 7, 8,
+//! 28 and 31): a workflow step declares the one table it writes and, from
+//! story 3.6b, the document it versions.
 //!
 //! ```yaml
 //! - id: collect
 //!   seat: writer
 //!   instruction: …
 //!   table: entries          # a table of the seat's own team; the seat has Tables on
+//! - id: summarise
+//!   seat: writer
+//!   instruction: …
+//!   document: summary-note  # kebab-case; one team per document id
 //! ```
 //!
 //! Declaring a table binds a write; it never grants one (only the Tables
 //! capability grants `table_write`, AD-46). Every refusal is a finding with
 //! its file, line and fix, so `agentic validate` names it and `agentic run`
 //! starts nothing: a table that does not exist, a table of another team
-//! than the seat's, a seat without Tables, and `table:` on a gate step.
-//! `document:` is 3.6b's.
+//! than the seat's, a seat without Tables, `table:` on a gate step, a
+//! `document:` that is not kebab-case or that two teams' workflows declare,
+//! a document step with `output_schema`, `loop_back` or `gate`, and
+//! `document:` on a fan-out step (the document halves, story 3.6b).
 //!
 //! Row 40 (owner, 2026-11-24): a fan-out step (`seats:` or `over_folder:`)
 //! that declares `table:`, or whose seats hold `table_write`, cannot write
@@ -72,6 +78,7 @@ const SCHEMA: (&str, &str) = (
 );
 
 const WF: &str = "workflows/flow.yaml";
+const OTHER_WF: &str = "workflows/other.yaml";
 
 const COLLECT: &str =
     "  - id: collect\n    seat: writer\n    instruction: Record the entries.\n    table: entries\n";
@@ -108,12 +115,13 @@ fn line_of(root: &Path, file: &str, marker: &str) -> u32 {
         .unwrap_or_else(|| panic!("no `{marker}` in {file}:\n{text}"))
 }
 
-/// The key is not reported as unknown.
+/// Neither key is reported as unknown.
 fn assert_keys_known(found: &[am_config::Finding]) {
     for f in found {
         assert!(
-            !f.message.contains("unknown key 'table'"),
-            "the key is known: {f:#?}"
+            !f.message.contains("unknown key 'table'")
+                && !f.message.contains("unknown key 'document'"),
+            "the keys are known: {f:#?}"
         );
     }
 }
@@ -460,4 +468,178 @@ fn an_empty_over_folder_gets_one_fan_out_decision() {
 
     assert!(step_of(root, "spread").fan_out, "`seats:` fans out");
     assert!(!step_of(root, "collect").fan_out, "a plain step does not");
+}
+
+/// Row 31, the document half (story 3.6b): `document:` parses into the
+/// step; a step that declares none has none; it is not a run-graph key; no
+/// finding.
+#[test]
+fn a_step_declares_its_document() {
+    let dir = project(
+        &format!(
+            "{COLLECT}  - id: summarise\n    seat: writer\n    instruction: Write the summary note.\n    document: summary-note\n"
+        ),
+        &[],
+    );
+    let found = load(dir.path()).unwrap().findings;
+    assert!(errors(&found).is_empty(), "{found:#?}");
+    assert_keys_known(&found);
+    let root = dir.path();
+
+    let summarise = step_of(root, "summarise");
+    assert_eq!(
+        (summarise.table.as_deref(), summarise.document.as_deref()),
+        (None, Some("summary-note"))
+    );
+    assert_eq!(step_of(root, "collect").document, None);
+    assert!(summarise.run_graph.is_empty());
+}
+
+/// Rows 28 and 31 (AD-29, AD-36): a document step's version is its final
+/// message, so it takes no `output_schema`, `loop_back` or `gate`. Each is
+/// an error at the key's line (or the clashing key's), naming `document`.
+#[test]
+fn a_document_step_takes_no_schema_loop_back_or_gate() {
+    for (what, steps, markers, word) in [
+        (
+            "with output_schema",
+            format!(
+                "{COLLECT}  - id: summarise\n    seat: writer\n    instruction: Write the note.\n    output_schema: line\n    document: summary-note\n"
+            ),
+            vec!["document: summary-note", "output_schema: line"],
+            "document",
+        ),
+        (
+            "with loop_back",
+            format!(
+                "{COLLECT}  - id: summarise\n    seat: writer\n    instruction: Write the note.\n    loop_back: {{ to: collect }}\n    document: summary-note\n"
+            ),
+            vec!["document: summary-note", "loop_back:"],
+            "document",
+        ),
+        (
+            "on a gate",
+            format!(
+                "{COLLECT}  - id: approve\n    seat: owner\n    instruction: Approve it.\n    gate: review\n    document: summary-note\n"
+            ),
+            vec!["document: summary-note", "gate: review"],
+            "document",
+        ),
+    ] {
+        let dir = project(&steps, &[]);
+        let root = dir.path();
+        // The marker of the key on the clashing step (the `table:` of the
+        // first step, `collect`, is not one).
+        let text = std::fs::read_to_string(root.join(WF)).unwrap();
+        let clash_start = text
+            .find(match what {
+                w if w.contains("gate") => "  - id: approve",
+                _ => "  - id: summarise",
+            })
+            .unwrap();
+        let first_line = text[..clash_start].lines().count() as u32 + 1;
+        let lines: Vec<u32> = text
+            .lines()
+            .enumerate()
+            .filter(|(i, l)| *i as u32 + 1 >= first_line && markers.iter().any(|m| l.contains(m)))
+            .map(|(i, _)| i as u32 + 1)
+            .collect();
+        assert!(!lines.is_empty(), "{what}: markers in {text}");
+        let loaded = load(root).unwrap();
+        let hits: Vec<&am_config::Finding> = errors(&loaded.findings)
+            .into_iter()
+            .filter(|f| f.file == WF && lines.contains(&f.line) && f.message.contains(word))
+            .collect();
+        assert!(
+            !hits.is_empty(),
+            "{what}: an error at {WF}:{lines:?} naming `{word}`; found {:#?}",
+            loaded.findings
+        );
+        for f in &hits {
+            assert!(!f.fix.trim().is_empty(), "{what}: a fix: {f:#?}");
+        }
+        assert_keys_known(&loaded.findings);
+        assert!(loaded.snapshot.is_none(), "{what}: no snapshot");
+    }
+}
+
+/// Row 28, the document half (story 3.6b): a fan-out step (`seats:`)
+/// versions no document: `document:` on it is an error at the key's line
+/// (or the `seats:` line), naming `document`, with a fix.
+#[test]
+fn a_fan_out_step_declares_no_document() {
+    let dir = project(
+        &format!(
+            "{COLLECT}  - id: spread\n    seats: [writer, reader]\n    instruction: Each writes a note.\n    document: summary-note\n"
+        ),
+        &[],
+    );
+    assert_refused_at(
+        dir.path(),
+        WF,
+        &["document: summary-note", "seats: [writer, reader]"],
+        &["document"],
+    );
+}
+
+/// Row 31 (owner Q3): a document id is kebab-case and belongs to one team.
+/// `Summary_Note` is an error at its line; the same id declared by a `core`
+/// workflow and a `side` workflow is an error naming the id; declared twice
+/// by one team's workflows it is fine.
+#[test]
+fn one_document_belongs_to_one_team() {
+    let dir = project(
+        &format!(
+            "{COLLECT}  - id: summarise\n    seat: writer\n    instruction: Write the note.\n    document: Summary_Note\n"
+        ),
+        &[],
+    );
+    assert_refused_at(
+        dir.path(),
+        WF,
+        &["document: Summary_Note"],
+        &["Summary_Note"],
+    );
+
+    let side_flow = "schema_version: 2\nname: Other\nteam: side\nsteps:\n  - id: note\n    seat: outsider\n    instruction: Write the note.\n    document: summary-note\n";
+    let dir = project(
+        &format!(
+            "{COLLECT}  - id: summarise\n    seat: writer\n    instruction: Write the note.\n    document: summary-note\n"
+        ),
+        &[(OTHER_WF, side_flow)],
+    );
+    let root = dir.path();
+    let loaded = load(root).unwrap();
+    let at_core = line_of(root, WF, "document: summary-note");
+    let at_side = line_of(root, OTHER_WF, "document: summary-note");
+    let hits: Vec<&am_config::Finding> = errors(&loaded.findings)
+        .into_iter()
+        .filter(|f| {
+            ((f.file == WF && f.line == at_core) || (f.file == OTHER_WF && f.line == at_side))
+                && f.message.contains("summary-note")
+        })
+        .collect();
+    assert!(
+        !hits.is_empty(),
+        "an error at a `document: summary-note` line naming the id; found {:#?}",
+        loaded.findings
+    );
+    for f in &hits {
+        assert!(!f.fix.trim().is_empty(), "a fix: {f:#?}");
+    }
+    assert!(loaded.snapshot.is_none(), "an error gives no snapshot");
+
+    // One team's two workflows may both version it.
+    let core_flow = "schema_version: 2\nname: Again\nteam: core\nsteps:\n  - id: again\n    seat: writer\n    instruction: Write the note again.\n    document: summary-note\n";
+    let dir = project(
+        &format!(
+            "{COLLECT}  - id: summarise\n    seat: writer\n    instruction: Write the note.\n    document: summary-note\n"
+        ),
+        &[("workflows/again.yaml", core_flow)],
+    );
+    let found = load(dir.path()).unwrap().findings;
+    assert!(
+        errors(&found).is_empty(),
+        "one team, two workflows: {found:#?}"
+    );
 }

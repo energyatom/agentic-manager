@@ -330,6 +330,20 @@ that holds `table_write`, gets a warning at the step saying so, and
 it, adding or changing `table:` takes effect at Reload or startup without
 the two-step confirmation (the owner's accepted interim risk).
 
+A step may declare `document: <id>`, the one document it versions (story
+3.21): when the step succeeds, its final message (Markdown: not empty after
+trimming, no NUL, at most 1 MiB) is stored as the document's next version,
+one version per succeeded attempt, with one Draft item in the Inbox that
+only you dismiss; a final message that is no document fails the step with a
+Failure item. The id is kebab-case and belongs to one team: steps whose
+seats are in two teams cannot version the same id. A document step takes no
+`output_schema` or `loop_back` (its version is its final message as
+written), a gate step declares no document, and neither does a fan-out step
+(`seats:` or `over_folder:`). Each of these is an error at the `document:`
+line, with its fix. Until epic 4 story 17 classifies it, adding or changing
+`document:` takes effect at Reload or startup without the two-step
+confirmation (the owner's accepted interim risk).
+
 ## Templates
 
 Every template under `templates/` is a minimal project, so `agentic validate

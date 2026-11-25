@@ -1,7 +1,7 @@
 schema_version: 2
 name: Record
 team: core
-description: A writing step and a step that declares nothing.
+description: A writing step, a step that declares nothing and a document step.
 steps:
   - id: collect
     seat: writer
@@ -10,3 +10,7 @@ steps:
   - id: plain
     seat: writer
     instruction: Say in one line what was recorded.
+  - id: summarise
+    seat: writer
+    instruction: Write the summary note in Markdown.
+    document: summary-note

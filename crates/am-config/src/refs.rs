@@ -101,6 +101,8 @@ pub(crate) struct StepWrites {
     pub line: u32,
     /// `table:`, with its line.
     pub table: Option<crate::fields::Text>,
+    /// Story 3.21: `document:`, with its line (one team per document id).
+    pub document: Option<crate::fields::Text>,
     /// A single-seat step's `seat:`.
     pub seat: Option<String>,
     /// A fan-out step's `seats:`.
@@ -264,6 +266,7 @@ pub(crate) fn resolve(refs: &Refs, known: &Known, reports: &mut BTreeMap<String,
             .or_insert_with(|| Report::new(&pending.file));
         step_writes(&pending.writes, known, rep);
     }
+    document_teams(&refs.step_writes, known, reports);
     for tree in [Tree::ReportsTo, Tree::TeamParent] {
         let edges: Vec<&Edge> = refs.edges.iter().filter(|e| e.tree == tree).collect();
         for (cycle, closing) in cycles(&edges) {
@@ -380,6 +383,56 @@ fn step_writes(w: &StepWrites, known: &Known, rep: &mut Report) {
                 "switch on tables in seats/{seat}.md (`capabilities: {{ tables: {{ on: true }} }}`), or remove `table:` from the step"
             ),
         );
+    }
+}
+
+/// Story 3.21 (owner Q3; AD-29): a document id belongs to one team, its
+/// declaring seats'. A document that single-seat steps of seats in more
+/// than one team declare is an error at each `document:` line, naming the
+/// id and the teams. An unknown seat or team is reported by its own
+/// reference, so it is skipped here; a fan-out step's `document:` is an
+/// error of its own.
+fn document_teams(
+    pending: &[PendingWrites],
+    known: &Known,
+    reports: &mut BTreeMap<String, Report>,
+) {
+    // Document id → each declaration's team, file and line.
+    let mut declared: BTreeMap<&str, Vec<(&str, &str, u32)>> = BTreeMap::new();
+    for p in pending {
+        let (Some(document), Some(seat)) = (&p.writes.document, &p.writes.seat) else {
+            continue;
+        };
+        let Some(team) = known.seat_teams.get(seat) else {
+            continue;
+        };
+        declared.entry(document.value.as_str()).or_default().push((
+            team.as_str(),
+            p.file.as_str(),
+            document.line,
+        ));
+    }
+    for (id, places) in declared {
+        let teams: BTreeSet<&str> = places.iter().map(|(team, _, _)| *team).collect();
+        if teams.len() < 2 {
+            continue;
+        }
+        let named: Vec<String> = teams.iter().map(|t| format!("'{t}'")).collect();
+        for (team, file, line) in &places {
+            let rep = reports
+                .entry(file.to_string())
+                .or_insert_with(|| Report::new(file));
+            rep.error(
+                *line,
+                format!(
+                    "the document '{id}' is versioned by seats of the teams {}; a document belongs to one team, and this step's seat is in team '{team}'",
+                    named.join(" and ")
+                ),
+                format!(
+                    "give this step a document id of its own team (e.g. '{team}-{id}'), or version '{id}' only from seats of one team"
+                ),
+            );
+        }
     }
 }
 

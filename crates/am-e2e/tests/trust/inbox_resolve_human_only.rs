@@ -10,7 +10,7 @@
 //!   manifest names the Inbox, a resolve or the local API.
 //! - A WebSocket text frame from a client resolves nothing.
 //! - The CLI token alone resolves nothing: the resolve route is UI class
-//!   (`ui-class-only`, Question 4).
+//!   (`ui-class-only`, Question 4). Story 3.6b (owner Q8): a Draft too.
 //! - am-engine's code (comments and literals left out) names neither
 //!   `resolve_inbox_item` nor `HumanActor` (AD-15: no engine code path
 //!   resolves a gate).
@@ -224,6 +224,71 @@ async fn the_cli_token_alone_resolves_nothing() {
     }
     let r = rig.get(&inbox::item_path(&item), &token).await;
     assert_eq!(r.status, 200, "{}", r.text());
+}
+
+/// Row 39 (owner Q8; epic 3 story 6): a document step's Draft is
+/// dismissed only by a person, through 3.4's Human-only path. Over the API,
+/// the CLI token alone (no browser session) is refused `ui-class-only` for
+/// `dismiss` and every other decision, and the Draft stays open. In the
+/// store, no command resolves it: the engine's `ApplyResolution` on the
+/// open Draft is refused (it applies only a decision a person committed)
+/// and changes nothing. That `Writer::resolve_inbox_item` takes only a
+/// `HumanActor` is the doctests' (`compile_fail` with `Actor::System` and
+/// `Actor::Seat`), and the writer's own refusal of a non-Human actor is
+/// am-store's unit test.
+#[tokio::test]
+async fn a_draft_cannot_be_dismissed_by_a_non_human() {
+    let rig = inbox::with_project_writer().await;
+    let store = rig.store.as_ref().expect("a project");
+    let db = rig.runtime.as_ref().unwrap().state_db();
+    let plan = plan(vec![documenting(
+        step("summarise", texts(&["# Note\n\nOne line."])),
+        DOCUMENT,
+    )]);
+    let outcome = run_plan(store, owner(), "manual", &plan, CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(outcome.status, "succeeded", "{outcome:?}");
+    let before = journal(&db);
+    let draft = before
+        .items
+        .iter()
+        .find(|i| i.kind == am_domain::InboxKind::Draft)
+        .expect("the document step's Draft")
+        .clone();
+    assert_eq!(draft.status, "open");
+    let token = vec![(TOKEN_HEADER, rig.token())];
+
+    for body in [
+        r#"{"decision":"dismiss"}"#,
+        r#"{"decision":"approve"}"#,
+        r#"{"decision":"reject"}"#,
+    ] {
+        let r = rig
+            .send("POST", &inbox::resolve_path(&draft.id), &token, body)
+            .await;
+        envelope(&r, 403, "ui-class-only");
+    }
+    let refused = store.writer().exec(
+        engine(),
+        am_store::WriteCommand::ApplyResolution {
+            item_id: draft.id.clone(),
+            past_max: None,
+        },
+    );
+    assert!(refused.is_err(), "no command resolves a Draft: {refused:?}");
+
+    let after = journal(&db);
+    let row = Reader::open(&db)
+        .unwrap()
+        .inbox_item(&draft.id)
+        .unwrap()
+        .expect("the Draft");
+    assert_eq!(row.status, "open");
+    assert_eq!((row.decision, row.resolved_by), (None, None));
+    assert_eq!(after.items, before.items);
+    assert_eq!(after.steps, before.steps);
+    assert!(after.entries("inbox.resolved").is_empty());
 }
 
 /// `text` with its comments and its string and char literals blanked out,

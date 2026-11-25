@@ -998,6 +998,7 @@ fn step_fields(problems: &mut Vec<String>, want: &Step, got: &Step) {
         max_returns,
         limits,
         table,
+        document,
         fan_out,
         seats,
     } = want;
@@ -1018,6 +1019,7 @@ fn step_fields(problems: &mut Vec<String>, want: &Step, got: &Step) {
     differ(problems, &at("max_returns"), max_returns, &got.max_returns);
     differ(problems, &at("limits"), limits, &got.limits);
     differ(problems, &at("table"), table, &got.table);
+    differ(problems, &at("document"), document, &got.document);
     differ(problems, &at("fan_out"), fan_out, &got.fan_out);
     differ(problems, &at("seats"), seats, &got.seats);
 }

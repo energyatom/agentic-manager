@@ -1,6 +1,6 @@
 schema_version: 2
 name: Rows and Documents
-description: A synthetic project whose steps write table rows (epic 3 story 6).
+description: A synthetic project whose steps write table rows and a document version (epic 3 story 6).
 timezone: UTC
 currency: EUR
 teams:

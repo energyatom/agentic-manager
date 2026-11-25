@@ -208,6 +208,10 @@ name = "rows_idempotent"
 path = "tests/engine/rows_idempotent.rs"
 
 [[test]]
+name = "documents_versions"
+path = "tests/engine/documents_versions.rs"
+
+[[test]]
 name = "capabilities_tables_grant"
 path = "tests/trust/capabilities_tables_grant.rs"
 
@@ -234,6 +238,14 @@ path = "tests/trust/taint_rows_reader_fence.rs"
 [[test]]
 name = "taint_rows_reader_start"
 path = "tests/trust/taint_rows_reader_start.rs"
+
+[[test]]
+name = "taint_documents_untrusted_markdown"
+path = "tests/trust/taint_documents_untrusted_markdown.rs"
+
+[[test]]
+name = "taint_documents_at_rest"
+path = "tests/trust/taint_documents_at_rest.rs"
 
 [[test]]
 name = "rule_16_row_provenance"

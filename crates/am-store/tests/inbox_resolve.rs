@@ -587,10 +587,10 @@ fn a_resolved_item_never_changes_again() {
 
 /// Row 24: a decision fits its item's kind. `Decision`'s spellings; the
 /// table (Review: approve, return, reject; Question: answer; Failure:
-/// dismiss; Approval, Draft, Budget ask and Proposal: none in this story).
-/// A decision that does not fit is refused and changes nothing; the four
-/// kinds this story does not resolve are refused in words naming the story
-/// each arrives with.
+/// dismiss; Draft: dismiss, since story 3.6b; Approval, Budget ask and
+/// Proposal: none yet). A decision that does not fit is refused and changes
+/// nothing; the three kinds no story built so far resolves are refused in
+/// words naming the story each arrives with.
 #[test]
 fn a_decision_must_fit_the_kind() {
     assert_eq!(
@@ -614,9 +614,14 @@ fn a_decision_must_fit_the_kind() {
         Decision::allowed_for(InboxKind::Failure),
         &[Decision::Dismiss]
     );
+    // Story 3.6b (owner Q8): a Draft is dismissed, through this same
+    // Human-only resolve (its own tests are in documents.rs).
+    assert_eq!(
+        Decision::allowed_for(InboxKind::Draft),
+        &[Decision::Dismiss]
+    );
     for kind in [
         InboxKind::Approval,
-        InboxKind::Draft,
         InboxKind::BudgetAsk,
         InboxKind::Proposal,
     ] {
@@ -662,7 +667,6 @@ fn a_decision_must_fit_the_kind() {
     );
     for (kind, story) in [
         (InboxKind::Approval, "4.8"),
-        (InboxKind::Draft, "3.6"),
         (InboxKind::BudgetAsk, "4.3"),
         (InboxKind::Proposal, "4.10"),
     ] {

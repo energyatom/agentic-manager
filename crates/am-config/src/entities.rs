@@ -358,6 +358,15 @@ pub struct Step {
     /// effect at Reload or startup without the two-step confirmation until
     /// epic 4 story 17 classifies it as widening (owner Q3, accepted).
     pub table: Option<String>,
+    /// Story 3.21 (AD-29, AD-35, owner Q3 and Q5): `document:`, the one
+    /// document the step versions: its final message (Markdown) is stored
+    /// as the next version when it succeeds, with a Draft item. A kebab-case
+    /// id that belongs to one team (its declaring seats'); not with
+    /// `output_schema`, `loop_back` or `gate`, and not on a fan-out step.
+    /// Adding or changing it takes effect at Reload or startup without the
+    /// two-step confirmation until epic 4 story 17 classifies it as widening
+    /// (owner Q3, accepted).
+    pub document: Option<String>,
     /// Whether the step fans out (AD-40): it declares `seats:` or
     /// `over_folder:` with a value. Decided once, here, for `agentic
     /// validate` and `agentic run` alike (the ToolGate slice's review round

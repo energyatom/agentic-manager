@@ -2305,6 +2305,59 @@ fn hand_off_checks(rep: &mut Report, steps: &[StepHandOff]) {
     }
 }
 
+/// Story 3.21 (AD-29, AD-36, AD-40): a document step's version is its final
+/// message as written, so the step takes no `output_schema` (a JSON reply
+/// is no Markdown note) and no `loop_back` (whose reply is its reasons);
+/// a gate makes no model call, so it writes no document; and a fan-out
+/// step versions none (one version per succeeded attempt, story 3.14 runs
+/// fan-out). Each is an error at the `document:` line, with its fix.
+fn document_checks(rep: &mut Report, s: &Fields, document: &Text, gate: bool, fan_out: bool) {
+    let id = &document.value;
+    let clash = |key: &str, why: &str| -> (String, String) {
+        (
+            format!(
+                "a step with `document: {id}` declares `{key}`; {why}, so a document step takes no `{key}:`"
+            ),
+            format!(
+                "remove `{key}:` from the step, or remove `document:` and version the document from a step of its own"
+            ),
+        )
+    };
+    let mut found = Vec::new();
+    if gate {
+        found.push((
+            format!(
+                "a step with `gate: review` declares `document: {id}`; a gate makes no model call, so it writes no document"
+            ),
+            "remove `document:` from the gate step, and declare it on the step whose output the gate reviews".to_string(),
+        ));
+    } else {
+        if !s.absent("output_schema") {
+            found.push(clash(
+                "output_schema",
+                "the document's version is the step's final message as written, in Markdown, not a JSON object a schema checks",
+            ));
+        }
+        if !s.absent("loop_back") {
+            found.push(clash(
+                "loop_back",
+                "a loop-back step's final message is its reasons, not the document's text",
+            ));
+        }
+    }
+    if fan_out {
+        found.push((
+            format!(
+                "a fan-out step (`seats:` or `over_folder:`) declares `document: {id}`; a fan-out step versions no document (story 3.14 runs fan-out)"
+            ),
+            "remove `document:` from the fan-out step, and version the document from a step with one `seat:`".to_string(),
+        ));
+    }
+    for (message, fix) in found {
+        rep.error(document.line, message, fix);
+    }
+}
+
 /// The ids of the steps before step `i`, for a fix.
 fn earlier_ids(steps: &[StepHandOff], i: usize) -> String {
     let ids: Vec<&str> = steps[..i].iter().filter_map(|s| s.id.as_deref()).collect();
@@ -2376,6 +2429,7 @@ pub(crate) fn workflow(
             "output_schema",
             "max_tokens",
             "table",
+            "document",
         ];
         allowed.extend_from_slice(STEP_LOOP_KEYS);
         allowed.extend_from_slice(RUN_GRAPH_KEYS);
@@ -2412,6 +2466,10 @@ pub(crate) fn workflow(
         if let Some(t) = &table {
             refs.push(rep, t.line, RefKind::Table, &t.value);
         }
+        // Story 3.21 (AD-29, owner Q3): the one document the step versions,
+        // a kebab-case id; checked below against the step's other keys and,
+        // once every file is read, for one team per document.
+        let document = s.id(rep, "document");
         let fan_out_seats = declared_seats(&s);
         let (loop_back, to) = step_loop_back(rep, &s);
         let gate = step_gate(rep, &s);
@@ -2434,6 +2492,9 @@ pub(crate) fn workflow(
                 }
             }
         }
+        if let Some(d) = &document {
+            document_checks(rep, &s, d, gate.is_some() || !s.absent("gate"), fan_out);
+        }
         hand_offs.push(StepHandOff {
             id: id.as_ref().map(|t| t.value.clone()),
             loop_back_to: to,
@@ -2446,6 +2507,7 @@ pub(crate) fn workflow(
                     step: id.value.clone(),
                     line: s.line,
                     table: table.clone(),
+                    document: document.clone(),
                     seat: if fan_out {
                         None
                     } else {
@@ -2473,6 +2535,7 @@ pub(crate) fn workflow(
                 max_returns,
                 limits,
                 table: value(table),
+                document: value(document),
                 fan_out,
                 seats: fan_out_seats,
             });

@@ -84,6 +84,16 @@
 //! the engine's own result (`Part::EngineResult`), which leaves the
 //! attempt's taint as it was (AD-10 as amended 2026-11-24).
 //!
+//! **Documents (story 3.21; AD-28, AD-29, AD-43).** A step that declares
+//! a document stores its final message, once validated (not empty after
+//! trimming, no NUL, at most 1 MiB), as the document's next version when it
+//! succeeds, and raises one Draft item on its attempt, in the transaction
+//! that finishes it (`SettleAndFinishDocumentStep`); the Draft's words are
+//! the engine's and it never blocks the run. A final message that cannot be
+//! a version fails the step with a Failure item and no version. A document
+//! step takes no output schema, no loop-back and is no gate (refused before
+//! any row).
+//!
 //! A provider error, a reply cut off at its output limit or a cancelled
 //! call fails the step and the run with the reason in words and no item
 //! (story 3.8 adds Failure items for those); the failed turn's text is not
@@ -105,7 +115,8 @@ use am_domain::{
 };
 use am_store::{
     AttemptWrites, CallPurpose, CallSettlement, NewInboxItem, NewPromptPart, PromptKind,
-    PromptSlot, Reader, StepInput, StepRow, Store, StoreError, WriteCommand, new_id,
+    PromptSlot, Reader, StepInput, StepRow, Store, StoreError, WriteCommand, markdown_refusal,
+    new_id,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -205,8 +216,10 @@ pub struct StepPlan {
     /// with its owning team and columns; binds `table_write`, never grants
     /// it. A gate declares none.
     pub table: Option<DeclaredTable>,
-    /// Inert until story 3.6b: any value refuses the plan in words naming
-    /// 3.6b.
+    /// Story 3.21 (AD-29, owner Q5 to Q8): the one document the step
+    /// versions (`document:`): its validated final message becomes the
+    /// document's next version when it succeeds, with a Draft item. Not with
+    /// an output schema or a loop-back, and not on a gate.
     pub document: Option<String>,
     /// Story 3.22 (AD-10, AD-43): the rows the step reads at each attempt's
     /// start, through `row_inputs`: each is a `row` input naming
@@ -262,9 +275,10 @@ pub enum RunError {
     #[error("the run's tools were refused: {0}")]
     Tools(String),
     /// Story 3.6 (AD-21, AD-36): what a step declares it writes cannot be
-    /// written (a table on a gate, a table of another team than its seat's,
-    /// a document before story 3.6b), or a gate names rows to read (story
-    /// 3.22); nothing was written.
+    /// written (a table on a gate, a table of another team than its seat's;
+    /// since story 3.21 a document with an output schema or a loop-back, or
+    /// on a gate), or a gate names rows to read (story 3.22); nothing was
+    /// written.
     #[error("step `{step}` cannot run: {why}")]
     Writes { step: String, why: String },
     /// The run could not be created: the journal holds nothing of it.
@@ -485,19 +499,58 @@ async fn run_on(
 /// Story 3.6 (AD-21, AD-36): refuses a plan, before anything is written,
 /// whose step declares a table on a gate (a gate makes no model call) or a
 /// table of another team than its seat's (a seat writes only its own
-/// team's tables), or any document (versioned from story 3.6b on); since
-/// story 3.22, a gate that names rows to read. The words name config ids
-/// only.
+/// team's tables); since story 3.22, a gate that names rows to read; since
+/// story 3.21, a document step that is a gate, loops back or has an output
+/// schema (its version is its final message as written), a document id that
+/// is not a config id, a writing step with no seat, and one document
+/// declared by seats of two teams. The words name config ids only.
 fn check_writes(plan: &RunPlan) -> Result<(), RunError> {
     for step in &plan.steps {
         let refused = |why: String| RunError::Writes {
             step: step.key.clone(),
             why,
         };
+        // Review round 2: a step that writes names the seat that writes it.
+        if (step.document.is_some() || step.table.is_some()) && step.seat.trim().is_empty() {
+            return Err(refused(
+                "it writes a document or a table and names no seat; a write is made by the seat that runs the step, so a writing step names one".into(),
+            ));
+        }
         if let Some(document) = &step.document {
-            return Err(refused(format!(
-                "it declares the document `{document}`, and documents are versioned from story 3.6b on, so this version writes none"
-            )));
+            // Review round 2: the one config-id rule (am-domain's), as the
+            // validator and the store apply it.
+            if !am_domain::config_names::is_config_id(document) {
+                return Err(refused(
+                    "it declares a document whose id is not a config id (kebab-case: lowercase letters and digits joined by hyphens); a document is named by its config id".into(),
+                ));
+            }
+            // Owner Q3: a document belongs to one team, its declaring
+            // seats'.
+            if let Some(first) = plan.steps.iter().find(|other| {
+                other.document.as_deref() == Some(document.as_str())
+                    && other.seat_team != step.seat_team
+            }) {
+                return Err(refused(format!(
+                    "it declares the document `{document}` on a seat of team `{}`, and step `{}` declares it on a seat of team `{}`; a document belongs to one team",
+                    step.seat_team, first.key, first.seat_team
+                )));
+            }
+            if matches!(step.hand_off, HandOff::Gate { .. }) {
+                return Err(refused(format!(
+                    "it is a gate and declares the document `{document}`; a gate makes no model call, so it writes no document"
+                )));
+            }
+            if matches!(step.hand_off, HandOff::LoopBack { .. }) {
+                return Err(refused(format!(
+                    "it declares the document `{document}` and loops back; a loop-back step's final message is its reasons, not the document's text, so a document step takes no loop_back"
+                )));
+            }
+            if let Some(schema) = &step.output_schema {
+                return Err(refused(format!(
+                    "it declares the document `{document}` and the output schema `{}`; the document's version is the step's final message as written (Markdown), so a document step takes no output schema",
+                    schema.id
+                )));
+            }
         }
         // Story 3.22 (review triage round 1, R3): no model and no person
         // sees what a gate would read, so a gate reads no row.
@@ -1272,10 +1325,12 @@ impl Run<'_> {
                     // Story 3.6 (AD-21): the attempt's seat and the one table
                     // its step declares, which the store checks every row
                     // write against.
+                    // Story 3.21: and the one document it versions, which the
+                    // store checks its finish against.
                     writes: AttemptWrites {
                         seat: step.seat.clone(),
                         table: step.table.as_ref().map(|t| t.id.clone()),
-                        document: None,
+                        document: step.document.clone(),
                     },
                 },
             );
@@ -1849,14 +1904,14 @@ impl Run<'_> {
         progress: &mut Progress,
     ) -> Result<StepEnd, StoreError> {
         let HandOff::LoopBack { to, field, max } = &step.hand_off else {
-            return self.succeed(row, call_id, out, progress);
+            return self.succeed(step, row, call_id, out, carry, progress);
         };
         let reasons = match reasons_in(&out.text, field) {
             Ok(reasons) => reasons,
             Err(why) => return self.fail(step, row, Some((call_id, out.usage)), why, progress),
         };
         if reasons.is_empty() {
-            return self.succeed(row, call_id, out, progress);
+            return self.succeed(step, row, call_id, out, carry, progress);
         }
         // The count is the journal's: this step's attempts that looped back.
         let looped = self
@@ -1901,11 +1956,16 @@ impl Run<'_> {
 
     fn succeed(
         &self,
+        step: &StepPlan,
         row: &StepRow,
         call_id: String,
         out: ChatOutcome,
+        carry: Taint,
         progress: &mut Progress,
     ) -> Result<StepEnd, StoreError> {
+        if let Some(document) = &step.document {
+            return self.version(step, row, document, call_id, out, carry, progress);
+        }
         // The settlement and the step's finish commit together (AD-8).
         self.exec(
             engine(),
@@ -1920,6 +1980,114 @@ impl Run<'_> {
         )?;
         progress.open_step = None;
         Ok(StepEnd::Moved)
+    }
+
+    /// Story 3.21 (AD-28, AD-29, AD-43): a document step's success. Its
+    /// final message must be a document ([`markdown_refusal`]): otherwise
+    /// the step fails with a Failure item and no version. Then the call's
+    /// settlement, the step's finish with the Markdown as its output, the
+    /// version (numbered by the writer) and one Draft item on the attempt
+    /// commit together. The Draft's words are the engine's: the document id,
+    /// the version, the step and the run; never the Markdown. Its number is
+    /// the one the writer commits: the engine sends the number it read as
+    /// next, the writer refuses any other ([`StoreError::StaleVersion`]),
+    /// and the engine reads it again once (review round 2).
+    #[allow(clippy::too_many_arguments)]
+    fn version(
+        &self,
+        step: &StepPlan,
+        row: &StepRow,
+        document: &str,
+        call_id: String,
+        out: ChatOutcome,
+        carry: Taint,
+        progress: &mut Progress,
+    ) -> Result<StepEnd, StoreError> {
+        if let Some(words) = markdown_refusal(&out.text) {
+            return self.fail_with_item(
+                step,
+                row,
+                carry,
+                Some(CallSettlement {
+                    call_id,
+                    usage: out.usage,
+                    cost_micro_usd: None,
+                }),
+                None,
+                Cap::Document {
+                    id: document.to_string(),
+                    words,
+                },
+                progress,
+            );
+        }
+        // Review round 2: the Draft names the number the writer gives the
+        // version. The engine reads the next one and sends it as the number
+        // it expects; a finish of another run that took it first is refused
+        // (`StaleVersion`, nothing written), and the number is read again
+        // once. A second refusal fails the step with a Failure item.
+        let mut stale = None;
+        for _ in 0..2 {
+            let next = self
+                .store
+                .reader()?
+                .latest_document_version(document)?
+                .map_or(1, |v| v + 1);
+            let item = NewInboxItem {
+                id: new_id(),
+                kind: InboxKind::Draft,
+                payload: Some(row.id.clone()),
+                taint: carry,
+                title: format!("Draft: {document} version {next}"),
+                body: format!(
+                    "Step `{}` wrote version {next} of {document} in run {}. Drafts only: Agentic Manager never sends it.",
+                    step.key, self.run_id
+                ),
+                max_returns: None,
+            };
+            let sent = self.exec(
+                engine(),
+                WriteCommand::SettleAndFinishDocumentStep {
+                    call_id: call_id.clone(),
+                    usage: out.usage,
+                    cost_micro_usd: None,
+                    step_run_id: row.id.clone(),
+                    output: out.text.clone(),
+                    version_id: new_id(),
+                    document_id: document.to_string(),
+                    expected_version: next,
+                    item,
+                },
+            );
+            match sent {
+                Ok(()) => {
+                    progress.open_step = None;
+                    return Ok(StepEnd::Moved);
+                }
+                Err(StoreError::StaleVersion { expected, next, .. }) => {
+                    stale = Some((expected, next));
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        let (expected, next) = stale.unwrap_or_default();
+        self.fail_with_item(
+            step,
+            row,
+            carry,
+            Some(CallSettlement {
+                call_id,
+                usage: out.usage,
+                cost_micro_usd: None,
+            }),
+            None,
+            Cap::VersionTaken {
+                id: document.to_string(),
+                expected,
+                next,
+            },
+            progress,
+        )
     }
 
     /// The step fails for `why` with no Inbox item (story 3.1's failures):
@@ -2093,6 +2261,21 @@ enum Cap {
         words: String,
         iterations: u32,
     },
+    /// Story 3.21 (AD-29): a document step's final message cannot be a
+    /// version of its document `id`. `words` are the engine's rule
+    /// ([`markdown_refusal`]), never the text.
+    Document {
+        id: String,
+        words: String,
+    },
+    /// Review round 2: twice, another run versioned the document `id`
+    /// between the engine's read of the next number and its finish; the
+    /// last finish expected `expected`, and the next number was `next`.
+    VersionTaken {
+        id: String,
+        expected: i64,
+        next: i64,
+    },
 }
 
 impl Cap {
@@ -2130,6 +2313,12 @@ impl Cap {
             } => format!(
                 "its final message does not match the output schema `{id}` ({words}), and its iterations cap of {iterations} model turns (limits.iterations) left no turn to repair it"
             ),
+            Cap::Document { id, words } => {
+                format!("it declares the document `{id}`, and {words}")
+            }
+            Cap::VersionTaken { id, expected, next } => format!(
+                "another run versioned the document `{id}` while this step finished, twice: it expected version {expected}, and the next was {next}"
+            ),
         }
     }
 
@@ -2138,6 +2327,9 @@ impl Cap {
             Cap::LoopBack { .. } => format!("Step {key} looped back too often"),
             Cap::Schema { .. } | Cap::SchemaNoTurn { .. } | Cap::SchemaNoTime { .. } => {
                 format!("Step {key} did not match its output schema")
+            }
+            Cap::Document { id, .. } | Cap::VersionTaken { id, .. } => {
+                format!("Step {key} wrote no version of {id}")
             }
             _ => format!("Step {key} stopped at a cap"),
         }
@@ -2177,6 +2369,12 @@ impl Cap {
                 iterations,
             } => format!(
                 "Step `{key}` ended with a final message that does not match its output schema `{id}` ({words}), and its iterations cap of {iterations} model turns (limits.iterations) left no turn to repair it, so the step failed and the run failed. The call is in step run {step_run}."
+            ),
+            Cap::Document { id, words } => format!(
+                "Step `{key}` declares the document `{id}`, and {words}. The step failed and the run failed; no version and no Draft were written. The call is in step run {step_run}; a message that is no document is not stored as the step's output."
+            ),
+            Cap::VersionTaken { id, expected, next } => format!(
+                "Step `{key}` declares the document `{id}`, and twice another run versioned it while this step finished (it expected version {expected}, and the next was {next}). The step failed and the run failed; no version and no Draft were written. The call is in step run {step_run}; run the workflow again."
             ),
         }
     }
@@ -2351,6 +2549,225 @@ mod tests {
         let run = store.reader().unwrap().run(run_id).unwrap().unwrap();
         assert_eq!(run.status, "running");
         assert_eq!(run.finished_at, None);
+    }
+
+    // ------------------------------------------- a version taken first
+    //
+    // Review round 2 (S3): the Draft names the number the writer commits.
+    // The seam is `run_on`'s `exec`: before it sends the engine's document
+    // finish it may commit a version of the same document from another run,
+    // so the number the engine read is taken between its read and its send.
+
+    /// The document the tests' step versions.
+    const NOTE: &str = "note-doc";
+
+    /// `one_step` on `provider`, versioning [`NOTE`].
+    fn one_document_step(provider: Arc<dyn LlmProvider>) -> RunPlan {
+        let mut plan = one_step(provider);
+        plan.steps[0].document = Some(NOTE.into());
+        plan
+    }
+
+    /// Another run versions [`NOTE`], taking its next number: that number.
+    fn take_the_next_version(store: &Store) -> i64 {
+        let w = store.writer();
+        let engine = Actor::System {
+            component: "engine".into(),
+        };
+        let run = new_id();
+        w.exec(
+            engine.clone(),
+            WriteCommand::CreateRun {
+                run_id: run.clone(),
+                workflow: "other".into(),
+                origin: "manual".into(),
+                steps: vec!["other".into()],
+                config_hash: None,
+            },
+        )
+        .unwrap();
+        let reader = store.reader().unwrap();
+        let step = reader.steps(&run).unwrap()[0].id.clone();
+        w.exec(
+            engine.clone(),
+            WriteCommand::StartAttempt {
+                step_run_id: step.clone(),
+                inputs: vec![],
+                taint: Taint::Clean,
+                prompt: vec![],
+                writes: AttemptWrites {
+                    seat: "seat-other".into(),
+                    table: None,
+                    document: Some(NOTE.into()),
+                },
+            },
+        )
+        .unwrap();
+        let call = new_id();
+        w.exec(
+            engine.clone(),
+            WriteCommand::ReserveCall {
+                step_run_id: step.clone(),
+                call_id: call.clone(),
+                call_seq: 1,
+                reserved_micro_usd: 0,
+                rate_snapshot: NO_RATE_SNAPSHOT.into(),
+                taint: Taint::Clean,
+                purpose: CallPurpose::Turn,
+                prompt: vec![],
+            },
+        )
+        .unwrap();
+        let next = reader
+            .latest_document_version(NOTE)
+            .unwrap()
+            .map_or(1, |v| v + 1);
+        w.exec(
+            engine,
+            WriteCommand::SettleAndFinishDocumentStep {
+                call_id: call,
+                usage: None,
+                cost_micro_usd: None,
+                step_run_id: step.clone(),
+                output: "# Another run's note\n".into(),
+                version_id: new_id(),
+                document_id: NOTE.into(),
+                expected_version: next,
+                item: NewInboxItem {
+                    id: new_id(),
+                    kind: InboxKind::Draft,
+                    payload: Some(step),
+                    taint: Taint::Clean,
+                    title: format!("Draft: {NOTE} version {next}"),
+                    body: "Another run's Draft.".into(),
+                    max_returns: None,
+                },
+            },
+        )
+        .unwrap();
+        next
+    }
+
+    /// Runs `plan` on `store`; before the engine's n-th document finish is
+    /// sent, other runs take the next `taken[n]` versions (none past the
+    /// list). The outcome and the version each of the engine's finishes
+    /// expected.
+    async fn run_with_versions_taken(
+        store: &Store,
+        plan: &RunPlan,
+        taken: &[usize],
+    ) -> (RunOutcome, Vec<i64>) {
+        let writer: Writer = store.writer();
+        let sent = Mutex::new(Vec::new());
+        let exec = |actor: Actor, cmd: WriteCommand| {
+            if let WriteCommand::SettleAndFinishDocumentStep {
+                expected_version, ..
+            } = &cmd
+            {
+                let mut sent = sent.lock().unwrap();
+                for _ in 0..taken.get(sent.len()).copied().unwrap_or(0) {
+                    take_the_next_version(store);
+                }
+                sent.push(*expected_version);
+            }
+            writer.exec(actor, cmd)
+        };
+        let outcome = run_on(
+            store,
+            &exec,
+            owner(),
+            "manual",
+            plan,
+            CancellationToken::new(),
+            Tooling::shipped(store, plan),
+        )
+        .await
+        .unwrap();
+        let sent = sent.into_inner().unwrap();
+        (outcome, sent)
+    }
+
+    /// The engine read 1 as the next version; other runs took versions 1
+    /// and 2 before the finish was sent. The writer refuses that finish with
+    /// nothing written; the engine reads the number again (a fresh read
+    /// gives 3, where a blind + 1 would send 2 and be refused again) and
+    /// sends 3, and the Draft names version 3, the one committed, never 1
+    /// or 2 (review round 3, G2).
+    #[tokio::test]
+    async fn a_taken_version_is_read_again_and_the_draft_names_the_committed_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("state.db")).unwrap();
+        let plan = one_document_step(Arc::new(FakeLlm::new(vec![ScriptedTurn::text(
+            "# Note\n\nOne line.\n",
+        )])));
+
+        let (outcome, sent) = run_with_versions_taken(&store, &plan, &[2]).await;
+
+        assert_eq!(outcome.status, "succeeded", "{outcome:?}");
+        assert_eq!(sent, vec![1, 3], "the number is read again, fresh, once");
+        let reader = store.reader().unwrap();
+        let versions = reader.document_versions(NOTE).unwrap();
+        let ours: Vec<_> = versions
+            .iter()
+            .filter(|v| v.run_id == outcome.run_id)
+            .collect();
+        assert_eq!(versions.len(), 3, "{versions:#?}");
+        assert_eq!(ours.len(), 1, "{versions:#?}");
+        assert_eq!(ours[0].version, 3);
+        let items = reader.inbox_items(&outcome.run_id).unwrap();
+        assert_eq!(items.len(), 1, "{items:#?}");
+        assert_eq!(items[0].kind, InboxKind::Draft);
+        assert_eq!(
+            items[0].payload.as_deref(),
+            Some(ours[0].step_run_id.as_str())
+        );
+        for words in [&items[0].title, &items[0].body] {
+            assert!(words.contains("version 3"), "{words}");
+            for stale in ["version 1", "version 2"] {
+                assert!(!words.contains(stale), "{words}");
+            }
+        }
+        let step = &reader.steps(&outcome.run_id).unwrap()[0];
+        assert_eq!(step.status, "succeeded");
+        assert!(reader.calls_for_step(&step.id).unwrap()[0].settled);
+    }
+
+    /// Another run takes the next version before each of the engine's two
+    /// finishes: the second refusal fails the step with one Failure item
+    /// (its words the engine's), and the run writes no version and no
+    /// Draft.
+    #[tokio::test]
+    async fn a_version_taken_twice_fails_the_step_with_a_failure_item() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("state.db")).unwrap();
+        let plan = one_document_step(Arc::new(FakeLlm::new(vec![ScriptedTurn::text(
+            "# Note\n\nOne line.\n",
+        )])));
+
+        let (outcome, sent) = run_with_versions_taken(&store, &plan, &[1, 1]).await;
+
+        assert_eq!(outcome.status, "failed", "{outcome:?}");
+        assert_eq!(sent, vec![1, 2], "read again once, then no more");
+        let reader = store.reader().unwrap();
+        let versions = reader.document_versions(NOTE).unwrap();
+        assert_eq!(versions.len(), 2, "the other runs' two: {versions:#?}");
+        assert!(versions.iter().all(|v| v.run_id != outcome.run_id));
+        let items = reader.inbox_items(&outcome.run_id).unwrap();
+        assert_eq!(
+            items.iter().map(|i| i.kind).collect::<Vec<_>>(),
+            vec![InboxKind::Failure],
+            "{items:#?}"
+        );
+        assert_eq!(outcome.item.as_deref(), Some(items[0].id.as_str()));
+        assert!(items[0].body.contains(NOTE), "{}", items[0].body);
+        let step = &reader.steps(&outcome.run_id).unwrap()[0];
+        assert_eq!(step.status, "failed");
+        assert_eq!(step.output, None);
+        assert!(reader.calls_for_step(&step.id).unwrap()[0].settled);
+        assert!(
+            outcome.reason.as_deref().unwrap_or_default().contains(NOTE),
+            "{outcome:?}"
+        );
     }
 
     /// A step failed for the provider's reason, then the store refused a

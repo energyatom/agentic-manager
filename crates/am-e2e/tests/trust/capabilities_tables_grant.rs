@@ -303,4 +303,5 @@ async fn every_tool_request_goes_through_toolgate() {
         offered(&llm.requests()[2]).is_empty(),
         "the step with no table is offered nothing"
     );
+    assert!(j.attempts("summarise").iter().all(|s| s.status == "queued"));
 }
