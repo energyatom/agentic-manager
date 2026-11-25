@@ -11,6 +11,14 @@
 //! argument, `None` for a provider with one fixed endpoint. Written before
 //! the argument exists.
 //!
+//! Story 2.10 (AD-15 *Keyless loopback Account*): the builders take the
+//! Account's key state (`am_config::KeyState`) as their last argument:
+//! `Stored` writes `secret_ref: <id>`, `None` (a keyless Account on this
+//! Mac) writes no `secret_ref`; `change_account_edit` sets or removes the
+//! line when the file's entry disagrees with the state it is given. Every
+//! call below passes `Stored` (the line they always wrote). Written before
+//! the argument exists.
+//!
 //! Story 2.12 (AD-17): the edit targets the user Accounts file,
 //! `<app data dir>/accounts.yaml` (`USER_ACCOUNTS_FILE`), read by
 //! `accounts_file(<app data dir>)` and written by
@@ -23,8 +31,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use am_config::{
-    ConfigCreate, ConfigWriter, Severity, USER_ACCOUNTS_FILE, WriteError, accounts_file,
-    add_account_edit, new_accounts_file, remove_account_edit, user_accounts,
+    ConfigCreate, ConfigWriter, KeyState, Severity, USER_ACCOUNTS_FILE, WriteError, accounts_file,
+    add_account_edit, change_account_edit, key_ref, key_state, new_accounts_file,
+    remove_account_edit, user_accounts,
 };
 use am_domain::{Actor, ConfigHistory, HistoryKind};
 use am_testkit::InMemoryConfigHistory;
@@ -90,7 +99,7 @@ fn an_edit_built_on_other_bytes_is_refused_and_writes_nothing() {
     );
     std::fs::write(file_of(root), &appeared).unwrap();
 
-    let add = add_account_edit(&seen, "cloud2", "anthropic", None, None);
+    let add = add_account_edit(&seen, "cloud2", "anthropic", None, None, KeyState::Stored);
     let err = w
         .apply_with_audit(owner(), add, &built_on, Vec::new())
         .unwrap_err();
@@ -109,7 +118,7 @@ fn an_edit_built_on_other_bytes_is_refused_and_writes_nothing() {
     let entry = w
         .apply_with_audit(
             owner(),
-            add_account_edit(&now, "cloud2", "anthropic", None, None),
+            add_account_edit(&now, "cloud2", "anthropic", None, None, KeyState::Stored),
             now.sha256.as_deref().unwrap(),
             Vec::new(),
         )
@@ -189,7 +198,7 @@ fn an_appended_account_carries_its_base_url_only_when_given() {
         let now = accounts_file(root);
         w.apply_with_audit(
             owner(),
-            add_account_edit(&now, id, provider, name, base_url),
+            add_account_edit(&now, id, provider, name, base_url, KeyState::Stored),
             now.sha256.as_deref().unwrap(),
             Vec::new(),
         )
@@ -232,6 +241,7 @@ fn an_account_set_into_an_empty_file_carries_its_base_url() {
             "openai-compatible",
             None,
             Some("http://127.0.0.1:8080/v1"),
+            KeyState::Stored,
         ),
         now.sha256.as_deref().unwrap(),
         Vec::new(),
@@ -273,7 +283,7 @@ fn a_new_accounts_file_holds_the_base_url_only_when_given() {
         ("cloud2", "anthropic", Some("Second cloud"), None),
     ];
     for (id, provider, name, base_url) in cases {
-        let bytes = new_accounts_file(id, provider, name, base_url).unwrap();
+        let bytes = new_accounts_file(id, provider, name, base_url, KeyState::Stored).unwrap();
         let text = String::from_utf8(bytes.clone()).unwrap();
         assert_eq!(
             text.contains("base_url"),
@@ -309,7 +319,14 @@ fn the_writer_creates_a_new_accounts_file_that_holds_a_base_url() {
         let w = ConfigWriter::for_user_accounts(root, Arc::new(InMemoryConfigHistory::default()))
             .unwrap();
 
-        let bytes = new_accounts_file("cloud", "openai-compatible", None, Some(base_url)).unwrap();
+        let bytes = new_accounts_file(
+            "cloud",
+            "openai-compatible",
+            None,
+            Some(base_url),
+            KeyState::Stored,
+        )
+        .unwrap();
         let entry = w
             .create(
                 owner(),
@@ -366,4 +383,144 @@ fn the_read_names_the_errors_of_each_entry() {
     for id in ["cloud", "fine", "absent"] {
         assert_eq!(file.entry_errors(id), Vec::<String>::new(), "{id}");
     }
+}
+
+// ------------------------------------------------------------ story 2.10
+
+/// Story 2.10 (matrix rows 1, 21 and 23): a keyless item has no
+/// `secret_ref`, in a new file and when appended, and loads clean as a
+/// keyless Account (`key_ref` none, `key_state` none); a keyed one has
+/// `secret_ref: <id>`. `change_account_edit` writes the key state it is
+/// given: `Stored` adds `secret_ref: <id>` to an entry that lacks it (a
+/// keyed first confirmation), `None` removes it (a keyless confirmation),
+/// and a state the entry already has changes no line of it (an address
+/// change keeps it). Other entries are untouched.
+#[test]
+fn a_keyless_item_has_no_secret_ref_and_a_change_sets_the_key_state() {
+    const LOOP: &str = "http://127.0.0.1:8080/v1";
+    const LOOP_9090: &str = "http://127.0.0.1:9090/v1";
+    let account = |root: &Path, id: &str| {
+        accounts_file(root)
+            .accounts
+            .into_iter()
+            .find(|a| a.id == id)
+            .unwrap_or_else(|| panic!("{id} is in the file"))
+    };
+
+    // A new file: keyless, then keyed.
+    for (key, line) in [(KeyState::None, false), (KeyState::Stored, true)] {
+        let bytes = new_accounts_file("llama", "openai-compatible", None, Some(LOOP), key).unwrap();
+        let text = String::from_utf8(bytes.clone()).unwrap();
+        assert_eq!(text.contains("secret_ref"), line, "{key:?}: {text}");
+        let dir = tempfile::tempdir().unwrap();
+        let w =
+            ConfigWriter::for_user_accounts(dir.path(), Arc::new(InMemoryConfigHistory::default()))
+                .unwrap();
+        w.create(
+            owner(),
+            ConfigCreate {
+                file: USER_ACCOUNTS_FILE.into(),
+                bytes,
+                audit: Vec::new(),
+            },
+        )
+        .unwrap();
+        assert_eq!(errors(dir.path()), Vec::<String>::new(), "{key:?}");
+        let llama = account(dir.path(), "llama");
+        assert_eq!(key_state(&llama), key, "{key:?}");
+        assert_eq!(llama.secret_ref.is_some(), line, "{key:?}");
+        assert_eq!(key_ref(&llama), line.then_some("llama"), "{key:?}");
+    }
+
+    // Appended beside a keyed Account.
+    let dir = app_data_with_valid();
+    let root = dir.path();
+    let w =
+        ConfigWriter::for_user_accounts(root, Arc::new(InMemoryConfigHistory::default())).unwrap();
+    let apply = |edit: am_config::ConfigEdit| {
+        let now = accounts_file(root);
+        w.apply_with_audit(owner(), edit, now.sha256.as_deref().unwrap(), Vec::new())
+            .unwrap()
+    };
+    apply(add_account_edit(
+        &accounts_file(root),
+        "llama",
+        "openai-compatible",
+        None,
+        Some(LOOP),
+        KeyState::None,
+    ));
+    assert_eq!(errors(root), Vec::<String>::new());
+    assert_eq!(account(root, "llama").secret_ref, None);
+    assert_eq!(key_state(&account(root, "llama")), KeyState::None);
+    assert_eq!(account(root, "cloud").secret_ref.as_deref(), Some("cloud"));
+
+    // An address change that keeps it keyless writes no line.
+    apply(
+        change_account_edit(
+            &accounts_file(root),
+            "llama",
+            "openai-compatible",
+            Some(LOOP_9090),
+            KeyState::None,
+        )
+        .unwrap(),
+    );
+    let llama = account(root, "llama");
+    assert_eq!(llama.base_url.as_deref(), Some(LOOP_9090));
+    assert_eq!(llama.secret_ref, None);
+
+    // A keyed confirmation of an entry with no line adds it (row 23).
+    apply(
+        change_account_edit(
+            &accounts_file(root),
+            "llama",
+            "openai-compatible",
+            Some(LOOP_9090),
+            KeyState::Stored,
+        )
+        .unwrap(),
+    );
+    assert_eq!(account(root, "llama").secret_ref.as_deref(), Some("llama"));
+    assert_eq!(errors(root), Vec::<String>::new());
+
+    // A keyed state the entry already has changes no line.
+    let before = std::fs::read_to_string(file_of(root)).unwrap();
+    let same = change_account_edit(
+        &accounts_file(root),
+        "llama",
+        "openai-compatible",
+        Some(LOOP_9090),
+        KeyState::Stored,
+    )
+    .unwrap();
+    let entry = w
+        .apply_with_audit(
+            owner(),
+            same,
+            accounts_file(root).sha256.as_deref().unwrap(),
+            Vec::new(),
+        )
+        .map(|e| e.after);
+    match entry {
+        Ok(after) => assert_eq!(String::from_utf8(after).unwrap(), before),
+        Err(e) => assert!(matches!(e, WriteError::NoChange(_)), "{e:?}"),
+    }
+
+    // A keyless confirmation removes it (row 21).
+    apply(
+        change_account_edit(
+            &accounts_file(root),
+            "llama",
+            "openai-compatible",
+            Some(LOOP),
+            KeyState::None,
+        )
+        .unwrap(),
+    );
+    let llama = account(root, "llama");
+    assert_eq!(llama.secret_ref, None);
+    assert_eq!(llama.base_url.as_deref(), Some(LOOP));
+    assert_eq!(errors(root), Vec::<String>::new());
+    assert_eq!(account(root, "cloud").secret_ref.as_deref(), Some("cloud"));
 }

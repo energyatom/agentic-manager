@@ -2349,7 +2349,9 @@ async fn add_a_compatible_account_at_a_remote_url_pins_that_host() {
 /// accepted for a server on this Mac; the sentence says the calls stay on
 /// this Mac, on that port; the new file holds the `base_url`; the audit
 /// entry carries `http`, `127.0.0.1` and the port. A key is read and stored
-/// as for every Account (there is no keyless Account).
+/// as for every Account added without `--no-key` (story 2.10: an Account on
+/// this Mac is keyless only when the owner chooses it with `--no-key`;
+/// `accounts_keyless.rs`).
 #[tokio::test]
 async fn add_a_compatible_account_on_this_mac_says_its_calls_stay_here() {
     let env = env();
@@ -2897,9 +2899,10 @@ async fn test_of_a_compatible_account_calls_only_its_base_url() {
     assert_eq!(env.history().len(), recorded, "no edit");
 }
 
-/// There is no keyless Account: a compatible Account (added through the
-/// command) whose Keychain entry is missing on this run is refused as an
-/// Anthropic one is, and nothing is sent.
+/// A keyed Account stays keyed: a compatible Account added through the
+/// command with a key (not `--no-key`, story 2.10), whose Keychain entry is
+/// missing on this run, is refused as an Anthropic one is, and nothing is
+/// sent.
 #[tokio::test]
 async fn test_of_a_compatible_account_without_a_key_sends_nothing() {
     let env = env();
@@ -3025,7 +3028,9 @@ fn file_accounts(env: &Env) -> Vec<Held> {
 fn app_edit_back(env: &Env, id: &str, provider: &str, base_url: Option<&str>) {
     let writer = env.user_writer();
     let file = am_config::accounts_file(env.places.user.dir());
-    let edit = am_config::change_account_edit(&file, id, provider, base_url).unwrap();
+    let edit =
+        am_config::change_account_edit(&file, id, provider, base_url, am_config::KeyState::Stored)
+            .unwrap();
     writer.apply(owner(), edit).unwrap();
 }
 

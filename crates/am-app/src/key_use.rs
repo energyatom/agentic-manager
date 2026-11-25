@@ -11,13 +11,17 @@
 //! 2. the Account is in the user Accounts file, its entry has no error, it
 //!    is a model Account with an endpoint `agentic accounts add` accepts,
 //!    and its key is read only from the entry named by its own id
-//!    (`am_config::key_ref`);
+//!    (`am_config::key_ref`; story 2.10: an entry with no `secret_ref` is
+//!    keyless, `am_config::key_state`);
 //! 3. those bytes hash to the after-hash of the file's latest History entry
 //!    in the user store;
 //! 4. the Account's latest confirmation record (`account_added`, or
 //!    `account_changed` from story 14), with no `account_removed` after it,
 //!    written by the owner with an intent of the user file, names the same
-//!    provider, scheme, host, port and key state. An Account whose latest
+//!    provider, scheme, host, port and key state (story 2.10: a record with
+//!    `key: stored` needs `secret_ref: <id>` in the entry, one with `key:
+//!    none` needs no `secret_ref`, at `http://127.0.0.1:<port>` only; any
+//!    other pairing refuses). An Account whose latest
 //!    record is `account_listed` (story 2.13: listed unconfirmed by
 //!    `accounts migrate`) is refused naming `agentic accounts change <id>`.
 //!
@@ -30,7 +34,7 @@
 
 use std::time::Instant;
 
-use am_config::{Account, USER_ACCOUNTS_FILE};
+use am_config::{Account, KeyState, USER_ACCOUNTS_FILE};
 use am_domain::Actor;
 use am_store::ConfigNote;
 
@@ -64,6 +68,10 @@ pub enum Refused {
     /// `account_listed` record with no confirmation after it): no key is
     /// used until `agentic accounts change <id>` confirms it.
     Unconfirmed,
+    /// Story 2.10: confirmed with a key, but its entry has no `secret_ref`.
+    KeyedWithoutLine,
+    /// Story 2.10: confirmed with no key, but its entry has a `secret_ref`.
+    KeylessWithLine,
 }
 
 impl Refused {
@@ -88,8 +96,29 @@ impl Refused {
             }
             Refused::Interrupted => interrupted_words(),
             Refused::Unconfirmed => unconfirmed_words(id),
+            Refused::KeyedWithoutLine => keyed_without_line_words(id),
+            Refused::KeylessWithLine => keyless_with_line_words(id),
         }
     }
+}
+
+/// Story 2.10 (matrix row 14; review K1): an Account confirmed with a key
+/// whose entry lost its `secret_ref`. `change` repairs it (an address
+/// change keeps the confirmed key state); a hand edit would be refused as
+/// an outside change, so none is offered.
+pub fn keyed_without_line_words(id: &str) -> String {
+    format!(
+        "it was confirmed with a key, but its entry in {USER_ACCOUNTS_FILE} has no `secret_ref`, so no key is read for it and nothing is sent; run `agentic accounts change {id}` in a terminal: it confirms it again with its key and writes `secret_ref: {id}` to its entry"
+    )
+}
+
+/// Story 2.10 (matrix row 16; review K1): an Account confirmed with no key
+/// whose entry names a Keychain entry. `change` confirms it keyless again;
+/// a key is given only by removing it and adding it again.
+pub fn keyless_with_line_words(id: &str) -> String {
+    format!(
+        "it was confirmed with no key, but its entry in {USER_ACCOUNTS_FILE} has a `secret_ref`, so nothing is read or sent for it; run `agentic accounts change {id}` in a terminal: it confirms it keyless again and removes its `secret_ref` line. To give it a key instead, remove it with `agentic accounts remove {id}` and add it again without `--no-key`"
+    )
 }
 
 /// The words for a write of the user file that was interrupted.
@@ -129,12 +158,15 @@ impl std::fmt::Display for Stamp {
     }
 }
 
-/// An Account the check passed, with its endpoint and its stamp.
+/// An Account the check passed, with its endpoint, its stamp and its key
+/// state (story 2.10: `None` for a keyless Account, whose calls carry no
+/// credential and read no Keychain entry).
 #[derive(Debug, Clone)]
 pub struct Confirmed {
     pub account: Account,
     pub(crate) endpoint: AccountEndpoint,
     pub stamp: Stamp,
+    pub key: KeyState,
 }
 
 impl Confirmed {
@@ -275,13 +307,23 @@ impl Destination {
         )
     }
 
-    /// True when this names `provider` at `endpoint`, with a stored key.
+    /// True when this names `provider` at `endpoint` (whatever its key
+    /// state; story 2.10 compares that apart, [`Destination::key_state`]).
     pub fn names(&self, provider: &str, endpoint: &AccountEndpoint) -> bool {
         self.provider == provider
             && self.scheme == endpoint.scheme
             && self.host == endpoint.host
             && self.port == endpoint.port.to_string()
-            && self.key == "stored"
+    }
+
+    /// The key state the record confirms: `none` is keyless, anything else
+    /// (a record from before story 2.10 has no `key`) a stored key.
+    pub fn key_state(&self) -> KeyState {
+        if self.key == KeyState::None.recorded() {
+            KeyState::None
+        } else {
+            KeyState::Stored
+        }
     }
 
     pub fn words(&self) -> String {
@@ -337,12 +379,15 @@ fn all_notes(reader: &am_store::user::UserReader, id: &str) -> Result<Vec<Config
 /// an `account_removed` follows it, or a later `account_key_set` (story
 /// 2.14: the entry was replaced for that destination). An
 /// `account_removed`'s `key_for_…` never names it (the Keychain may have
-/// refused the replacement).
+/// refused the replacement), and neither does a keyless record (story
+/// 2.10, review K3: `key: none` confirmed no key).
 pub(crate) fn last_confirmed(places: &Places, id: &str) -> Result<Option<Destination>, String> {
     let reader = crate::user::reader(places)?;
     Ok(all_notes(&reader, id)?.iter().rev().find_map(|n| {
         match n.args.get("kind").map(String::as_str) {
-            Some("account_added" | "account_changed") => Destination::of(n),
+            Some("account_added" | "account_changed") => {
+                Destination::of(n).filter(|d| d.key_state() == KeyState::Stored)
+            }
             Some("account_key_set") => Destination::key_set(n),
             _ => None,
         }
@@ -487,8 +532,7 @@ fn once(places: &Places, id: &str) -> Once {
             Ok(e) => e,
             Err(why) => return done(Err(Refused::Endpoint(why))),
         };
-    if am_config::key_ref(&account) != Some(id) {
-        let entry = account.secret_ref.clone().unwrap_or_default();
+    if let Some(entry) = account.secret_ref.clone().filter(|e| e != id) {
         return done(Err(Refused::SecretRef(entry)));
     }
     // The bytes the endpoint was taken from are the bytes the app wrote.
@@ -547,6 +591,19 @@ fn once(places: &Places, id: &str) -> Once {
             endpoint.port
         ))));
     }
+    // Story 2.10: the file's key state is the record's, and a keyless
+    // Account is called only on this Mac.
+    let key = am_config::key_state(&account);
+    match (confirmed.key_state(), key) {
+        (KeyState::Stored, KeyState::None) => return done(Err(Refused::KeyedWithoutLine)),
+        (KeyState::None, KeyState::Stored) => return done(Err(Refused::KeylessWithLine)),
+        (KeyState::None, KeyState::None) if !endpoint.loopback => {
+            return done(Err(Refused::NotConfirmed(format!(
+                "'{id}' has no key, and an Account with no key is called only at http://127.0.0.1:<port>"
+            ))));
+        }
+        _ => {}
+    }
     done(Ok(Confirmed {
         account,
         endpoint,
@@ -554,6 +611,7 @@ fn once(places: &Places, id: &str) -> Once {
             file: last.after_sha256.clone(),
             record: latest.seq,
         },
+        key,
     }))
 }
 

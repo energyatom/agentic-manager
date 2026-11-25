@@ -733,7 +733,10 @@ impl ConfigWriter {
     /// `base_url`) any Account: "Undo of a user-file change goes through the
     /// same confirming handler", so an Account is added again only by
     /// `agentic accounts add`, removed by `remove` and moved by `change`.
-    /// Only a change that leaves every Account where it is (a name) passes.
+    /// Story 2.10 (owner Q6, 2026-11-25): one that adds or removes an
+    /// Account's `secret_ref` (its key state, either way) is refused too,
+    /// naming `change`. Only a change that leaves every Account where it is
+    /// and as keyed as it is (a name) passes.
     fn refuse_account_move(
         &self,
         entry: &HistoryEntry,
@@ -756,13 +759,17 @@ impl ConfigWriter {
             }
         }
         let mut shown_ids: BTreeSet<String> = BTreeSet::new();
-        let mut destinations = |bytes: &[u8]| -> BTreeMap<String, (String, Option<String>)> {
+        type Destination = ((String, Option<String>), crate::KeyState);
+        let mut destinations = |bytes: &[u8]| -> BTreeMap<String, Destination> {
             let loaded = crate::user_accounts::load_bytes(USER_ACCOUNTS_FILE, bytes);
             let accounts = loaded.accounts.accounts();
             shown_ids.extend(crate::user_accounts::valid_ids(accounts));
             accounts
                 .iter()
-                .map(|a| (a.id.clone(), (a.provider.clone(), a.base_url.clone())))
+                .map(|a| {
+                    let to = (a.provider.clone(), a.base_url.clone());
+                    (a.id.clone(), (to, crate::key_state(a)))
+                })
                 .collect()
         };
         let now = destinations(current);
@@ -784,7 +791,12 @@ impl ConfigWriter {
         let removed: Vec<&String> = now.keys().filter(|id| !then.contains_key(*id)).collect();
         let moved: Vec<&String> = then
             .iter()
-            .filter(|(id, to)| now.get(*id).is_some_and(|from| from != *to))
+            .filter(|(id, (to, _))| now.get(*id).is_some_and(|(from, _)| from != to))
+            .map(|(id, _)| id)
+            .collect();
+        let rekeyed: Vec<&String> = then
+            .iter()
+            .filter(|(id, (_, to))| now.get(*id).is_some_and(|(_, from)| from != to))
             .map(|(id, _)| id)
             .collect();
         let mut why = Vec::new();
@@ -804,6 +816,12 @@ impl ConfigWriter {
             why.push(format!(
                 "change the provider or address of the Account {}, which is confirmed only with `agentic accounts change <id>` (a new key when the provider changes)",
                 named(moved)
+            ));
+        }
+        if !rekeyed.is_empty() {
+            why.push(format!(
+                "add or remove the `secret_ref` of the Account {} (whether its calls carry a key), which is confirmed only with `agentic accounts change <id>`",
+                named(rekeyed)
             ));
         }
         if why.is_empty() {

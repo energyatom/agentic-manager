@@ -113,9 +113,10 @@ impl ProjectDirectory {
         }
     }
 
-    /// The Account's answer now: its endpoint and stamp while the key-use
-    /// check passes and it is not on one of the app's own ports, or why not.
-    fn answer(&self, account: &str) -> Result<(Endpoint, String), String> {
+    /// The Account's answer now: its endpoint, stamp and whether it has a
+    /// key (story 2.10) while the key-use check passes and it is not on one
+    /// of the app's own ports, or why not.
+    fn answer(&self, account: &str) -> Result<(Endpoint, String, bool), String> {
         if accounts::reserved(account) {
             return Err(format!("'{account}' is a reserved local Account"));
         }
@@ -125,7 +126,8 @@ impl ProjectDirectory {
         if endpoint.host == "127.0.0.1" && self.own_ports.contains(&endpoint.port) {
             return Err(own_server_words(endpoint.port));
         }
-        Ok((endpoint, confirmed.stamp.to_string()))
+        let keyed = confirmed.key == am_config::KeyState::Stored;
+        Ok((endpoint, confirmed.stamp.to_string(), keyed))
     }
 }
 
@@ -138,19 +140,26 @@ impl EgressDirectory for ProjectDirectory {
         if let Some(endpoint) = reserved_local_account(account) {
             return Some(endpoint);
         }
-        self.answer(account).ok().map(|(endpoint, _)| endpoint)
+        self.answer(account).ok().map(|(endpoint, _, _)| endpoint)
     }
 
     fn account_stamp(&self, account: &str) -> Option<AccountStamp> {
         if let Some(endpoint) = reserved_local_account(account) {
+            // Unchanged by story 2.10 (owner Q8): the reserved local
+            // Accounts are answered as before.
             return Some(AccountStamp {
                 endpoint,
                 version: String::new(),
+                keyed: true,
             });
         }
         self.answer(account)
             .ok()
-            .map(|(endpoint, version)| AccountStamp { endpoint, version })
+            .map(|(endpoint, version, keyed)| AccountStamp {
+                endpoint,
+                version,
+                keyed,
+            })
     }
 
     fn mcp_endpoint(&self, server: &str) -> Option<Endpoint> {

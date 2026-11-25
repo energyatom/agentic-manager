@@ -805,7 +805,14 @@ async fn the_same_id_added_by_another_process_meanwhile_refuses_the_add() {
                 owner(),
                 am_config::ConfigCreate {
                     file: USER_FILE.into(),
-                    bytes: am_config::new_accounts_file("cloud", "anthropic", None, None).unwrap(),
+                    bytes: am_config::new_accounts_file(
+                        "cloud",
+                        "anthropic",
+                        None,
+                        None,
+                        am_config::KeyState::Stored,
+                    )
+                    .unwrap(),
                     audit: Vec::new(),
                 },
             )
@@ -969,7 +976,14 @@ async fn a_test_during_a_write_waits_for_it_and_passes() {
         writer
             .apply_with_audit(
                 owner(),
-                am_config::add_account_edit(&now, "oa", "openai", None, None),
+                am_config::add_account_edit(
+                    &now,
+                    "oa",
+                    "openai",
+                    None,
+                    None,
+                    am_config::KeyState::Stored,
+                ),
                 now.sha256.as_deref().unwrap(),
                 Vec::new(),
             )
@@ -1737,7 +1751,14 @@ async fn an_interrupted_write_is_named_as_one_and_not_as_an_outside_edit() {
         writer
             .apply_with_audit(
                 owner(),
-                am_config::add_account_edit(&now, "oa", "openai", None, None),
+                am_config::add_account_edit(
+                    &now,
+                    "oa",
+                    "openai",
+                    None,
+                    None,
+                    am_config::KeyState::Stored,
+                ),
                 now.sha256.as_deref().unwrap(),
                 Vec::new(),
             )
@@ -1904,7 +1925,14 @@ async fn a_confirmation_recorded_since_the_sentence_refuses_the_add() {
                 owner(),
                 am_config::ConfigCreate {
                     file: USER_FILE.into(),
-                    bytes: am_config::new_accounts_file("cloud", "anthropic", None, None).unwrap(),
+                    bytes: am_config::new_accounts_file(
+                        "cloud",
+                        "anthropic",
+                        None,
+                        None,
+                        am_config::KeyState::Stored,
+                    )
+                    .unwrap(),
                     audit: vec![added_note("cloud")],
                 },
             )
@@ -2144,6 +2172,7 @@ async fn an_account_re_pointed_while_its_host_resolves_is_never_sent_to_the_old_
                         "openai-compatible",
                         None,
                         Some("https://elsewhere.example/v1"),
+                        am_config::KeyState::Stored,
                     ),
                     now.sha256.as_deref().unwrap(),
                     vec![added_compatible_note("router", "elsewhere.example")],

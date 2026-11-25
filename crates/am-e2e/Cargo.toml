@@ -66,6 +66,12 @@ path = "tests/trust/rule_09_requests.rs"
 name = "rule_09_audit_store"
 path = "tests/trust/rule_09_audit_store.rs"
 
+# Story 2.10: a keyless Account's calls carry no credential and read no key
+# (AD-15 *Keyless loopback Account*, owner Q4).
+[[test]]
+name = "rule_09_keyless"
+path = "tests/trust/rule_09_keyless.rs"
+
 # Story 3.2: RULE-15, the loopback server's Host, Origin, launch code,
 # pairing code, CSRF, CLI token, route classes, envelope, run status and
 # event stream (AD-13, AD-14, AD-15). The shared rig lives in

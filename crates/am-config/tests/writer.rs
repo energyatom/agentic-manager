@@ -1063,3 +1063,116 @@ fn writer_restore_refuses_a_file_saved_outside_while_it_runs_and_keeps_the_save(
     assert_eq!(h.entries(None).unwrap().len(), 2);
     assert!(h.pending_intents().unwrap().is_empty());
 }
+
+// ------------------------------------------------------------ story 2.10
+
+/// Story 2.10 (matrix row 24; owner Q6, 2026-11-25: a change of an
+/// Account's key state is widening both ways). In user mode the writer
+/// refuses an Undo or a Restore that would add or remove an Account's
+/// `secret_ref` (keyless to keyed, or keyed to keyless), naming the Account
+/// and `agentic accounts change`, as it refuses a move (story 2.14); it
+/// writes and records nothing. An Undo and a Restore of a name edit still
+/// apply. Written before the change.
+#[test]
+fn an_undo_or_restore_that_adds_or_removes_a_secret_ref_is_refused() {
+    const FILE: &str = am_config::USER_ACCOUNTS_FILE;
+    for (id, created_as, keyed_at_first) in [
+        (
+            "router",
+            "schema_version: 2\naccounts:\n  - id: router\n    provider: openai-compatible\n    base_url: https://openrouter.example/api/v1\n    secret_ref: router\n",
+            true,
+        ),
+        (
+            "local",
+            "schema_version: 2\naccounts:\n  - id: local\n    provider: openai-compatible\n    base_url: http://127.0.0.1:8080/v1\n",
+            false,
+        ),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let history = Arc::new(InMemoryConfigHistory::default());
+        let w = ConfigWriter::for_user_accounts(dir.path(), history.clone()).unwrap();
+        let path = dir.path().join(FILE);
+        let created = w
+            .create(
+                reviewer(),
+                am_config::ConfigCreate {
+                    file: FILE.into(),
+                    bytes: created_as.as_bytes().to_vec(),
+                    audit: Vec::new(),
+                },
+            )
+            .unwrap();
+        // An app write that flips the key state (no confirmation): the
+        // line removed from the keyed Account, added to the keyless one.
+        let secret_ref = vec!["accounts".to_string(), "0".into(), "secret_ref".into()];
+        let flip = if keyed_at_first {
+            EditOp::Remove { path: secret_ref }
+        } else {
+            EditOp::Set {
+                path: secret_ref,
+                value: json!(id),
+            }
+        };
+        let flipped = w.apply(reviewer(), edit(FILE, vec![flip])).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("secret_ref"),
+            !keyed_at_first,
+            "{id}: the write flipped the line"
+        );
+
+        let bytes = std::fs::read(&path).unwrap();
+        let entries = history.entries(None).unwrap().len();
+        type Act<'a> = Box<dyn Fn() -> Result<am_domain::HistoryEntry, WriteError> + 'a>;
+        let acts: [(&str, Act<'_>); 2] = [
+            (
+                "an Undo of the flip",
+                Box::new(|| w.undo(reviewer(), &flipped.id)),
+            ),
+            (
+                "a Restore of the create",
+                Box::new(|| w.restore(reviewer(), &created.id)),
+            ),
+        ];
+        for (what, act) in acts {
+            let err = act().expect_err(&format!("{id}: {what} is refused"));
+            let words = err.to_string();
+            assert!(
+                words.contains("agentic accounts change"),
+                "{id}: {what}: {words}"
+            );
+            assert!(words.contains(&format!("'{id}'")), "{id}: {what}: {words}");
+            assert_eq!(
+                std::fs::read(&path).unwrap(),
+                bytes,
+                "{id}: {what}: nothing written"
+            );
+            assert_eq!(
+                history.entries(None).unwrap().len(),
+                entries,
+                "{id}: {what}"
+            );
+            assert!(
+                history.pending_intents().unwrap().is_empty(),
+                "{id}: {what}"
+            );
+        }
+
+        // A name edit: its Undo, then a Restore of it, apply.
+        let named = w
+            .apply(
+                reviewer(),
+                edit(
+                    FILE,
+                    vec![set(&["accounts", "0", "name"], json!("Renamed"))],
+                ),
+            )
+            .unwrap();
+        let undone = w.undo(reviewer(), &named.id).unwrap();
+        assert_eq!(undone.kind, HistoryKind::Undo, "{id}");
+        assert_eq!(std::fs::read(&path).unwrap(), bytes, "{id}");
+        let restored = w.restore(reviewer(), &named.id).unwrap();
+        assert_eq!(restored.kind, HistoryKind::Restore, "{id}");
+    }
+}

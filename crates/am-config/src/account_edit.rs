@@ -29,7 +29,7 @@ use crate::canon::{self, FileKind};
 use crate::finding::{Report, Severity};
 use crate::node::{Kind, Node};
 use crate::refs::RefKind;
-use crate::user_accounts::USER_ACCOUNTS_FILE;
+use crate::user_accounts::{KeyState, USER_ACCOUNTS_FILE};
 use crate::writer::sha256_hex;
 use crate::{Account, ConfigEdit, EditOp, Loader, WriteError, checks, kinds, tracked};
 
@@ -75,6 +75,9 @@ pub struct AccountsFile {
     errors: Vec<Vec<String>>,
     /// Whether each item of `accounts:` has a `base_url` key, in file order.
     base_urls: Vec<bool>,
+    /// Whether each item of `accounts:` has a `secret_ref` key, in file
+    /// order (story 2.10).
+    secret_refs: Vec<bool>,
 }
 
 impl AccountsFile {
@@ -145,6 +148,7 @@ pub fn accounts_file(app_data: &Path) -> AccountsFile {
         list: false,
         errors: Vec::new(),
         base_urls: Vec::new(),
+        secret_refs: Vec::new(),
     };
     let bytes = match std::fs::read(app_data.join(USER_ACCOUNTS_FILE)) {
         Ok(b) => b,
@@ -181,6 +185,10 @@ pub fn accounts_file(app_data: &Path) -> AccountsFile {
             out.base_urls = items
                 .iter()
                 .map(|item| at(item, "base_url").is_some())
+                .collect();
+            out.secret_refs = items
+                .iter()
+                .map(|item| at(item, "secret_ref").is_some())
                 .collect();
             spans = items.iter().map(lines_of).collect();
             out.lines = spans.iter().map(|(first, _)| *first).collect();
@@ -280,8 +288,15 @@ fn uses_in(root: &Path, id: &str, exact: Option<BTreeMap<String, Vec<u8>>>) -> V
 
 /// The Account as its item in the file: `id`, `provider`, the optional
 /// `name`, the `base_url` of an Account whose provider has no fixed endpoint
-/// (story 2.3), and `secret_ref` naming the Keychain entry (never a key).
-fn account_item(id: &str, provider: &str, name: Option<&str>, base_url: Option<&str>) -> Value {
+/// (story 2.3), and `secret_ref` naming the Keychain entry (never a key)
+/// for a keyed Account; a keyless one (story 2.10) has no `secret_ref`.
+fn account_item(
+    id: &str,
+    provider: &str,
+    name: Option<&str>,
+    base_url: Option<&str>,
+    key: KeyState,
+) -> Value {
     let mut item = Map::new();
     item.insert("id".into(), json!(id));
     item.insert("provider".into(), json!(provider));
@@ -291,21 +306,25 @@ fn account_item(id: &str, provider: &str, name: Option<&str>, base_url: Option<&
     if let Some(base_url) = base_url {
         item.insert("base_url".into(), json!(base_url));
     }
-    item.insert("secret_ref".into(), json!(id));
+    if key == KeyState::Stored {
+        item.insert("secret_ref".into(), json!(id));
+    }
     Value::Object(item)
 }
 
 /// The edit that appends the Account to the existing file `file`. It names
 /// the list by what `file` saw, so it is applied with `file.sha256`.
-/// `base_url` is `None` for a provider with one fixed endpoint.
+/// `base_url` is `None` for a provider with one fixed endpoint; `key` is
+/// the Account's key state (story 2.10).
 pub fn add_account_edit(
     file: &AccountsFile,
     id: &str,
     provider: &str,
     name: Option<&str>,
     base_url: Option<&str>,
+    key: KeyState,
 ) -> ConfigEdit {
-    let item = account_item(id, provider, name, base_url);
+    let item = account_item(id, provider, name, base_url, key);
     let op = if file.list {
         EditOp::Set {
             path: vec!["accounts".into(), file.ids.len().to_string()],
@@ -340,15 +359,18 @@ pub fn remove_account_edit(file: &AccountsFile, id: &str) -> Option<ConfigEdit> 
 
 /// Story 2.14 (AD-15 *Change*): the edit that sets the Account `id`'s
 /// `provider` and `base_url` in `file` (by its number in the list `file`
-/// saw, so it is applied with `file.sha256`), keeping its id, name and
-/// `secret_ref`. `base_url` is `None` for a provider with one fixed
-/// endpoint, and then a `base_url` the item holds is removed. `None` when no
-/// item has that id.
+/// saw, so it is applied with `file.sha256`), keeping its id and name.
+/// `base_url` is `None` for a provider with one fixed endpoint, and then a
+/// `base_url` the item holds is removed. Story 2.10: `key` is the key state
+/// to write: `Stored` sets `secret_ref: <id>` on an item without the line,
+/// `None` removes the line; an item already in that state keeps it as it
+/// is. `None` when no item has that id.
 pub fn change_account_edit(
     file: &AccountsFile,
     id: &str,
     provider: &str,
     base_url: Option<&str>,
+    key: KeyState,
 ) -> Option<ConfigEdit> {
     let index = file.ids.iter().position(|i| i.as_deref() == Some(id))?;
     let at = |key: &str| vec!["accounts".to_string(), index.to_string(), key.to_string()];
@@ -368,6 +390,17 @@ pub fn change_account_edit(
         }
         None => {}
     }
+    let has_line = file.secret_refs.get(index).copied().unwrap_or(false);
+    match key {
+        KeyState::Stored if !has_line => ops.push(EditOp::Set {
+            path: at("secret_ref"),
+            value: json!(id),
+        }),
+        KeyState::None if has_line => ops.push(EditOp::Remove {
+            path: at("secret_ref"),
+        }),
+        _ => {}
+    }
     Some(ConfigEdit {
         file: USER_ACCOUNTS_FILE.into(),
         ops,
@@ -377,17 +410,18 @@ pub fn change_account_edit(
 
 /// The canonical bytes of a new user Accounts file holding one Account,
 /// for a [`crate::ConfigCreate`]. `base_url` is `None` for a provider with
-/// one fixed endpoint.
+/// one fixed endpoint; `key` is the Account's key state (story 2.10).
 pub fn new_accounts_file(
     id: &str,
     provider: &str,
     name: Option<&str>,
     base_url: Option<&str>,
+    key: KeyState,
 ) -> Result<Vec<u8>, WriteError> {
     let bad = |e: String| WriteError::BadEdit(format!("{USER_ACCOUNTS_FILE}: {e}"));
     let head = format!("schema_version: {}\n", checks::SCHEMA_VERSION);
     let mut doc = canon::parse(FileKind::Accounts, &head).map_err(bad)?;
-    let list = Value::Array(vec![account_item(id, provider, name, base_url)]);
+    let list = Value::Array(vec![account_item(id, provider, name, base_url, key)]);
     canon::apply(&mut doc.tree, &["accounts".to_string()], Some(&list)).map_err(bad)?;
     canon::emit(&doc).map(String::into_bytes).map_err(bad)
 }

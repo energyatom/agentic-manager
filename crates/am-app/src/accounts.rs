@@ -61,17 +61,26 @@
 //! record that moved drops the key unsent and the check runs again), and
 //! streams one short reply through an egress client over a directory that
 //! pins the Account to its endpoint.
+//!
+//! Story 2.10 (AD-15 *Keyless loopback Account*): `add --no-key` and
+//! `change --no-key` take an `openai-compatible` Account at
+//! `http://127.0.0.1:<port>` only (refused in words before any prompt for
+//! every other endpoint) and write no `secret_ref`; a keyless Account's
+//! add, `test`, `list` line, `remove` and change make no Keychain call of
+//! any kind, and `test` sends no credential. `add` also refuses, before any
+//! prompt, an endpoint on this Mac at a reserved local Account's port or at
+//! one of the app's own ports.
 
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::sync::Arc;
 use std::time::Duration;
 
-use am_config::{ConfigCreate, USER_ACCOUNTS_FILE};
+use am_config::{ConfigCreate, KeyState, USER_ACCOUNTS_FILE};
 use am_domain::{
     AuditEvent, AuditNote, AuditSink, AuthRef, AuthScheme, ChatRequest, ConfigHistory,
-    EgressClient, EgressDirectory, EventSink, Instruction, LlmProvider, Message, Part,
-    ProjectIdentity, Role, SecretStore, StreamEvent, Terminal, TerminalError,
+    EgressClient, EgressDirectory, EgressError, EventSink, Instruction, LlmProvider, Message, Part,
+    ProjectIdentity, ProviderError, Role, SecretStore, StreamEvent, Terminal, TerminalError,
 };
 use am_engine::TokenSignal;
 use am_providers::anthropic::ANTHROPIC_HOST;
@@ -103,7 +112,7 @@ const OPENAI_COMPATIBLE: &str = "openai-compatible";
 const PROVIDERS: &str =
     "`--provider anthropic`, `--provider openai` or `--provider openai-compatible`";
 
-const USAGE: &str = "usage: agentic accounts add <id> --provider anthropic|openai|openai-compatible [--base-url <url>] [--name <text>]\n       agentic accounts change <id> [--provider anthropic|openai|openai-compatible] [--base-url <url>]\n       agentic accounts remove <id> [--force]\n       agentic accounts list\n       agentic accounts test <id> [--model <model>]\n       agentic accounts migrate --project <path> [--as <old>=<new>]... [--dry-run | --rollback]\n       (Accounts belong to this Mac: no command but migrate takes a project;\n        migrate moves a project's old models/accounts.yaml to this Mac's Accounts, --as names a clashing id anew, --dry-run only shows what it would do, --rollback puts the file back from its backup;\n        --base-url is for openai-compatible only: https://<host>[/path], or http://127.0.0.1:<port>[/path] for a server on this Mac;\n        change confirms an Account again: a new address of the same provider keeps its key, a new provider (or an Account with no confirmation) asks for a new key and deletes the old one;\n        --model is required for an openai or openai-compatible Account;\n        --force removes even while a project this Mac knows cannot be reached, never while a reference names the Account)";
+const USAGE: &str = "usage: agentic accounts add <id> --provider anthropic|openai|openai-compatible [--base-url <url>] [--name <text>] [--no-key]\n       agentic accounts change <id> [--provider anthropic|openai|openai-compatible] [--base-url <url>] [--no-key]\n       agentic accounts remove <id> [--force]\n       agentic accounts list\n       agentic accounts test <id> [--model <model>]\n       agentic accounts migrate --project <path> [--as <old>=<new>]... [--dry-run | --rollback]\n       (Accounts belong to this Mac: no command but migrate takes a project;\n        migrate moves a project's old models/accounts.yaml to this Mac's Accounts, --as names a clashing id anew, --dry-run only shows what it would do, --rollback puts the file back from its backup;\n        --base-url is for openai-compatible only: https://<host>[/path], or http://127.0.0.1:<port>[/path] for a server on this Mac;\n        change confirms an Account again: a new address of the same provider keeps its key, a new provider (or an Account with no confirmation) asks for a new key and deletes the old one;\n        --no-key adds or confirms an openai-compatible Account at http://127.0.0.1:<port> with no key: its calls stay on this Mac and carry no credential;\n        --model is required for an openai or openai-compatible Account;\n        --force removes even while a project this Mac knows cannot be reached, never while a reference names the Account)";
 
 /// Builds the egress client over a directory, reporting blocks to a sink.
 pub type EgressFactory = Arc<
@@ -132,16 +141,20 @@ enum Command {
         provider: String,
         name: Option<String>,
         base_url: Option<String>,
+        /// Story 2.10: keyless, on this Mac only.
+        no_key: bool,
     },
     Remove {
         id: String,
         force: bool,
     },
-    /// Story 2.14: `change <id> [--provider P] [--base-url U]`.
+    /// Story 2.14: `change <id> [--provider P] [--base-url U]`; story 2.10
+    /// adds `--no-key`.
     Change {
         id: String,
         provider: Option<String>,
         base_url: Option<String>,
+        no_key: bool,
     },
     List,
     Test {
@@ -165,6 +178,7 @@ fn parse(args: &[String]) -> Result<Command, String> {
     let mut positional: Vec<String> = Vec::new();
     let mut flags: BTreeMap<&str, String> = BTreeMap::new();
     let mut force = false;
+    let mut no_key = false;
     let mut words = args[1..].iter();
     while let Some(word) = words.next() {
         let flag = match (word.as_str(), verb) {
@@ -173,6 +187,13 @@ fn parse(args: &[String]) -> Result<Command, String> {
                     return Err("--force is given twice".into());
                 }
                 force = true;
+                continue;
+            }
+            ("--no-key", "add" | "change") => {
+                if no_key {
+                    return Err("--no-key is given twice".into());
+                }
+                no_key = true;
                 continue;
             }
             ("--provider", "add") => "--provider",
@@ -219,6 +240,7 @@ fn parse(args: &[String]) -> Result<Command, String> {
                 provider,
                 name: flags.remove("--name"),
                 base_url: flags.remove("--base-url"),
+                no_key,
             }
         }
         "remove" => Command::Remove {
@@ -229,6 +251,7 @@ fn parse(args: &[String]) -> Result<Command, String> {
             id: one_id("the Account's id")?,
             provider: flags.remove("--provider"),
             base_url: flags.remove("--base-url"),
+            no_key,
         },
         "test" => Command::Test {
             id: one_id("the Account's id")?,
@@ -274,12 +297,14 @@ pub async fn accounts(
             provider,
             name,
             base_url,
+            no_key,
         } => add(
             ctx,
             &id,
             &provider,
             name.as_deref(),
             base_url.as_deref(),
+            no_key,
             out,
         ),
         Command::Remove { id, force } => remove(ctx, &id, force, out),
@@ -287,7 +312,15 @@ pub async fn accounts(
             id,
             provider,
             base_url,
-        } => change::change(ctx, &id, provider.as_deref(), base_url.as_deref(), out),
+            no_key,
+        } => change::change(
+            ctx,
+            &id,
+            provider.as_deref(),
+            base_url.as_deref(),
+            no_key,
+            out,
+        ),
         Command::List => list(&ctx, out),
         Command::Test { id, model } => test(&ctx, &id, model, out).await,
         Command::Migrate(m) => migrate::run(ctx, m, out),
@@ -632,12 +665,63 @@ fn nothing_changed_since(
     Ok((now, scan_now))
 }
 
+/// Story 2.10 (AD-15 *Keyless loopback Account*, owner Q2): why `--no-key`
+/// is refused for `endpoint`, or `None` for an endpoint on this Mac.
+fn no_key_refusal(provider: &str, endpoint: &AccountEndpoint, did_not: &str) -> Option<String> {
+    if endpoint.loopback {
+        return None;
+    }
+    Some(if endpoint.own {
+        format!(
+            "`--no-key` is accepted only for an {OPENAI_COMPATIBLE} Account at http://127.0.0.1:<port> on this Mac: a remote endpoint always needs a key. {did_not}; leave out `--no-key`"
+        )
+    } else {
+        format!(
+            "`--no-key` is not accepted for an {provider} Account: its calls go only to {}, a remote endpoint, which always needs a key. {did_not}; leave out `--no-key`",
+            endpoint.base_url
+        )
+    })
+}
+
+/// Story 2.10 (owner Q1; review K4): an endpoint on this Mac at a reserved
+/// local Account's port, or at a port one of the app's own servers uses, is
+/// refused by `add` and `change`, before any prompt and again under the
+/// lock: the egress client refuses every call there (AD-12), so no Account
+/// there could ever be called.
+fn not_a_taken_port(
+    places: &Places,
+    endpoint: &AccountEndpoint,
+    did_not: &str,
+) -> Result<(), Stop> {
+    if !endpoint.loopback {
+        return Ok(());
+    }
+    let reserved = am_domain::net::RESERVED_LOCAL_ACCOUNTS.iter().find(|r| {
+        am_domain::net::reserved_local_account(r).is_some_and(|e| e.port == endpoint.port)
+    });
+    if let Some(reserved) = reserved {
+        return refuse(format!(
+            "the endpoint is not accepted: port {} on this Mac belongs to the reserved local Account {reserved}, which is always available, and no other Account is called there. {did_not}",
+            endpoint.port
+        ));
+    }
+    let directory = crate::egress::ProjectDirectory::for_accounts(places);
+    if directory.own_ports().contains(&endpoint.port) {
+        return refuse(format!(
+            "the endpoint is not accepted: {}, and an Account never reaches the app itself. {did_not}",
+            crate::egress::own_server_words(endpoint.port)
+        ));
+    }
+    Ok(())
+}
+
 fn add(
     mut ctx: AccountsContext,
     id: &str,
     provider: &str,
     name: Option<&str>,
     base_url: Option<&str>,
+    no_key: bool,
     out: &mut dyn Write,
 ) -> Result<(), Stop> {
     require_terminal(&ctx, "add", NOT_ADDED)?;
@@ -648,7 +732,11 @@ fn add(
     }
     let endpoint = endpoint_of(provider, base_url, "--base-url")
         .map_err(|why| Stop(EXIT_ERRORS, format!("{why}. {NOT_ADDED}")))?;
+    if no_key && let Some(why) = no_key_refusal(provider, &endpoint, NOT_ADDED) {
+        return refuse(why);
+    }
     let places = ctx.places.clone();
+    not_a_taken_port(&places, &endpoint, NOT_ADDED)?;
     let standing = stand(&places, NOT_ADDED)?;
     if reserved(id) {
         return refuse(format!(
@@ -676,18 +764,27 @@ fn add(
         )
     };
     // Whether the user store confirmed this id for this provider and
-    // endpoint: only then is a held key reused without typing it.
-    let confirmed = key_use::confirmed_destination(&places, id)
-        .map_err(|why| Stop(EXIT_ERRORS, format!("{why}. {NOT_ADDED}")))?
-        .is_some_and(|d| d.names(provider, &endpoint));
-    // Whether the Keychain already holds a key for this id (an earlier add,
-    // the per-project stage): only that it is there, never its value.
-    let held = match ctx.secrets.get(id) {
-        Ok(key) => key.is_some(),
-        Err(e) => {
-            return refuse(format!("the Keychain cannot be read ({e}). {NOT_ADDED}"));
+    // endpoint with a key: only then is a held key reused without typing it.
+    // A keyless add (story 2.10) reads no key, so it never asks.
+    let key_confirmed = |did_not: &str| -> Result<bool, Stop> {
+        if no_key {
+            return Ok(false);
         }
+        Ok(key_use::confirmed_destination(&places, id)
+            .map_err(|why| Stop(EXIT_ERRORS, format!("{why}. {did_not}")))?
+            .is_some_and(|d| d.names(provider, &endpoint) && d.key_state() == KeyState::Stored))
     };
+    let confirmed = key_confirmed(NOT_ADDED)?;
+    // Whether the Keychain already holds a key for this id (an earlier add,
+    // the per-project stage): only that it is there, never its value. A
+    // keyless add makes no Keychain call of any kind (story 2.10).
+    let held = !no_key
+        && match ctx.secrets.get(id) {
+            Ok(key) => key.is_some(),
+            Err(e) => {
+                return refuse(format!("the Keychain cannot be read ({e}). {NOT_ADDED}"));
+            }
+        };
     let reused = if held {
         // Where that key was last confirmed, also when a removal followed.
         let last = match key_use::last_confirmed(&places, id) {
@@ -707,8 +804,13 @@ fn add(
     } else {
         String::new()
     };
+    let carries = if no_key {
+        " with no key: no key is read or stored, and its calls carry no credential.".to_string()
+    } else {
+        format!(", with a key kept only in this Mac's Keychain.{reused}")
+    };
     ctx.terminal.show(&format!(
-        "Adding the Account '{id}' (provider {provider}) on this Mac, for every project: its calls go to {}, with a key kept only in this Mac's Keychain.{reused} {named}{}\nTo confirm, type the Account's id ({id}) within 2 minutes: ",
+        "Adding the Account '{id}' (provider {provider}) on this Mac, for every project: its calls go to {}{carries} {named}{}\nTo confirm, type the Account's id ({id}) within 2 minutes: ",
         endpoint.goes_to(),
         not_checked(&scan)
     ));
@@ -736,8 +838,14 @@ fn add(
     // The key: an entry the Keychain already holds is reused and never
     // overwritten; otherwise it is read with echo off. The Keychain is read
     // again now that the id is typed: an entry that appeared or went away
-    // while the prompt waited refuses the add.
-    let new_key = match ctx.secrets.get(id) {
+    // while the prompt waited refuses the add. A keyless add reads none.
+    let held_now = if no_key {
+        Ok(None)
+    } else {
+        ctx.secrets.get(id)
+    };
+    let new_key = match held_now {
+        _ if no_key => None,
         Err(e) => {
             return refuse(format!("the Keychain cannot be read ({e}). {NOT_ADDED}"));
         }
@@ -824,10 +932,10 @@ fn add(
             }
         ));
     }
-    let confirmed_now = key_use::confirmed_destination(&places, id)
-        .map_err(|why| Stop(EXIT_ERRORS, format!("{why}. {NOT_ADDED_NOR_STORED}")))?
-        .is_some_and(|d| d.names(provider, &endpoint));
-    if confirmed_now != confirmed {
+    // The ports again (review K4): an `agentic serve` may have started on
+    // this one while the prompt waited.
+    not_a_taken_port(&places, &endpoint, NOT_ADDED_NOR_STORED)?;
+    if key_confirmed(NOT_ADDED_NOR_STORED)? != confirmed {
         return refuse(format!(
             "this Mac's confirmation of '{id}' changed while this command waited. {NOT_ADDED_NOR_STORED}; run the command again"
         ));
@@ -865,6 +973,9 @@ fn add(
     };
     // What became of the Keychain entry when the add stops after this point.
     let key_undone = |secrets: &dyn SecretStore| {
+        if no_key {
+            return "it made no Keychain call (the Account has no key)".to_string();
+        }
         if !stored_here {
             return "the Keychain entry it would have reused is unchanged".to_string();
         }
@@ -886,6 +997,11 @@ fn add(
         .iter()
         .map(|(root, u)| format!("{}:{u}", root.display()))
         .collect();
+    let key_state = if no_key {
+        KeyState::None
+    } else {
+        KeyState::Stored
+    };
     let note = AuditNote {
         action: "config.widened".into(),
         target: id.to_string(),
@@ -898,7 +1014,7 @@ fn add(
             ("host".to_string(), endpoint.host.clone()),
             ("port".to_string(), endpoint.port.to_string()),
             ("references".to_string(), references.join(", ")),
-            ("key".to_string(), "stored".to_string()),
+            ("key".to_string(), key_state.recorded().to_string()),
             ("confirmation".to_string(), "typed_id".to_string()),
         ]),
     };
@@ -906,12 +1022,19 @@ fn add(
     let written = match (&now.file.sha256, now.file.exists) {
         (Some(built_on), true) => writer.apply_with_audit(
             owner(),
-            am_config::add_account_edit(&now.file, id, provider, name, endpoint.written()),
+            am_config::add_account_edit(
+                &now.file,
+                id,
+                provider,
+                name,
+                endpoint.written(),
+                key_state,
+            ),
             built_on,
             vec![note],
         ),
-        _ => {
-            am_config::new_accounts_file(id, provider, name, endpoint.written()).and_then(|bytes| {
+        _ => am_config::new_accounts_file(id, provider, name, endpoint.written(), key_state)
+            .and_then(|bytes| {
                 writer.create(
                     owner(),
                     ConfigCreate {
@@ -920,8 +1043,7 @@ fn add(
                         audit: vec![note],
                     },
                 )
-            })
-        }
+            }),
     };
     let entry = match written {
         Ok(entry) => entry,
@@ -932,7 +1054,12 @@ fn add(
                 // the History commit): the next lock records the entry,
                 // and the key stays.
                 Some(true) => refuse(format!(
-                    "the Account '{id}' was written to {USER_ACCOUNTS_FILE}, but the write did not finish: {why}. Its History entry is recorded the next time an Account command takes this Mac's Accounts lock; its key is in the Keychain"
+                    "the Account '{id}' was written to {USER_ACCOUNTS_FILE}, but the write did not finish: {why}. Its History entry is recorded the next time an Account command takes this Mac's Accounts lock; {}",
+                    if no_key {
+                        "it has no key"
+                    } else {
+                        "its key is in the Keychain"
+                    }
                 )),
                 Some(false) => {
                     let key = key_undone(ctx.secrets.as_ref());
@@ -941,12 +1068,19 @@ fn add(
                     ))
                 }
                 None => refuse(format!(
-                    "the write of the Account '{id}' stopped ({why}), and this Mac's user store could not be read to tell whether {USER_ACCOUNTS_FILE} was written; `agentic accounts list` shows what it holds. A key this command stored is still in the Keychain"
+                    "the write of the Account '{id}' stopped ({why}), and this Mac's user store could not be read to tell whether {USER_ACCOUNTS_FILE} was written; `agentic accounts list` shows what it holds. {}",
+                    if no_key {
+                        "This command made no Keychain call"
+                    } else {
+                        "A key this command stored is still in the Keychain"
+                    }
                 )),
             };
         }
     };
-    let key = if stored_here {
+    let key = if no_key {
+        "it is keyless: no key was read or stored, and its calls carry no credential"
+    } else if stored_here {
         "its key is in the Keychain"
     } else {
         "it reuses the key the Keychain already held"
@@ -1029,6 +1163,15 @@ fn remove(
             "there is no Account '{id}' on this Mac any more. {NOT_REMOVED}"
         ));
     };
+    // Story 2.10 (review K5): what the words say of its key follows its
+    // live record's key state (with none, its entry's).
+    let record = key_use::live_record(&places, id).map(|r| r.map(|(d, _)| d.key_state()));
+    let entry_keyless = now
+        .file
+        .accounts
+        .iter()
+        .find(|a| a.id == id)
+        .is_some_and(|a| is_keyless(a, None));
     let note = AuditNote {
         action: "config.narrowed".into(),
         target: id.to_string(),
@@ -1067,9 +1210,10 @@ fn remove(
             scan_now.unreachable_words()
         )
     };
+    let key = removed_key_words(id, record, entry_keyless);
     let _ = writeln!(
         out,
-        "agentic: removed the Account '{id}' from this Mac's Accounts. The change is recorded in History (entry {}) and can be undone from the app's History when the UI ships. Its key stays in the Keychain; delete the entry '{id}' of service agentic-manager in Keychain Access if nothing needs it.{skipped}",
+        "agentic: removed the Account '{id}' from this Mac's Accounts. The change is recorded in History (entry {}) and can be undone from the app's History when the UI ships. {key}{skipped}",
         entry.id
     );
     Ok(())
@@ -1087,6 +1231,44 @@ fn other_entry(account: &am_config::Account) -> Option<&str> {
         None => account.secret_ref.as_deref(),
     }
 }
+
+/// Story 2.10: a model Account at `http://127.0.0.1:<port>` whose entry has
+/// no `secret_ref` and whose live record (`record`) is not one with a key:
+/// no Keychain entry is read for it.
+fn is_keyless(account: &am_config::Account, record: Option<KeyState>) -> bool {
+    is_model_provider(&account.provider)
+        && am_config::key_state(account) == KeyState::None
+        && record != Some(KeyState::Stored)
+        && endpoint_of(&account.provider, account.base_url.as_deref(), "base_url")
+            .is_ok_and(|e| e.loopback)
+}
+
+/// What `remove` says of the removed Account's key (story 2.10, review K5):
+/// its live record's key state decides (`record`); with no live record, its
+/// entry's (`entry_keyless`, [`is_keyless`]). A record that could not be
+/// read never reads as keyless. The command made no Keychain call either
+/// way.
+fn removed_key_words(
+    id: &str,
+    record: Result<Option<KeyState>, String>,
+    entry_keyless: bool,
+) -> String {
+    let keyless = match record {
+        Ok(Some(state)) => state == KeyState::None,
+        Ok(None) => entry_keyless,
+        Err(_) => false,
+    };
+    if keyless {
+        "It had no key, so no Keychain entry was read or changed.".to_string()
+    } else {
+        format!(
+            "Its key stays in the Keychain; delete the entry '{id}' of service agentic-manager in Keychain Access if nothing needs it."
+        )
+    }
+}
+
+/// How `list` shows a keyless Account's key.
+const KEYLESS: &str = "keyless (no key; its calls carry no credential)";
 
 /// A key as `list` shows it: dots, then its last 4 characters; dots only
 /// for a key too short to show any of.
@@ -1169,9 +1351,29 @@ fn list(ctx: &AccountsContext, out: &mut dyn Write) -> Result<(), Stop> {
             );
             continue;
         };
+        // Story 2.10: the live record, read once. No Keychain read for a
+        // model Account's entry with no `secret_ref`, or one confirmed with
+        // no key.
+        let model = is_model_provider(&account.provider);
+        let live = if model {
+            key_use::live_record(places, &account.id)
+        } else {
+            Ok(None)
+        };
+        let record = live
+            .as_ref()
+            .ok()
+            .and_then(Option::as_ref)
+            .map(|(d, _)| d.key_state());
         let key = if other_entry(account).is_some() {
             // No key is read for it.
             "secret_ref names another entry; not used".to_string()
+        } else if is_keyless(account, record) {
+            KEYLESS.to_string()
+        } else if model && am_config::key_state(account) == KeyState::None {
+            "no secret_ref, so no key is read".to_string()
+        } else if record == Some(KeyState::None) {
+            "no key is read (confirmed with no key)".to_string()
         } else {
             match ctx.secrets.get(&account.id) {
                 Ok(Some(key)) => masked(key.expose()),
@@ -1188,6 +1390,9 @@ fn list(ctx: &AccountsContext, out: &mut dyn Write) -> Result<(), Stop> {
         };
         let confirmed = if outside {
             match key_use::confirmed_destination(places, &account.id) {
+                Ok(Some(d)) if d.key_state() == KeyState::None => {
+                    format!("  confirmed: {} with no key", d.words())
+                }
                 Ok(Some(d)) => format!("  confirmed: {}", d.words()),
                 Ok(None) => "  confirmed: nothing".to_string(),
                 Err(why) => format!("  confirmed: unknown ({why})"),
@@ -1198,13 +1403,24 @@ fn list(ctx: &AccountsContext, out: &mut dyn Write) -> Result<(), Stop> {
             // for another provider or endpoint than the file's, is not called.
             let endpoint =
                 endpoint_of(&account.provider, account.base_url.as_deref(), "base_url").ok();
-            match key_use::live_record(places, &account.id) {
+            match live {
                 Ok(Some((d, _)))
                     if endpoint
                         .as_ref()
                         .is_some_and(|e| d.names(&account.provider, e)) =>
                 {
-                    String::new()
+                    // Story 2.10: the entry's key state is the record's.
+                    match (d.key_state(), am_config::key_state(account)) {
+                        (KeyState::Stored, KeyState::None) => format!(
+                            "  unconfirmed: {}",
+                            key_use::keyed_without_line_words(&account.id)
+                        ),
+                        (KeyState::None, KeyState::Stored) => format!(
+                            "  unconfirmed: {}",
+                            key_use::keyless_with_line_words(&account.id)
+                        ),
+                        _ => String::new(),
+                    }
                 }
                 Ok(_) => format!(
                     "  unconfirmed: no key is used until `{}` confirms it",
@@ -1261,7 +1477,15 @@ fn refused_words(
             "the Account '{id}' in {USER_ACCOUNTS_FILE} cannot be called: {why}; no key was read and nothing was sent"
         ),
         Refused::SecretRef(_) => format!(
-            "the Account '{id}' has a `secret_ref` that names another Keychain entry; a key is only ever read from the entry named by the Account's own id, so no key was read and nothing was sent. Set `secret_ref: {id}` (or remove the line) in {USER_ACCOUNTS_FILE}"
+            "the Account '{id}' has a `secret_ref` that names another Keychain entry; a key is only ever read from the entry named by the Account's own id, so no key was read and nothing was sent. Set `secret_ref: {id}` in {USER_ACCOUNTS_FILE}"
+        ),
+        Refused::KeyedWithoutLine => format!(
+            "the Account '{id}' is not called: {}",
+            key_use::keyed_without_line_words(id)
+        ),
+        Refused::KeylessWithLine => format!(
+            "the Account '{id}' is not called: {}",
+            key_use::keyless_with_line_words(id)
         ),
         Refused::Interrupted => format!(
             "the Account '{id}' is not called: {}. No key was read and nothing was sent",
@@ -1340,6 +1564,10 @@ async fn test(
     // use): a record that moved meanwhile drops the key unsent and the
     // check runs again.
     for attempt in 0..2 {
+        // Story 2.10: a keyless Account's call reads no key.
+        if confirmed.key == KeyState::None {
+            break;
+        }
         match ctx.secrets.get(id) {
             Ok(Some(key)) => drop(key),
             Ok(None) => {
@@ -1373,15 +1601,19 @@ async fn test(
     let egress = (ctx.egress)(Arc::new(directory), blocks.clone());
     // The adapter by provider. OpenAI and compatible Accounts authenticate
     // with `Bearer` from the Keychain entry named by the Account's id.
+    // A keyless Account's adapter has no credential reference (story 2.10).
+    let keyed = confirmed.key == KeyState::Stored;
     let provider: Box<dyn LlmProvider> = if account.provider == ANTHROPIC {
         Box::new(AnthropicProvider::new(egress, id))
-    } else {
+    } else if keyed {
         Box::new(
             OpenAiCompatProvider::new(egress, id, endpoint.call_base()).with_auth(AuthRef {
                 scheme: AuthScheme::Bearer,
                 account_id: id.to_string(),
             }),
         )
+    } else {
+        Box::new(OpenAiCompatProvider::new(egress, id, endpoint.call_base()))
     };
     let request = ChatRequest {
         model: model.clone(),
@@ -1401,7 +1633,7 @@ async fn test(
     );
     let mut streamed = String::new();
     let mut show = |text: String, out: &mut dyn Write| {
-        let _ = out.write_all(text.as_bytes());
+        let _ = out.write_all(printable(&text).as_bytes());
         let _ = out.flush();
         streamed.push_str(&text);
     };
@@ -1427,18 +1659,50 @@ async fn test(
                 ),
                 None => "no usage reported".to_string(),
             };
+            let keyless = if keyed {
+                ""
+            } else {
+                "; it is keyless, so no credential was sent"
+            };
             let _ = writeln!(
                 out,
-                "agentic: the Account '{id}' answered from {} (model {model}, {tokens})",
+                "agentic: the Account '{id}' answered from {} (model {model}, {tokens}){keyless}",
                 endpoint.base_url
             );
             Ok(())
         }
+        // Owner Q1 (2026-11-25): a keyless Account's server that refuses
+        // the connection, times out or sends nothing is named as such,
+        // never as a key or a cloud problem.
+        Err(ProviderError::Egress(e)) if !keyed && e.starts_with(&network_error()) => {
+            let cause = printable(e.strip_prefix(network_error().as_str()).unwrap_or(&e));
+            refuse(format!(
+                "the local model server of the Account '{id}' at {}:{} is not answering: it refused the connection, timed out or sent nothing ({cause}). Start the server on this Mac, or check its port, then run `agentic accounts test {id}` again",
+                endpoint.host, endpoint.port
+            ))
+        }
         Err(e) => refuse(format!(
-            "the test call of the Account '{id}' (model {model}) failed: {e}{}",
-            blocks.words()
+            "the test call of the Account '{id}' (model {model}) failed: {}",
+            printable(&format!("{e}{}", blocks.words()))
         )),
     }
+}
+
+/// Text from the server (a streamed reply, an error body or event) as
+/// `test` prints it (story 2.10, review K2): every hidden character
+/// (`am_domain::text`, as `agentic gate` shows model text) and a tab
+/// written as `\u{XXXX}`, so no control character but `\n` reaches the
+/// terminal to move the cursor, erase a line or write the clipboard.
+fn printable(text: &str) -> String {
+    am_domain::text::escape_hidden(text)
+        .0
+        .replace('\t', "\\u{0009}")
+}
+
+/// How the egress client's network failures begin (a refused connection, a
+/// timeout, a reply cut short), as a provider adapter passes them on.
+fn network_error() -> String {
+    EgressError::Network(String::new()).to_string()
 }
 
 /// The blocks the egress client reported during `test`: printed, because
@@ -1567,6 +1831,32 @@ mod tests {
             let why = compatible(url).unwrap_err();
             assert!(!why.contains("sk-canary-in-a-url"), "{why}");
             assert!(why.contains("--base-url"), "{why}");
+        }
+    }
+
+    /// Story 2.10 (review K5): `remove`'s words follow the live record's key
+    /// state, the entry's only with no record, and a record that could not
+    /// be read never reads as "It had no key", whatever the entry holds.
+    #[test]
+    fn removes_words_never_say_no_key_when_the_record_cannot_be_read() {
+        let no_key = "It had no key";
+        for entry_keyless in [true, false] {
+            let words = removed_key_words("llama", Err("store busy".into()), entry_keyless);
+            assert!(!words.contains(no_key), "{entry_keyless}: {words}");
+            assert!(words.contains("stays in the Keychain"), "{words}");
+        }
+        for (record, entry_keyless, keyless) in [
+            (Ok(Some(KeyState::None)), false, true),
+            (Ok(Some(KeyState::Stored)), true, false),
+            (Ok(None), true, true),
+            (Ok(None), false, false),
+        ] {
+            let words = removed_key_words("llama", record.clone(), entry_keyless);
+            assert_eq!(
+                words.contains(no_key),
+                keyless,
+                "{record:?} {entry_keyless}: {words}"
+            );
         }
     }
 

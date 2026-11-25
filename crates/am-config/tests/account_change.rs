@@ -12,7 +12,10 @@
 //! - `change_account_edit(&AccountsFile, id, provider, base_url)` sets one
 //!   Account's provider and `base_url` (none for a provider with a fixed
 //!   endpoint), keeping its id, name and `secret_ref`; `None` when the file
-//!   has no such Account.
+//!   has no such Account. Story 2.10: it and `new_accounts_file` take the
+//!   key state last (`am_config::KeyState`); these keyed Accounts pass
+//!   `Stored`, which keeps their `secret_ref` (story 2.10's own cases are in
+//!   `account_edit.rs`).
 //!
 //! Tests work in temporary folders only. Written before the list and the
 //! edit exist.
@@ -23,7 +26,7 @@ mod common;
 use std::sync::Arc;
 
 use am_config::{
-    ConfigCreate, ConfigWriter, USER_ACCOUNTS_FILE, accounts_file, change_account_edit,
+    ConfigCreate, ConfigWriter, KeyState, USER_ACCOUNTS_FILE, accounts_file, change_account_edit,
     decisions_locked, new_accounts_file, owner_children,
 };
 use am_domain::Actor;
@@ -134,6 +137,7 @@ fn the_change_edit_sets_provider_and_base_url_only() {
                 "openai-compatible",
                 Some("Router"),
                 Some("https://openrouter.example/api/v1"),
+                KeyState::Stored,
             )
             .unwrap(),
             audit: Vec::new(),
@@ -147,6 +151,7 @@ fn the_change_edit_sets_provider_and_base_url_only() {
         "router",
         "openai-compatible",
         Some("https://router2.example/api/v1"),
+        KeyState::Stored,
     )
     .expect("an edit for router");
     w.apply_with_audit(owner(), edit, now.sha256.as_deref().unwrap(), Vec::new())
@@ -170,7 +175,8 @@ fn the_change_edit_sets_provider_and_base_url_only() {
     );
 
     let now = accounts_file(root);
-    let edit = change_account_edit(&now, "router", "anthropic", None).expect("an edit");
+    let edit =
+        change_account_edit(&now, "router", "anthropic", None, KeyState::Stored).expect("an edit");
     w.apply_with_audit(owner(), edit, now.sha256.as_deref().unwrap(), Vec::new())
         .unwrap();
     let file = accounts_file(root);
@@ -182,7 +188,7 @@ fn the_change_edit_sets_provider_and_base_url_only() {
     assert_eq!(a.name.as_deref(), Some("Router"));
     assert_eq!(a.secret_ref.as_deref(), Some("router"));
 
-    assert!(change_account_edit(&file, "missing", "anthropic", None).is_none());
+    assert!(change_account_edit(&file, "missing", "anthropic", None, KeyState::Stored).is_none());
 }
 
 /// Review fix Adversarial 5 (2026-11-23): the loopback-HTTP list uses the

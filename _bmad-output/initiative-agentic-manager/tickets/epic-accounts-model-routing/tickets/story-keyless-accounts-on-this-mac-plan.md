@@ -3,16 +3,16 @@ title: 'Keyless Accounts on this Mac'
 type: feature
 ticket: 10
 created: '2026-11-25'
-status: approved
-baseline_revision: '96028e7'
+status: built
+baseline_revision: '7364da7'
 after: [3, 12, 14]
 route: full
 route_source: auto
 risk: high
 review: quick
 review_source: pinned
-lenses_ran: []
-review_loop_iteration: 0
+lenses_ran: [correctness, adversarial-security]
+review_loop_iteration: 2
 followup_review_recommended: false
 context:
   - '{project-root}/docs/owner-standing-rules.md'
@@ -142,9 +142,9 @@ deferred: []
 | 11 | Test, keyless | `test llama --model m` from any stdin, after row 1 | One POST to `LOOP/chat/completions` with no `AuthRef`. On the wire (real `NetEgress` over `net_rig`) no credential header and only `127.0.0.1:8080`. Zero Keychain calls. The directory pins `http 127.0.0.1 8080`. The output names the endpoint and says no credential was sent. | — |
 | 12 | Wire rules, keyless (am-net) | A keyless Account's request: no `AuthRef`; then a GET answered by a redirect to `127.0.0.1:9090` and to `https://elsewhere.example` | The first reaches `127.0.0.1:8080` with no credential and no Keychain read. Each redirect is refused and audited `egress.blocked`. A POST is never redirected. *(The rules exist; the test proves them for a keyless stamp.)* | Refused, audited |
 | 13 | Credential for a keyless Account (Q4) | A request for the keyless Account carrying `AuthRef { account: llama }`, with a canary entry under `llama` in the store | Refused before any Keychain read: the Account has no key, so a request for it carries no credential. `egress.blocked` audited with that reason. The canary is on no hop. | Refused, audited |
-| 14 | Keyed, `secret_ref` dropped by an app write | A confirmed keyed Account; an app write (History entry, no confirmation) removes its `secret_ref`, so the hash check passes | `test` and the directory refuse before any Keychain read: confirmed with a key, but the entry has no `secret_ref`; put the line back, or remove and add it with `--no-key` (on this Mac only). Nothing sent. | Worded refusal |
+| 14 | Keyed, `secret_ref` dropped by an app write | A confirmed keyed Account; an app write (History entry, no confirmation) removes its `secret_ref`, so the hash check passes | `test` and the directory refuse before any Keychain read: confirmed with a key, but the entry has no `secret_ref`; run `agentic accounts change <id>`, which confirms it again with its key and writes `secret_ref: <id>`; no hand-edit advice, because a hand edit is refused as an outside change. Nothing sent. *(Manager's correction, K1, 2026-11-25.)* | Worded refusal |
 | 15 | Keyed, `secret_ref` dropped by hand | The ticket's case: a hand edit removes `secret_ref` from a keyed remote Account | Refused before any Keychain read (an outside change of the user file, as 2.12 built). *(guard: ticket verify)* | Worded refusal |
-| 16 | Keyless, `secret_ref` added by an app write | Row 1's Account; an app write adds `secret_ref: llama` | Refused before any Keychain read: confirmed with no key, but the entry names a Keychain entry; remove the line, or confirm it with a key (`agentic accounts change llama`) | Worded refusal |
+| 16 | Keyless, `secret_ref` added by an app write | Row 1's Account; an app write adds `secret_ref: llama` | Refused before any Keychain read: confirmed with no key, but the entry names a Keychain entry; `agentic accounts change llama` confirms it keyless again and removes the line; to give it a key, remove it (`agentic accounts remove llama`) and add it again without `--no-key` *(manager's correction, K1: the planned words offered a hand edit and said `change` would confirm it with a key, which it does not)* | Worded refusal |
 | 17 | List | Row 1 plus a keyed Account | `llama  openai-compatible  127.0.0.1:8080  keyless (no key; its calls carry no credential)`. No Keychain call for `llama`; the keyed row is masked as today. Rows 14 and 16 show `unconfirmed` with their fix. | — |
 | 18 | Remove, keyless | `remove llama` on a terminal | `account_removed`, History, Undo as today. The words say it had no key and no Keychain entry was read or changed. Zero Keychain calls. | — |
 | 19 | Change, keyless address (Q5) | `change llama --base-url http://127.0.0.1:9090/v1`; id and `yes` typed | The sentence says it stays keyless and its calls carry no credential. `account_changed` with `key none`, `confirmation typed_id_yes`. Zero Keychain calls. `test` then reaches `:9090` only, with no credential. | — |
@@ -247,6 +247,7 @@ deferred: []
 - 2026-11-25, planner: draft for the owner's security stop. No tests or code until Q1–Q8 are answered.
   - Risk is `high` against the ticket's `medium` (manager instruction): it touches the key-use check, the egress client's key path, the writer guard and `change`. The ticket's `risk` field is not edited.
 - 2026-11-25, owner: approved with the recommended answers; Q1 adds the register row and the "local model server not answering" error; Q2 is 127.0.0.1 only; Q5 is built with terminal-only typed-name confirmation; Q6 is widening both ways (replan). The baseline is set once #48 (3.7) merges.
+- 2026-11-25, manager: rebased onto main `7364da7` (3.7 merged as #48), and the baseline set to it.
 
 ## Design Notes
 
@@ -259,7 +260,7 @@ deferred: []
   - **Q1:** the register gets a row for the port-squatting risk. While the local server is stopped, another local process can take its port and receive prompts. When a keyless Account's endpoint refuses the connection, times out or returns nothing, the error says plainly that the local model server is not answering and names the Account and the address. It must never read as a key problem or a cloud error. A test pins the words.
   - **Q2:** `--no-key` accepts only `http://127.0.0.1:<port>`. `localhost`, `[::1]` and other `127/8` addresses are refused in words before any prompt.
   - **Q5:** keyless `change` (an address change stays keyless; `--no-key` on a provider change or a first confirmation; the `secret_ref` fix-up) is built here. It is terminal-only, with typed-name confirmation, the same as `accounts add`. Tests cover the non-terminal refusal and a wrong typed name.
-  - **Q6:** a change of key state is widening in both directions, keyed to keyless and keyless to keyed. In this story, the writer refuses an Undo or Restore that flips it. A documents-only replan records it in AD-15's list and 4.17's ticket; that replan merges before this story's tests start.
+  - **Q6:** a change of key state is widening in both directions, keyed to keyless and keyless to keyed. In this story, the writer refuses an Undo or Restore that flips it. A documents-only replan records it in AD-15's list and 4.17's ticket; that replan merged as #49 (main `1244f3e`, 2026-11-25). The manager's earlier note said it would merge before this story's tests started, but the tests started first. They do not depend on its text, and the manager corrected this note.
 - **Model:** a security story, so tests, build and reviews run on Opus (owner rule, 2026-11-25).
 
 ### Owner questions (security)
@@ -474,3 +475,396 @@ Each test is written before any `src/` change and run. Its failure is logged in 
 ## Implementation Notes
 
 *(Filled in by the build: the owner's answers verbatim, the red run, the build, the review triage and the Auto Run Result.)*
+
+### API the tests fix
+
+The Code Map's shape, as the tests call it. A choice the Code Map leaves open is marked *(tester, 2026-11-25)*.
+
+**am-config**
+- `am_config::KeyState { Stored, None }`, re-exported at the crate root. It derives `Debug, Clone, Copy, PartialEq, Eq` *(tester, 2026-11-25)*.
+- `am_config::key_state(&Account) -> KeyState`, re-exported beside `key_ref`. It reads the line's presence: `Stored` for any `secret_ref` line (one naming another entry included; the loader still refuses that entry), `None` for no line.
+- `key_ref(&Account)`: `Some(id)` only when `secret_ref` is the id; `None` when the line is absent or names another entry.
+- The builders take the key state as their **last** argument *(tester, 2026-11-25: last, as 2.3 added `base_url` last)*. `Stored` writes `secret_ref: <id>` and `None` writes no line; every existing call passes `Stored`.
+  - `add_account_edit(file, id, provider, name, base_url, key: KeyState) -> ConfigEdit`;
+  - `new_accounts_file(id, provider, name, base_url, key: KeyState) -> Result<Vec<u8>, WriteError>`;
+  - `change_account_edit(file, id, provider, base_url, key: KeyState) -> Option<ConfigEdit>`. `Stored` adds `secret_ref: <id>` to an entry that lacks it. `None` removes the line. A state the entry already has changes no line. An edit that changes nothing may give `WriteError::NoChange` or an entry whose before equals its after; the test accepts either.
+- The user-mode writer refuses an Undo or Restore that adds or removes any Account's `secret_ref`. The words name the Account (`'<id>'`, when it loaded valid) and `agentic accounts change`. Nothing is written, and no History entry or pending intent is left.
+- Loader fix for `secret_ref: <other>`: it holds `secret_ref: <id>` and the word "remove" nowhere.
+
+**am-domain:** `AccountStamp { endpoint, version, keyed: bool }`. The trait's default `account_stamp` answers `keyed: true`.
+
+**am-net:** `NetEgress::send` refuses a request whose `auth` names an Account whose stamp says `keyed: false`:
+- with `EgressError::Blocked(_)`, before any `SecretStore` call (`get`, `set` or `delete`), and nothing is sent;
+- with one `egress.blocked` carrying `account`, `scheme`, `host` and `port`, and a `reason` that contains "has no key" *(tester, 2026-11-25: the fragment)*.
+
+**am-app**
+- `am_app::key_use::Confirmed` gains `pub key: am_config::KeyState`.
+- `ProjectDirectory::account_stamp` sets `keyed` from `Confirmed.key`.
+- An Account whose file and record key states disagree (rows 14, 16): `account_stamp` gives `None`, and `account_refusal` gives words that hold `secret_ref`.
+- `--no-key` is a flag with no value, accepted by `add` and `change` only.
+
+**Words the tests pin** *(tester, 2026-11-25)*. "err" is the refusal printed on stderr; "out" is the command's stdout; "sentence" is the text shown on the terminal.
+
+*Refusals*
+- A `--no-key` refusal exits 1, before anything is shown. err holds `--no-key`. This covers a remote endpoint, a fixed provider, a keyed address change, and a remote change or confirmation. A fixed provider's refusal also names `https://api.anthropic.com` or `https://api.openai.com/v1`.
+- Another spelling of this Mac exits 1 with 2.3's words (`is not accepted`), before any prompt.
+- An add at port 1234 or 11434, or at an own port, exits 1 before any prompt, keyed or keyless. err names `local-lmstudio`, `local-ollama`, or `the app's own server is listening on port <port>`.
+- A keyless Account moved to remote: err holds 2.14's `stays on this Mac`.
+- A writer refusal of a key-state flip holds `agentic accounts change`.
+
+*Add*
+- The keyless add's sentence holds:
+  - the id, `openai-compatible` and the base URL;
+  - `stay on this Mac, on port <port>`;
+  - `no credential`, and "no key" (any case).
+- It never holds `already holds`.
+- Only the id is read, echo on. out holds `keyless`.
+- `account_added` for a keyless add records `key: none`, `confirmation: typed_id`, `scheme: http`, `host: 127.0.0.1` and the port, committed with the History entry.
+
+*List, test, remove*
+- `list`:
+  - the line starts `<id>  openai-compatible  127.0.0.1:<port>  keyless` and holds `no credential`;
+  - it never holds `unconfirmed`;
+  - no `get:<id>` is made.
+- `test` of a keyless Account:
+  - out holds the base URL and `no credential`;
+  - there is one POST, with no credential header and no DNS lookup;
+  - there are zero Keychain calls.
+- Q1, server not answering:
+  - err holds `local model server`, `not answering`, the id and `127.0.0.1:<port>`;
+  - out and err hold none of the whole words key, keys, keychain, cloud, credential or credentials;
+  - there are zero Keychain calls;
+  - a keyed remote Account's failure never holds `local model server`.
+- Row 14: `test`'s err holds `secret_ref: <id>`. The `list` line holds `unconfirmed` and `secret_ref`.
+- Row 16: `test`'s err holds `agentic accounts change <id>`. The `list` line holds `unconfirmed` and `agentic accounts change <id>`, and no `get:<id>` is made.
+- `remove` of a keyless Account:
+  - out holds "no key" (any case);
+  - it never holds `stays in the Keychain` or `Keychain Access`;
+  - there are zero Keychain calls.
+
+*Change*
+- Keyless address change:
+  - the sentence holds both ports and `no credential`, and never `will now be sent`;
+  - nothing printed holds `the key the Keychain holds`;
+  - it reads the id, then `yes`;
+  - `account_changed` records `key: none` and `typed_id_yes`.
+- `--no-key` confirmation (a first confirmation, or a provider change):
+  - only the id and `yes` are read;
+  - the sentence holds `no credential`, and never `type a new key` or `already holds`;
+  - `account_removed` records `reason: provider_change` and no `key_for…` field;
+  - `account_added` records `key: none`, `confirmation: typed_id_yes_new_key` and `replaces` (`none` or absent for a first confirmation; `<provider> <scheme>://<host>:<port>` for a provider change);
+  - both notes commit with the History entry (`Edit`) that removes `secret_ref`;
+  - there is no `account_key_set`, and the Keychain entry under the id is left as it is.
+- `--no-key` on a keyless Account's address change is accepted, and the Account stays keyless.
+
+### Red run (tester, 2026-11-25)
+
+**Baseline:** `ed5fc56`, before any edit. `cargo nextest run` gave 1741 passed and 8 skipped.
+
+**Stage 1.** Each new test was first written against today's API, so each could be seen red for its own reason. Two things stood in for the new API:
+- a local `KeyState`, with the five-argument builders;
+- for a `None` entry, an app write that removes `secret_ref`.
+
+The `Confirmed::key` and `AccountStamp::keyed` assertions were left out.
+
+Command: `cargo nextest run -p am-app --test accounts_keyless`. Result: 22 run, 20 failed, 2 passed.
+- **Exit 2 (usage).** `--no-key` is an unknown option, so each of these failed at its exit-code assertion:
+  - `a_keyless_add_on_this_mac_writes_no_secret_ref_and_records_key_none` (row 1);
+  - `a_keyless_add_is_refused_for_a_remote_endpoint_before_any_prompt` (rows 2, 3; expected 1);
+  - `a_keyless_add_refuses_every_other_spelling_of_this_mac` (row 4);
+  - `a_keyless_add_cancelled_or_mistyped_writes_nothing` (row 6);
+  - `a_keyless_add_is_refused_from_a_pipe_and_while_an_owner_child_is_enabled` (rows 7, 8).
+- **Row 5.** `an_add_on_a_reserved_local_port_or_the_apps_own_port_is_refused`: today a keyed add at `http://127.0.0.1:1234/v1` succeeds (exit 0).
+- **The keyless setup add fails (exit 2)** in:
+  - `test_of_a_keyless_account_sends_no_credential_and_reads_no_key` (row 11);
+  - `a_keyless_server_that_is_not_answering_is_named_and_never_a_key_or_cloud_problem` (Q1);
+  - `the_directory_answers_a_keyless_account_with_no_key` (row 13);
+  - `a_keyless_account_given_a_secret_ref_by_an_app_write_is_refused` (row 16);
+  - `list_shows_a_keyless_account_as_keyless_and_reads_no_key_for_it` (row 17);
+  - `removing_a_keyless_account_makes_no_keychain_call_and_says_so` (row 18);
+  - `a_keyless_address_change_stays_keyless_and_makes_no_keychain_call` (row 19);
+  - `a_keyless_change_runs_only_on_a_terminal_with_the_typed_name` (Q5);
+  - `a_keyless_account_never_moves_to_a_remote_endpoint` (row 20);
+  - `no_key_is_refused_on_a_keyed_address_change_and_for_a_remote_endpoint` (row 22).
+- **Row 14.** `a_keyed_account_whose_secret_ref_an_app_write_removed_is_refused`: today the check passes, the key is read and the call is sent (exit 0, "The answer is 4.").
+- **`change` rejects `--no-key` (exit 2)** in `a_first_confirmation_with_no_key_confirms_a_loopback_account_keyless` (row 21) and `undo_or_restore_that_flips_a_key_state_is_refused` (row 24, Q6).
+- **Row 23.** `a_keyed_first_confirmation_writes_the_secret_ref_the_file_lacked`: after the confirmation the file has no `secret_ref` (`left: None, right: Some("spare")`).
+- **Guards, green today:**
+  - `an_empty_key_never_makes_an_account_keyless` (rows 9, 10);
+  - `a_hand_edit_removing_secret_ref_from_a_keyed_remote_account_is_refused` (row 15).
+
+Command: `cargo nextest run -p am-config --test user_accounts --test writer`, filtered to the new tests. All three failed:
+- `key_ref_names_the_id_only_when_secret_ref_names_it`: an absent `secret_ref` gives the id (`left: Some("local")`).
+- `the_secret_ref_fix_never_tells_a_keyed_account_to_drop_the_line` (row 25): the fix reads "write `secret_ref: cloud`, or remove the line".
+- `an_undo_or_restore_that_adds_or_removes_a_secret_ref_is_refused` (row 24): the Undo of the flip is applied, because the guard compares provider and `base_url` only.
+
+Command: `cargo nextest run -p am-e2e --test rule_09_keyless`, without `keyed`.
+- `a_credential_for_a_keyless_account_is_refused_before_any_keychain_read` (row 13) failed: "Bearer Post: expected Blocked, got HTTP 200". The canary was read and sent.
+- The other two passed, as the plan said: the rules hold today.
+  - `a_keyless_accounts_request_carries_no_credential_and_reads_no_key` (row 12, ticket verify);
+  - `a_keyless_accounts_redirect_off_its_endpoint_is_refused_and_audited` (row 12).
+
+Q1 harness probe: the same five failing transports on a *keyed* loopback Account each exit 1 today, with the generic "the test call … failed: network refused or failed: …" words. So the harness produces each failure, and the words are what is missing.
+
+**Final state (now).** Each target was compiled with `cargo test -p <crate> --test <target> --no-run`. Every error is one of the pinned API gaps above:
+- `am-app/accounts_keyless`: `am_config::KeyState` unresolved; the builders' argument count (E0061 ×2); `Confirmed::key` (E0609 ×2); `AccountStamp::keyed` (E0609 ×2).
+- `am-e2e/rule_09_keyless`: `AccountStamp` has no field `keyed` (E0560); `.keyed` (E0609 ×2).
+- `am-config/account_edit`, `am-config/user_accounts`: `KeyState` and `key_state` unresolved; the builders' argument count.
+- Mechanical supersession, which does not compile until the builders take `KeyState` (E0061, E0433). These targets were green at baseline, with the test counts shown:
+
+  | Target | Builder calls passing `KeyState::Stored` | Baseline tests |
+  |---|---|---|
+  | `am-app/accounts_change` | 3 | 31 |
+  | `am-app/accounts_cli` | 1 | 60 |
+  | `am-app/accounts_migrate` | 1 | 44 |
+  | `am-app/accounts_tty` | 1 | 6 |
+  | `am-app/user_accounts` | 5 | 49 |
+  | `am-config/account_change` | 4 | 5 |
+  | `am-config/account_edit` | 6 | 7 |
+  | `am-config/user_accounts` | 6 | 27 |
+  | **Total** | 27 | 229 |
+
+  `accounts_cli.rs` also has its two superseded doc comments (L2348, L2900) reworded; their assertions stand.
+- `am-config/writer` compiles. Its new test is red at runtime, as in stage 1.
+- No test builds an `AccountStamp` literal, and no existing test writes a confirmed keyed model Account without `secret_ref` through an app write. A grep of am-app and am-e2e tests shows the seeds without the line are hand-written entries in validate and escape tests, never confirmed.
+- Row 25's `test` and `change` `SecretRef` fix words (`accounts.rs` L1264, `change.rs` L176) cannot be reached through the CLI: the loader makes `secret_ref: <other>` an entry error, so `Refused::Entry` answers first. No test pins them; the build changes them as the Code Map says.
+
+**Everything else (green).** nextest over every target that compiles:
+- the default members other than am-app, am-config and am-e2e: 647 passed, 2 skipped;
+- `-p am-app --lib --bins` with the 16 other test targets: 211 passed;
+- `-p am-config --lib` with the 18 other test targets: 289 passed, 1 failed (the new writer test above, red as intended);
+- `-p am-e2e`, every target but `rule_09_keyless`: 365 passed, 5 skipped.
+
+That is 1,512 green, which is the baseline's 1,741 less the 229 tests in the eight superseded targets.
+
+Also green:
+- `cargo test --doc -p am-app -p am-config` (am-e2e has no library);
+- `cargo xtask check-deps`;
+- `cargo xtask denylist` (308 files clean);
+- `cargo xtask fixed-hosts`;
+- `cargo fmt --all -- --check`.
+
+Clippy (`-D warnings`) is clean on the new writer test, and on `accounts_keyless.rs` and `rule_09_keyless.rs` built with the stage-1 stand-ins in place of the new API.
+
+**Test lines (no `src/` change):**
+- `crates/am-app/tests/accounts_keyless.rs`: 2,122, of which about 830 are the kit, copied from 2.14's harness as Design Notes chose;
+- `crates/am-e2e/tests/trust/rule_09_keyless.rs`: 402;
+- new tests in `am-config/tests`: `account_edit.rs` +164, `user_accounts.rs` +63, `writer.rs` +113;
+- supersession: about 95 lines, mostly rustfmt splitting the longer calls;
+- the `[[test]]` target in `am-e2e/Cargo.toml`: +6.
+
+That is about 2,870 test lines, over the plan's 1,400–2,000. Most of the excess is the kit and the owner's additions (Q1, Q5, Q6).
+
+### Build (implementer, 2026-11-25)
+
+The tester's tests were made to pass unchanged: no test file was edited by the build.
+
+**Decisions the plan left open (standing rules: wording, layout, engineering calls):**
+- **am-config.** `KeyState::recorded()` gives the record's `key` word (`stored`, `none`). `AccountsFile` keeps each item's `secret_ref` presence, so that `change_account_edit` sets or removes the line only when the entry disagrees. The writer gives a key-state flip its own clause, apart from a move: "add or remove the `secret_ref` of the Account '<id>' (whether its calls carry a key), which is confirmed only with `agentic accounts change <id>`".
+- **`key_use`.** `Destination::names` now compares provider, scheme, host and port only, and `Destination::key_state()` compares the key. `add`'s reuse of a held key asks for both. Two new `Refused` kinds, `KeyedWithoutLine` (row 14) and `KeylessWithLine` (row 16), come after the destination check. A keyless pairing at a non-loopback endpoint is also refused, as a guard that the app's own writes cannot reach.
+- **am-net.** It refuses a credential for a keyless Account in two places: right after the first stamp, before anything is resolved; and before each Keychain read in the retry loop, in case a stamp taken again has turned keyless.
+- **Reserved local Accounts.** `ProjectDirectory` still answers them with `keyed: true`, unchanged (Q8).
+- **Q1 words.** These apply to a keyless Account only, and only to an `EgressError::Network` failure (refused, timed out, closed, no reply head, or an idle body):
+  - they read "the local model server of the Account '<id>' at 127.0.0.1:<port> is not answering…", with the transport's own words in parentheses;
+  - the egress client's timeout block words are not added;
+  - an HTTP status, a block or a protocol error keeps 2.3's words;
+  - keyed Accounts are unchanged, keyed loopback ones included.
+- **`add`.** The refusal at a reserved local port (1234, 11434) or one of the app's own ports covers keyed and keyless loopback adds alike, and comes before any Keychain call. `change` keeps 2.14's own-port refusal only. No reserved-port refusal was added to `change`: am-net refuses those calls, and the plan names only `add`.
+- **`change`.**
+  - The "keyless stays on this Mac" refusal now needs a live keyless record. A first confirmation of an entry without `secret_ref` takes the keyed path and writes the line (row 23).
+  - An address change writes the live record's key state. An entry that disagrees with the record it re-confirms is therefore put back in line.
+  - `--no-key` with no other flags never finishes an interrupted keyed provider change: the pending change is read only without `--no-key`.
+- **`list` and `remove`.** One predicate decides keyless: a model Account with no `secret_ref`, at `http://127.0.0.1:<port>`, whose live record is not keyed.
+  - `list` reads each live record once.
+  - It makes no Keychain read for a model entry without the line, or for one whose record is keyless.
+  - Search and crawl Accounts are read as before (DR-191).
+
+**Register:** DR-079 is closed. DR-187 to DR-192 are added.
+
+**Size:**
+- `src`: about 665 lines added and 145 removed, against the plan's estimate of ~535 (range 450–700).
+- Docs: 8 lines.
+- Tests: the tester's, about 2,870 lines.
+
+### Build note: a slip (implementer, 2026-11-25)
+
+The build once ran `cargo clippy --workspace --all-targets -D warnings` by mistake. `--workspace` includes `am-desktop`, which is outside the default members, so the shared target cache now holds clippy (check-mode) incremental artifacts for `agentic_desktop`.
+- It passed clean, and nothing was cleaned or rebuilt.
+- Every later check used the justfile's own commands, which use the default members.
+
+### Review triage, round 1 (manager, 2026-11-25)
+
+Two Opus reviews ran on the built diff: correctness (C) and adversarial security (S). Neither found a blocker. Both confirmed these hold:
+- `--no-key` accepts only `http://127.0.0.1:<port>`, refused before any prompt, whatever the spelling (IPv6, other 127/8 addresses, userinfo, percent-encoding, IDNA, trailing dots).
+- Redirects stay pinned, and loopback needs no DNS.
+- No keyless path makes a Keychain call. am-net refuses before any `SecretStore` call.
+- No silent flip between keyed and keyless: the file and the record are compared, and the writer refuses an Undo or Restore that flips the key state, in both directions.
+- Terminal-only use with a typed name.
+- The Q1 words never mention a key, the cloud or a credential.
+- `prices.rs` is untouched, and keyless calls stay local at 0.
+
+Fixes for round 2, tests first. The tester writes each test and logs it red; the implementer then fixes it. Both run on Opus.
+- **K1 (C1, C2, S1, important):** the repair words for rows 14 and 16 led to a dead end, and row 16's words even named a command that does the opposite of what they promised.
+  - **Row 14** (a keyed record with no `secret_ref` line): name `agentic accounts change <id>` first. It puts the line back. Keep `secret_ref: <id>` in the text, but drop the hand-edit advice, because a hand edit is refused as an outside change.
+  - **Row 16** (a keyless record with a `secret_ref` line): `agentic accounts change <id>` confirms the Account keyless again and removes the line. To give it a key, remove it and add it again without `--no-key`.
+  - Both refusals, the `list` column and `test` use the same words.
+  - Matrix row 16's planned wording is corrected the same way (a manager's correction of the plan's own text).
+- **K2 (S2, important; older code, made reachable by keyless calls):**
+  - `am-providers/src/common.rs` truncates the error body at byte 2000. That can panic when byte 2000 falls inside a multi-byte character. Truncate on a character boundary instead.
+  - `agentic accounts test` prints the streamed reply and the error body raw. Strip control characters, except `\n`, before printing, so escape sequences (OSC 52, cursor moves) cannot spoof or overwrite lines. A local process squatting on the port (DR-187) can now reach this.
+  - Tests: a reply of 1,999 ASCII bytes followed by `é` does not panic, and an ESC or OSC sequence in a reply or an error body is printed neutralised.
+- **K3 (C3, S3):** `last_confirmed` skips `key: none` records, so a held key never names a keyless confirmation.
+- **K4 (C4, S5):** `change` also calls `not_a_taken_port` (1234, 11434, and the app's own ports), and `add` repeats it under the lock.
+- **K5 (C5):** `remove`'s words follow the record's key state:
+  - a row-16 entry is described as keyless;
+  - a store-read error never reads as "It had no key".
+- **K8 (S6):** a test for am-net's second keyless refusal, inside the retry loop, using a directory whose stamp turns keyless between takes.
+
+Register edits (the implementer makes them):
+- **K6 (C6):** DR-191 notes that the writer's key-state clause names `agentic accounts change`, which refuses non-model Accounts such as search Accounts.
+- **K7 (S4):** DR-188 is reworded: a `--no-key` provider change also leaves the live key in the Keychain (AD-15), unlike a keyed provider change, which deletes it.
+- **K9 (S6) → new row:** 2.6 may set the reserved local Accounts to `keyed: false`, so they get the same refusal before any Keychain read. Target 2.6, must close no.
+
+### Red run of review round 2 (tester, 2026-11-25)
+
+**State:** `story/2-10` on `7364da7`, with the uncommitted build in place. The tests were added and nothing else was changed: no `src/` change, and no existing test edited.
+
+The tests are in:
+- `crates/am-app/tests/accounts_keyless.rs`, in a section headed "review round 2";
+- `crates/am-providers/tests/error_body.rs`, which is new. `common.rs`'s own unit tests are in `src/`, so this test reaches its error path through both public adapters;
+- `crates/am-e2e/tests/trust/rule_09_keyless.rs`.
+
+**Command:** `cargo nextest run --no-fail-fast` over the default members. Result: 1,780 run, 1,772 passed, 8 failed, 8 skipped. The 8 failures are the 8 new reds below; nothing else fails.
+
+**Red, one line each:**
+- **K1, row 14:** `row_14s_words_name_change_first_and_give_no_hand_edit_advice`. The `test` words do not name `agentic accounts change router`; they give hand-edit advice ("put `secret_ref: router` back in its entry").
+- **K1, row 16:** `row_16s_words_say_change_confirms_it_keyless_and_how_to_give_it_a_key`. The `test` words never say `keyless`; they say "remove the `secret_ref` line, or confirm it with a key: `agentic accounts change llama`".
+- **K2, providers:** `am-providers::error_body an_error_body_cut_inside_a_character_never_panics_and_stays_within_the_limit`. The Anthropic adapter panics in `common.rs:163` (`truncate(2000)` inside `é`).
+- **K2, `test` output:** `test_prints_a_reply_and_an_error_body_with_control_characters_neutralised`. A streamed reply is printed with raw ESC, BEL, CR, C1 CSI and BS (`['\u{1b}', '\u{7}', …, '\u{9b}', '\u{8}']`). A probe also showed that the error body (HTTP 400) and the error event both exit 1 with the same raw characters.
+- **K3:** `add_never_names_a_keyless_record_as_where_a_held_key_was_last_confirmed`. The sentence says "It was last confirmed for provider openai-compatible at http://127.0.0.1:8080", which is the keyless record.
+- **K4, change:** `change_to_a_reserved_local_port_is_refused_before_any_prompt`. `change llama --base-url http://127.0.0.1:1234/v1` succeeds (exit 0, "changed the Account 'llama' to … 127.0.0.1:1234").
+- **K4, under the lock:** `an_add_whose_port_the_app_takes_while_it_waits_is_refused_under_the_lock`. An `agentic serve` records port 9090 while the id prompt waits, and the keyless add still succeeds ("added the Account 'llama' (…, http://127.0.0.1:9090/v1)").
+- **K5:** `remove_describes_an_entry_by_its_records_key_state`. Removing a row-16 entry says "Its key stays in the Keychain; delete the entry 'llama' … in Keychain Access".
+
+**Green on arrival:**
+- **K1:** `change_repairs_both_key_state_mismatches_as_the_words_say`. The fix the new words name already works:
+  - in the row-16 state, `agentic accounts change llama` (id, `yes`) leaves the Account keyless, with no `secret_ref`, `account_changed key: none`, no Keychain call, and `test` sending no credential;
+  - in the row-14 state, `agentic accounts change router` puts `secret_ref: router` back, with no Keychain call, and `test` sends the key.
+- **K8:** `am-e2e::rule_09_keyless a_stamp_that_turns_keyless_between_takes_is_refused_before_any_keychain_read`. The code exists; this guards it.
+  - The directory's first stamp is keyed but for port 8081, so no key is read. The stamp taken again inside the loop is keyless at 8080, and is refused there: 2 takes, zero Keychain calls, nothing sent, `egress.blocked` with `account`, the endpoint and "has no key".
+  - In the control case the stamp taken again stays keyed. The same pass then reads and sends the key, so the refusal above comes from the loop's check.
+
+**Not reachable without a `src/` seam:**
+- **K5, store-read error.** `remove` reads the record's key state under the lock, after `Locked::take`'s owner-only checks. It has no prompt or other hook between the lock and that read. A store that fails there also fails the write that follows, so the success line ("It had no key") cannot be reached with a failed read. The fix's handling of that error is left to review. A unit test inside `src/` would be the implementer's, and the manager decides.
+- **K4, reserved ports under the lock.** Ports 1234 and 11434 are fixed, so they cannot become taken while a prompt waits. Only the own-port half of `add`'s check under the lock can be reached, and it is tested above.
+
+**Words pinned (tester, 2026-11-25), on top of the triage:**
+- **Row 14:** each of `test`'s err, the `list` line and the directory's refusal:
+  - holds `agentic accounts change <id>` before `secret_ref: <id>`;
+  - holds none of "put" (as a word), "remove the `secret_ref` line", "remove the line", "back in its entry", "edit the file", "edit its entry", "edit accounts.yaml" or "by hand".
+- **Row 16:** the same three forms:
+  - hold `agentic accounts change <id>`, `keyless`, `agentic accounts remove <id>` and ``without `--no-key` ``;
+  - never hold ``with a key: `agentic accounts change``;
+  - hold no hand-edit phrase.
+- **K2, providers:** the kept body is at most 2,000 bytes, keeps the 1,999 ASCII bytes, and holds no U+FFFD.
+- **K2, `test`:** nothing `test` prints, on stdout or stderr, holds a control character other than `\n`, and the visible text is kept.
+- **K3:**
+  - with an earlier keyed confirmation, the sentence names it ("last confirmed for provider openai-compatible at https://openrouter.example:443");
+  - with none, it keeps the existing words "No confirmation of it is recorded on this Mac".
+- **K4:**
+  - `change` exits 1 before any prompt, naming `local-lmstudio` or `local-ollama`;
+  - under the lock, `add` exits 1 naming "the app's own server is listening on port 9090", with no `set` or `delete` and nothing written.
+- **K5:**
+  - a row-16 entry: stdout holds "no key", and never "stays in the Keychain" or "Keychain Access";
+  - a row-14 entry on this Mac keeps "stays in the Keychain", and never "It had no key".
+
+**Also green:**
+- `cargo clippy --all-targets -D warnings`, over the default members;
+- `cargo fmt --all -- --check`;
+- `cargo xtask check-deps`;
+- `cargo xtask denylist`;
+- `cargo xtask fixed-hosts`;
+- `cargo test --doc -p am-app -p am-providers`.
+
+**Test lines added:**
+
+| File | Lines |
+|---|---|
+| `accounts_keyless.rs` | +486 |
+| `error_body.rs` (new) | 128 |
+| `rule_09_keyless.rs` | +151 |
+| **Total** | about 765 |
+
+### Build, review round 2 (implementer, 2026-11-25)
+
+The tester's 8 reds now pass, and no test was edited. K8 is still green.
+
+- **K1:** `key_use::keyed_without_line_words` and `keyless_with_line_words` are rewritten. The refusal, `list`'s `unconfirmed:` column and `test` all use them.
+  - **Row 14:** "run `agentic accounts change <id>` in a terminal: it confirms it again with its key and writes `secret_ref: <id>` to its entry".
+  - **Row 16:** "run `agentic accounts change <id>` in a terminal: it confirms it keyless again and removes its `secret_ref` line. To give it a key instead, remove it with `agentic accounts remove <id>` and add it again without `--no-key`".
+  - Matrix row 16 is corrected, marked as the manager's correction, K1.
+- **K2:** `am-providers/src/common.rs` now cuts the error body with `floor_char_boundary(2000)`. `agentic accounts test` prints these through a new `printable` function: the streamed reply, the error text (an HTTP body or a stream error event) together with the block words, and the Q1 cause.
+  - `printable` is `am_domain::text::escape_hidden`, the same table `agentic gate` uses, with a tab also escaped. Only `\n` stays raw.
+  - `am-providers`' `neutralise` is unchanged.
+- **K3:** `last_confirmed` skips `account_added` and `account_changed` records with `key: none`.
+- **K4:** `change` calls `not_a_taken_port` before its prompts and again under the lock. It replaces 2.14's `not_the_app`, and the own-port words are the same. `add` repeats `not_a_taken_port` under the lock, before any Keychain `set`.
+- **K5:** the new `removed_key_words` takes the live record's key state, or the entry's when there is no record. A record that cannot be read never says "It had no key". The in-crate unit test `accounts::tests::removes_words_never_say_no_key_when_the_record_cannot_be_read` covers this.
+- **Register:**
+  - DR-188 reworded (K7);
+  - DR-191 note added (K6);
+  - DR-193 added (K9): 2.6 may answer the reserved local Accounts `keyed: false`; Target 2.6, must close no.
+
+**Size of round 2:**
+- `src`: +74 / −24. About +47 lines are production code; +27 are the in-crate unit test.
+- Docs: three register rows.
+- Tests: the tester's, about 765 lines.
+
+### Review triage, round 2 (manager, 2026-11-25)
+
+A focused Opus re-review found round 2 sound: no blocker and nothing important. K1–K5 are correct and complete, and they open no new hole.
+- **K2's escaping:** `printable` covers every server-controlled path in `test`. It escapes each character, so a sequence split across chunks cannot get through. It covers C1, ESC, BEL, DEL and the bidi controls.
+- **Unchanged:** egress, the allow-lists, `prices.rs`, 3.4's code, taint, `neutralise` and the check-deps rules.
+
+Nits:
+- **N1:** DR-193's text claimed a Keychain read that does not happen. `credential_is_callers` already refuses it, and `rule_09_callers` tests that. The row is reworded.
+- **N3 → DR-194 (2.8, must close):** `\n` stays raw in `test`'s error paths, so a process squatting on the port could add forged stderr lines.
+- **N2 → DR-195 (2.8):** `remove`'s "It had no key" after a `--no-key` provider change.
+- **N4 → DR-196 (2.8):** two wording edges.
+
+## Auto Run Result
+
+**Status:** built, 2026-11-25. Security story; planned, tested, built and reviewed on Opus under the owner's rule of 2026-11-25. The owner approved the plan with Q1, Q2, Q5 and Q6 as answered. AD-15 and 4.17 record Q6 (#49).
+
+**Summary.** `agentic accounts add|change --no-key` creates a keyless `openai-compatible` Account at `http://127.0.0.1:<port>` only.
+- It is refused for any other endpoint before any prompt, in every spelling.
+- It is terminal-only, with typed-name confirmation.
+- It stores and reads no key and no placeholder, writes no `secret_ref`, and makes no Keychain call of any kind.
+- am-net refuses a credential reference for a keyless Account before any Keychain read, and audits `egress.blocked`.
+- The key-use check compares the file with the record. A keyed record with no line (row 14) and a keyless record with a line (row 16) are both refused, and each refusal names `agentic accounts change <id>` as the repair.
+- The writer refuses an Undo or Restore that flips the key state, in both directions (Q6).
+- When a keyless Account's local server does not answer, the error says so, and never mentions a key, the cloud or a credential (Q1).
+- `accounts test` neutralises server text before printing it.
+- The error-body truncation is char-safe.
+- `add` and `change` refuse the reserved local ports and the app's own ports, again under the lock.
+- `list`, `test` and `remove` speak of keyless Accounts.
+- 3.7's pricing is unchanged: a keyless Account is local at zero cost.
+
+**Register:**
+- DR-079 is closed.
+- Added: DR-187 (port-squat risk, accepted), DR-188 (a leftover key is never read), DR-189 (4.17), DR-190 (owner: 12.16 keyless), DR-191 (search and crawl key state), DR-192 (validate), DR-193 (reserved Accounts' words), and DR-194..196 (2.8 sweep).
+
+**Size (code and test lines separately):**
+- Production code: about 553 net lines.
+- In-crate tests: about 26 lines.
+- Docs: about 9 lines.
+- Tests: about 3,730 lines.
+
+**Tests.** Written first, with a red run logged for the build and for review round 2. `just check` passed with 1,781 tests and 8 skipped.
+
+**Review (Opus):**
+- Round 1 (correctness and adversarial security): no blocker; K1–K9 fixed.
+- Round 2 (focused re-review): sound; the nits went to the register.
+
+**Process notes for the owner:**
+- The tests started before the Q6 replan (#49) merged, against my earlier note. The tests do not depend on its text, and the note is corrected.
+- The tester once built `am-desktop` through `--workspace`, and so did the implementer once with clippy. Both passed. Nothing was cleaned, and no copy was built.

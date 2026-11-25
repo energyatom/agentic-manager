@@ -1131,6 +1131,8 @@ fn migrate(
                         &e.provider,
                         e.name.as_deref(),
                         e.endpoint.written(),
+                        // A migrated Account keeps its key (story 2.10).
+                        am_config::KeyState::Stored,
                     ),
                     built_on,
                     vec![note],
@@ -1140,6 +1142,7 @@ fn migrate(
                     &e.provider,
                     e.name.as_deref(),
                     e.endpoint.written(),
+                    am_config::KeyState::Stored,
                 )
                 .and_then(|bytes| {
                     locked.writer.create(

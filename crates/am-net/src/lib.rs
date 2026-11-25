@@ -83,6 +83,16 @@ fn key_moved_words(account: &str) -> String {
     )
 }
 
+/// Why a credential is refused for a keyless Account (story 2.10, AD-15
+/// *Keyless loopback Account*; owner Q4): it is refused before any Keychain
+/// read, so a key a removed Account left under the same id is never read
+/// or sent.
+fn keyless_words(account: &str) -> String {
+    format!(
+        "the Account {account} has no key on this Mac, so its requests carry no credential; a request for it that names one is refused and no Keychain entry is read"
+    )
+}
+
 /// The start of a refusal of an Account its directory does not answer
 /// (an internal marker, stripped before anything is shown or audited).
 const ACCOUNT_NOT_ANSWERED: &str = "\u{0}account-not-answered:";
@@ -767,6 +777,19 @@ impl Inner {
             .auth
             .as_ref()
             .map(|auth| self.directory.account_stamp(&auth.account_id));
+        // Story 2.10: a keyless Account's request never carries a
+        // credential, refused before anything is resolved or read.
+        if let (Some(auth), Some(Some(s))) = (&req.auth, &stamp)
+            && !s.keyed
+        {
+            return Err(self.refuse(
+                Some(&caller),
+                Refused {
+                    target: Some(current.clone()),
+                    reason: keyless_words(&auth.account_id),
+                },
+            ));
+        }
         let mut addr = match self.checked_addr(&caller, &current).await? {
             Ok(a) => a,
             Err(refused) => return Err(self.refuse(Some(&caller), refused)),
@@ -784,6 +807,17 @@ impl Inner {
             let mut attempt = 0;
             loop {
                 let before = stamp.take().flatten();
+                // A stamp taken again may have turned keyless: still no
+                // Keychain read (story 2.10).
+                if before.as_ref().is_some_and(|s| !s.keyed) {
+                    return Err(self.refuse(
+                        Some(&caller),
+                        Refused {
+                            target: Some(current.clone()),
+                            reason: keyless_words(&auth.account_id),
+                        },
+                    ));
+                }
                 let goes_to = current.endpoint();
                 if let Some(before) = before.filter(|s| Some(&s.endpoint) == goes_to.as_ref()) {
                     let secret = self

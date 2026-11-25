@@ -558,7 +558,9 @@ pub(crate) fn accounts(rep: &mut Report, root: &Node) -> Vec<Account> {
             );
         }
         // A key is read only from the entry named by the Account's own id
-        // (AD-17): `secret_ref`, when present, must say so.
+        // (AD-17): `secret_ref`, when present, must say so. The fix never
+        // says to drop the line: without it the Account is keyless (story
+        // 2.10, AD-15).
         let secret_ref = a.text(rep, "secret_ref");
         if let (Some(id), Some(entry)) = (&id, &secret_ref)
             && entry.value != id.value
@@ -571,7 +573,7 @@ pub(crate) fn accounts(rep: &mut Report, root: &Node) -> Vec<Account> {
                     "secret_ref names another Keychain entry than the Account's own id '{}'; a key is only ever read from the entry named by the Account's id",
                     id.value
                 ),
-                format!("write `secret_ref: {}`, or remove the line", id.value),
+                format!("write `secret_ref: {}`", id.value),
             );
         }
         if let Some(id) = &id {
