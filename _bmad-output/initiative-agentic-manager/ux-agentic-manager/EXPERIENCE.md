@@ -81,7 +81,7 @@ Microcopy. Brand posture lives in `DESIGN.md` › Brand & Style. Plain words, se
 
 **Hats** are written as "You (Reviewer)", "You (Developer hat)" in history and provenance.
 
-**Currency.** INR by default, with "₹" and Indian digit grouping (₹1,20,000); USD on toggle. Local calls read "₹0 · 41k tokens · 2m 40s".
+**Currency.** The company currency is pre-filled from the Mac's locale and confirmed in the wizard; amounts use its symbol and the locale's digit grouping (for example "₹1,20,000" for INR, "€120.000" for EUR); USD on toggle. Local calls show zero in the company currency, for example "₹0 · 41k tokens · 2m 40s" for a company in INR. Company A's own figures stay in INR.
 
 ## Component Patterns
 
