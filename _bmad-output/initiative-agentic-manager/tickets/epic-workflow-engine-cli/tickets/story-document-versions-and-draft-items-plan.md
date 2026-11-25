@@ -3,16 +3,16 @@ title: 'Document versions and Draft items'
 type: feature
 ticket: 21
 created: '2026-11-24'
-status: approved
-baseline_revision: '2ac755b'
+status: built
+baseline_revision: '835525a'
 after: [22]
 route: full
 route_source: auto
 risk: high
 review: quick
 review_source: pinned
-lenses_ran: []
-review_loop_iteration: 0
+lenses_ran: [correctness, adversarial-security]
+review_loop_iteration: 2
 followup_review_recommended: false
 context:
   - '{project-root}/docs/owner-standing-rules.md'
@@ -142,7 +142,7 @@ The verify, as re-sliced (Sofia's entry 21 is the spec once merged): a document 
 - 2026-11-24, owner (re-slice): split from the approved 3.6 plan (`story-rows-and-documents-written-with-provenance-plan.md`, now 3.6a's `story-rows-written-with-provenance-through-toolgate-plan.md`). Approved answers carried over unchanged. Carries rows 23–27, 29, 30, 39, the document halves of 18, 22, 28, 31, Q5–Q8's build, and `document_versions` with `step_runs.writes_document` as migration 0011 (new row 41; renumbered 0012 by the second re-slice). Baseline set when it starts.
 - 2026-11-24, owner (second re-slice): the row-read side moved from 3.6a to a new 3.6c (entry 22, "Rows reaching later steps"), built after 3.6a and before this slice. This slice's scope is unchanged; its migration is renumbered 0011 → 0012 so the order is 0010 (3.6a), 0011 (3.6c), 0012 (3.6b); its baseline is set after 3.6c (`TBD-after-3.6c`); Q4's reader condition is 3.6c's.
 - 2026-11-24, owner (third re-slice): 3.6a split into the store slice (entry 6) and the ToolGate slice (entry 23); this slice now builds after 3.6c (`after = [22]`, baseline `TBD-after-3.6c`). Its scope and migration number (0012) are unchanged; "3.6a" in this plan names the two (Intent, Naming). Size reported as code and test lines.
-- 2026-11-25, manager: baseline set to `2ac755b`, 3.6c's head (PR #45). Main after #45's squash merge has the same tree, and this branch is rebased onto it.
+- 2026-11-25, manager: baseline set to `835525a`, main after 3.6c's squash merge (PR #45; same tree as 3.6c's head `2ac755b`). This branch was rebased onto it.
 
 ## Design Notes
 
@@ -381,3 +381,193 @@ agentic validate --template fixtures/projects/rows-documents
 - The applied patch brought about 1,806 added and 81 removed.
 - The tester's own lines this round are about 674 added and 36 removed. Most of them are `documents.rs` +573 (migration 0012: about 330 lines of fixture and helpers, about 240 of the four tests). The rest: `run_rows.rs` +15, `documents_versions.rs` +29, `rule_16_row_provenance.rs` +30 −13, the three local `versions_of` helpers, and `support/mod.rs` −10 +2.
 - Fixture: +8 −4. `src/`: 10 doc-comment lines, from the patch.
+
+### Review triage, round 1 (manager, 2026-11-25)
+
+Two Opus reviews of the built diff: correctness (C) and adversarial security (S). Neither found a blocker. Both checked these and found them holding:
+- only a person dismisses a Draft;
+- a version and its Draft keep at least the attempt's taint;
+- no model text reaches the audit, the Draft's words, an `Instruction` or `TrustedInput`, or the terminal unescaped;
+- 3.4's resolve rule and the 3.6a/3.6c rules are unchanged;
+- 0012 is additive and fails closed.
+
+Fixes for round 2, tests first. The tester writes each failing test and logs red, then the implementer fixes.
+- **F1 (S1):** a version's text could change at rest: `step_runs.output` and `status` of the attempt a version names could still be updated. Fix: a 0012 trigger refusing `UPDATE OF output, status` on a `step_runs` row that a `document_versions` row names. The broader rule (output fixed once `finished_at` is set) is not taken here; it is not this slice's. Test: the updates are aborted and the text stays.
+- **F2 (S2, C1):** the writer let a document attempt finish `succeeded` with no version, through `FinishStep`, `SettleAndFinishStep` or `SettleAndLoopBack`. It also let `PauseStep` or `FailWithItem` raise a `draft` item with no version. Fix:
+  - those finish paths refuse `succeeded` or `looped_back` for an attempt whose `writes_document` is set; `failed` and `cancelled` stay allowed;
+  - `create_item` refuses `InboxKind::Draft` unless a `document_versions` row names the item's step run.
+  Tests: one store test per path, each refused with nothing written.
+- **F3 (S3, C on the open decision):** the Draft's words took the version number from a read before the transaction, so they could name a stale number once one process drives two runs of a document. Today this is latent behind the project lock. Fix:
+  - `SettleAndFinishDocumentStep` gains `expected_version: i64`;
+  - the writer refuses a mismatch with MAX+1, with nothing written;
+  - the engine reads the next number through a `MAX(version)` reader (`Reader::latest_document_version`), words the Draft from it, and on that refusal re-reads and retries once; a second mismatch fails the step with a Failure item.
+  Tests: a stale `expected_version` is refused in the store, and the engine's retry words the Draft with the committed number.
+- **F4 (C2):** the gate tests matched any standalone "1", and no test showed a tainted Draft. Fix: assert the exact line `document <id>  version <n>  run <run>`, and add a tainted-Draft gate test asserting the untrusted marker (3.4's `UNTRUSTED_ABOVE`).
+- **F5 (C3):** the 1 MiB test used ASCII, so it could not tell bytes from characters. Fix: add a multi-byte message under 1 Mi characters but over 1 MiB in bytes; it is refused.
+- **F6 (S4, C4):** hand-built plans got weaker checks than config. A document id with spaces, `/`, or bidi or format characters passed `run_on` and the store, and so did a document step with a blank seat or one document declared by steps of two teams. Fix:
+  - one shared document-id rule (am-config's kebab-case id rule, in a crate both am-engine and am-store already use), applied in the engine's and the store's `check_writes`;
+  - the engine refuses a document or table step with a blank seat, before any run row;
+  - `run_on` refuses one document id declared by steps whose `seat_team` differ.
+  Tests: each is refused before any run row, and the store refuses the bad id.
+- **F7 (S6):** the engine's refusal of a document step with a loop-back was untested. Fix: a loop-back case in `a_mixed_declaration_is_refused_before_any_row`.
+
+Deferred:
+- **D1 (S5) → DR-177:** `document_versions` records no owning team. 4.17 classifies a change of a document's owning team as widening (owner, 2026-11-24). The first reader of a version (3.15, 7.2) records or checks the owning team before it reads one.
+
+### Red run of review round 2 (tester, 2026-11-25)
+
+*Tester, on Opus, in the real working tree over the implementer's build, with the shared cache. No `cargo clean`, no copy, no git change, no `src/` change, no `am-desktop` build. The review ids F1 to F7 stay out of test text, because the denylist reads `F1` as a flow id. The tests say "fix 1" to "fix 7" instead.*
+
+**API pinned (fix 3):**
+- `WriteCommand::SettleAndFinishDocumentStep { …, expected_version: i64, … }`: the version the engine read as next, the document's newest + 1.
+- `Reader::latest_document_version(&self, document_id: &str) -> Result<Option<i64>, StoreError>`: `None` for a document with no version.
+- Not pinned: the error variant of a stale `expected_version`. The tests ask only for `Err` with nothing written. The engine must tell it apart for its one retry, so the variant is the implementer's choice.
+- Both constructions of the command in `tests/documents.rs` now pass `expected_version` (the rig's `document_with` reads it through the new reader; `document_at` takes it). Two shipped constructions are the implementer's to update: the in-crate unit test `a_non_human_resolve_of_a_draft_is_refused_in_the_writer` (`expected_version: 1`) and `am-engine/src/run.rs` `version()`.
+
+**Commands:**
+```
+cargo fmt --all
+cargo build -p am-store --tests
+cargo nextest run -p am-store --test <temporary copy of documents.rs without the fix-3 API> --no-fail-fast   (then deleted)
+cargo nextest run -p am-e2e --test documents_versions --test taint_documents_untrusted_markdown --test taint_documents_at_rest -p am-app --test gate_cli --no-fail-fast
+cargo nextest run --workspace --exclude am-desktop --exclude am-store --no-fail-fast
+cargo nextest run -p am-store --lib --test <every target but documents> --no-fail-fast
+cargo test --doc -p am-store -p am-domain; cargo xtask check-deps; cargo xtask denylist
+cargo clippy -p am-e2e --test documents_versions --test taint_documents_untrusted_markdown -p am-app --test gate_cli -- -D warnings
+```
+
+**am-store `tests/documents.rs` does not compile.** It has no field `expected_version` on `SettleAndFinishDocumentStep` (E0559, 2) and no `Reader::latest_document_version` (E0599, 5). So all 15 of its tests are red until fix 3 lands, round 1's ten included.
+
+To read each new test's own reason, a temporary copy of the file ran once and was then deleted. In that copy, `expected_version` was dropped and the reader was replaced by `document_versions(..).last()`. Round 1's ten tests passed in that copy; the five new ones failed:
+
+| Fix | Test | Red because (temporary copy) |
+|-----|------|------------------------------|
+| 1 | `a_versioned_attempts_output_and_status_never_change` | `UPDATE step_runs SET output = 'a forged summary'` on the versioned attempt is not aborted. The other three updates (`output = NULL`, `status = 'failed'`, status and output together) come after it. |
+| 2 | `a_document_attempt_succeeds_only_with_its_version` | `FinishStep` `succeeded` on the document attempt commits. `SettleAndFinishStep` `succeeded` and `SettleAndLoopBack` come after it. The controls (a `failed` `FinishStep`, and a `FailWithItem` with a Failure item) come last. |
+| 2 | `a_draft_is_raised_only_with_its_version` | `PauseStep` raising a Draft on the running document attempt commits. `FailWithItem` with a Draft, and both again on an attempt that declares no document, come after it. |
+| 3 | `a_stale_expected_version_is_refused_with_nothing_written` | does not compile (above). In the copy, the stale finish (expected 1 when version 1 exists) commits. "Ahead" (3) and 0 come after it; the right number (2) commits last. |
+| 6 | `a_document_id_outside_the_id_rule_never_starts` | `StartAttempt` with the document `summary note` starts. `summary/note`, U+202E and U+200B come after it; the control `summary-note` starts. |
+
+**am-e2e `documents_versions`: compiles; 3 red, the rest green.**
+
+| Fix | Test | Result |
+|-----|------|--------|
+| 6 | `a_document_id_outside_the_id_rule_is_refused_before_any_row` | red: `run_plan` is `Ok` and the run `succeeded` with the document `summary note` |
+| 6 | `a_writing_step_with_a_blank_seat_is_refused_before_any_row` | red: a run row is written. The run stops `failed` on the store's `StartAttempt` refusal ("an attempt that versions a document names the seat that writes it"), not before it. |
+| 6 | `one_document_of_two_teams_is_refused_before_any_row` | red: `run_plan` is `Ok` and the run `succeeded` with `summary-note` in teams `core` and `side` |
+| 3 | `a_second_run_adds_version_two` (guard added: each Draft's title and body name its own version's number and not the other's, matched by payload) | green: the normal path already words the committed number |
+| 5 | `a_document_is_measured_in_bytes` (new) | **green on arrival**: `markdown_refusal` already compares `len()` (bytes) with `DOCUMENT_MAX_BYTES`. The test pins it both ways: 2-byte and 4-byte messages under 1 Mi characters and over 1 MiB in bytes are refused, and exactly 1 MiB in bytes is a 1,048,576-byte version. |
+| 7 | `a_mixed_declaration_is_refused_before_any_row` | **green on arrival**. See the note below. |
+
+**fix 7:** the loop-back case was already case 1, written by the 2026-11-24 patch. A run past a missing check would have written a run row, so the engine's loop-back check was already covered. This round makes the cases tell their refusals apart: each now names its own clash (`schema`, `loop`, `gate`). It also adds a second loop-back case, the document step looping back past a step between.
+
+**fix 4 (all green on arrival: test-only).**
+- **Exact line:** `gate_cli` `a_draft_is_listed_and_dismissed` and e2e `the_cli_prints_a_draft_neutralised` now assert the line `document summary-note  version 1  run <run>`, trimmed, with two spaces between fields, as `draft_text` prints it. They replace the loose number match, and each asserts that a clean Draft shows no untrusted marker.
+- **Tainted Draft:** the new e2e test `a_tainted_draft_is_shown_as_untrusted` runs a poisoned document step with `run_plan` on the project's store, because the binary has no taint source yet. `agentic gate` then shows the exact line, and 3.4's `UNTRUSTED_ABOVE` text above the Markdown. Skipping writes nothing.
+
+**fix 3, the engine's retry: not reachable from a test without a `src/` change.** `Run::version()` reads the next number and sends `SettleAndFinishDocumentStep` with no `await` between them. No provider, store or second run can commit a version of the same document in that window deterministically. On a multi-thread runtime it is only a race. So it is the implementer's in-crate `#[cfg(test)]` test, with a seam that commits a version between the read and the send. That test should show two things:
+- the retry re-reads, and the Draft's title and body name the committed number;
+- a second mismatch fails the step with a Failure item.
+
+**Everything else is green.**
+- The default members without `am-desktop` and `am-store`: 1,420 tests run, 1,417 passed, 8 skipped. The 3 reds are the fix-6 engine tests above.
+- That run first also failed xtask `denylist` `current_repo_passes`, on `F1` in this round's own comments. Those were reworded to "fix 1"; `cargo xtask denylist` and that test now pass.
+- am-store without `documents`: 242 of 242 passed.
+- Doctests (`-p am-store -p am-domain`): all pass (8, 14, 3, 7).
+- `cargo xtask check-deps`: passes.
+- fmt is clean; clippy `-D warnings` is clean on the changed targets that compile.
+
+**Test lines this round:** about 609 added and 7 removed.
+- `tests/documents.rs` about +342 −2: the five tests, the rig's `next_version`, `document_at` and `failure_item`.
+- `documents_versions.rs` about +176 −3.
+- `taint_documents_untrusted_markdown.rs` about +82 −1.
+- `gate_cli.rs` +9 −1.
+
+### Review triage, round 2 (manager, 2026-11-25)
+
+A focused Opus re-review (correctness and security) of round 2 found F1, F3, F6 and F2's Draft rule sound. 3.4's resolve rule, `HumanActor`, `neutralise` and the 3.6a and 3.6c check-deps rules are unchanged. Fix for round 3, tests first:
+
+- **G1 (important):** F2 left one path open. A `PauseStep` with a Review item on a running document attempt, then a person's approve, reaches `ApplyResolution`'s Approve arm. That arm finishes the attempt `succeeded` with no version. The engine never sends this, because a gate journals no writes and a document step is never a gate, but the writer allowed it. `documents.rs`'s doc comment says no other way exists. Fix:
+  - `PauseStep` refuses a Review item on an attempt that journaled a document. Question items stay allowed, since 3.10's overflow pause may need them.
+  - The Approve arm calls `refuse_other_success` as a backstop.
+  - Test: the store test for the sequence is refused at the pause, with nothing written.
+- **G2 (nit):** the first engine retry test could not tell a fresh read from a blind +1. Fix: take two versions before the first send, so a fresh read sends 3 and a blind +1 would send 2 and be refused again.
+
+Deferred:
+- **G3 (nit) → DR-178:** the store's and the engine's checks of table and seat ids accept format characters such as U+202E and U+200B. This is older code from 3.6a, outside F6, which covered document ids. It goes to the 3.12 sweep.
+
+### Red run of review round 3 (tester, 2026-11-25)
+
+*Tester, on Opus, in the real working tree over the round-2 build, with the shared cache. No `cargo clean`, no copy, no git change, no `src/` change, no `am-desktop` build. G2 is the implementer's, because the retry test lives in `src/`.*
+
+**Test (fix G1):** `a_document_attempt_never_waits_on_a_review` in am-store `tests/documents.rs`, with one helper, `pause_item`, which builds an item with no payload (`max_returns: Some(0)` for a Review, as 3.4's tests build one; none for other kinds).
+- A running attempt, started with `AttemptWrites { document: Some("summary-note"), .. }`, is paused with `PauseStep` and a Review item.
+- The pause must be refused with nothing written: `state()` is unchanged (the audit count included), the attempt is still `running`, and the run has no Inbox item.
+- **Controls:** the same Review on a plain attempt (no document) is written, and the attempt is `waiting_human`. A Question on the document attempt still pauses it (`waiting_human`), with no version, for 3.10's overflow pause.
+
+**Commands:**
+```
+cargo fmt --all
+cargo nextest run -p am-store --test documents --no-fail-fast
+cargo nextest run -p am-store --test <temporary copy without the refused pause> -E 'test(a_document_attempt_never_waits_on_a_review)'   (then deleted)
+cargo clippy -p am-store --test documents -- -D warnings; cargo xtask denylist
+```
+
+**Red, with the reason:** `a_document_attempt_never_waits_on_a_review` fails at "a Review on a document attempt is refused". The `PauseStep` with a Review on the document attempt is `Ok`: the writer has no G1 check yet.
+
+**Controls checked on their own:** a temporary copy without the refused pause ran once and was then deleted. In it, the Review on the plain attempt and the Question on the document attempt both were written, so the test is red only at the pause.
+
+**Everything else:**
+- The other 15 tests in `documents.rs` pass.
+- fmt is clean, clippy `-D warnings` is clean on the target, and the denylist passes.
+- No `src/` line changed, so check-deps and the other suites are as round 2 left them.
+
+**Test lines:** about +78 in `tests/documents.rs`.
+
+## Auto Run Result
+
+**Status:** built, 2026-11-25. This is slice 4 of 4 of the re-sliced story 3.6. The slices run in this order: store (merged), ToolGate (merged), rows reaching later steps (merged, #45), then this one. Planned, tested, built and reviewed on Opus.
+
+**Summary.** A step that declares `document: D` stores its final message as a version of D, one per succeeded attempt. The owner approved this deviation (Q7). The version gets one Draft item, and only a person can dismiss it.
+
+- **Migration 0012:** adds `document_versions` (append-only, with no Markdown column) and `step_runs.writes_document` (set once).
+- **The finish:** `SettleAndFinishDocumentStep` settles the call, finishes the step, numbers the version, adds the Draft and writes the audit entries, all in one transaction.
+- **Audit:** `document.versioned` holds ids, the version, the taint and the byte count, never Markdown.
+- **Validation:** a final message that is empty, holds a NUL or exceeds 1 MiB fails the step with a Failure item and leaves no version.
+- **The `document:` key:**
+  - am-config checks it: kebab-case, one team per id, no `output_schema`, `loop_back` or `gate` alongside it, and never on a gate or fan-out step.
+  - `run_on` makes the same checks for a hand-built plan before any run row.
+  - One id rule, `am_domain::config_names::is_config_id`, serves am-config, the engine and the store.
+- **Dismissal:** a Draft takes only Dismiss, through 3.4's Human-only path, from `agentic gate` (`d`) and the API's UI class.
+- **Taint:** a version and its Draft carry the attempt's taint at rest.
+
+**Hardening from review:**
+- A versioned attempt's output and status never change (a trigger).
+- A document attempt never succeeds or loops back without its version, by any writer path; Approve is a backstop.
+- A Draft is never raised without a version.
+- A document attempt never waits on a Review.
+- The Draft names the committed version number: `expected_version` is checked by the writer, and the engine re-reads and retries once on a mismatch.
+
+**Size (owner rule: code and test lines separately):**
+- Code: 1,381 lines added, 71 removed. That is about 1,023 lines of production code, 14 lines of docs and 344 lines of in-crate `#[cfg(test)]` tests.
+- Tests: 3,124 lines added, 85 removed.
+- Fixture: 8 lines added, 4 removed.
+
+**Tests.**
+- Written first, with red runs logged for the build and for review rounds 2 and 3.
+- `just check`: 1,680 tests passed, 8 skipped.
+- The golden "so far" copy is unchanged: this slice adds no F1 capability, because F1's `document:` mentions are hand-off payloads (3.15).
+
+**Review (Opus).**
+- **Round 1:** correctness and adversarial security. No blocker. Fixes F1 to F7. D1 deferred as DR-177.
+- **Round 2:** a focused re-review. G1 and G2 fixed. G3 deferred as DR-178.
+- **Held throughout:**
+  - Human-only dismissal;
+  - taint at rest;
+  - no model text in the audit, in the Draft's words, in an `Instruction` or `TrustedInput`, or unescaped on the terminal;
+  - 3.4's resolve rule, `neutralise`, and the check-deps rules of 3.6a and 3.6c, all unchanged.
+
+**Decisions made under the standing rules:**
+- The `StoreError::StaleVersion` variant and the public `is_config_id` follow from F3 and F6.
+- The table and seat id checks are deferred to the 3.12 sweep (DR-178).
+- Document ownership is deferred to 4.17 and 3.15 (DR-177).

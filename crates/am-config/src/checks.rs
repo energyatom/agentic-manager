@@ -107,14 +107,10 @@ pub(crate) fn migration_failed_fix(why: &str) -> String {
 }
 
 /// A config id: kebab-case, lowercase letters and digits in hyphen-separated
-/// words (Conventions).
+/// words (Conventions). The one rule, am-domain's (story 3.21), which
+/// am-engine and am-store also check a document id against.
 pub(crate) fn is_kebab(id: &str) -> bool {
-    !id.is_empty()
-        && id.split('-').all(|w| {
-            !w.is_empty()
-                && w.chars()
-                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
-        })
+    am_domain::config_names::is_config_id(id)
 }
 
 /// The id a non-kebab name would have, for the fix text.

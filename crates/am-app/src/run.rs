@@ -500,7 +500,9 @@ pub(crate) fn plan_of(
                 grants: seat.grants.clone(),
                 seat_team: seat.team.clone(),
                 table,
-                document: None,
+                // Story 3.21: a gate declares none (a config error); the
+                // engine refuses one that does.
+                document: step.document.clone(),
                 // Story 3.22: no config key names rows a step reads yet
                 // (3.15 and 7.2 fill the slot).
                 row_inputs: Vec::new(),
@@ -539,7 +541,8 @@ pub(crate) fn plan_of(
             grants: seat.grants.clone(),
             seat_team: seat.team.clone(),
             table,
-            document: None,
+            // Story 3.21 (AD-29): the one document the step versions.
+            document: step.document.clone(),
             // Story 3.22: no config key names rows a step reads yet (3.15
             // and 7.2 fill the slot).
             row_inputs: Vec::new(),

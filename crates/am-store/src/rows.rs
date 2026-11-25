@@ -808,13 +808,18 @@ impl Reader {
 
     /// What the attempt may write, as journaled when it started; `None` for
     /// an attempt that journaled none (one from before migration 0010, a
-    /// gate, or one started without its writes).
+    /// gate, or one started without its writes). Since story 3.21 it names
+    /// the document the attempt versions (migration 0012).
     pub fn attempt_writes(&self, step_run_id: &str) -> Result<Option<AttemptWrites>, StoreError> {
         let (seat, table) = journaled_writes(&self.conn, step_run_id)?;
-        Ok(seat.map(|seat| AttemptWrites {
+        let Some(seat) = seat else {
+            return Ok(None);
+        };
+        let document = crate::documents::journaled_document(&self.conn, step_run_id)?;
+        Ok(Some(AttemptWrites {
             seat,
             table,
-            document: None,
+            document,
         }))
     }
 }

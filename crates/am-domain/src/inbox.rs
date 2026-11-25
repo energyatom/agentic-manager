@@ -98,16 +98,15 @@ impl Decision {
 
     /// The decisions an item of `kind` takes in this version: a Review is
     /// approved, returned (with a note) or rejected; a Question is answered;
-    /// a Failure is dismissed. The other four kinds take none until their
-    /// stories.
+    /// a Failure is dismissed; since story 3.6b a Draft is dismissed (owner
+    /// Q8: only a person, through the Human-only resolve). The other three
+    /// kinds take none until their stories.
     pub fn allowed_for(kind: InboxKind) -> &'static [Decision] {
         match kind {
             InboxKind::Review => &[Decision::Approve, Decision::Return, Decision::Reject],
             InboxKind::Question => &[Decision::Answer],
-            InboxKind::Failure => &[Decision::Dismiss],
-            InboxKind::Approval | InboxKind::Draft | InboxKind::BudgetAsk | InboxKind::Proposal => {
-                &[]
-            }
+            InboxKind::Failure | InboxKind::Draft => &[Decision::Dismiss],
+            InboxKind::Approval | InboxKind::BudgetAsk | InboxKind::Proposal => &[],
         }
     }
 

@@ -6,6 +6,10 @@
 //! Names are compared ignoring case (APFS's default). Every name is ASCII,
 //! so a component equals one only when its lowercase form does; Unicode
 //! normalisation cannot turn non-ASCII text into ASCII letters.
+//!
+//! Story 3.21 (review round 2): [`is_config_id`] is the one rule for a
+//! config id (a seat, table, document or workflow id), which am-config's
+//! validator, am-engine's plan check and am-store's writer all apply.
 
 use crate::runtime::{LEGACY_DIR, OPEN_MARKER, RUNTIME_SEED};
 
@@ -43,4 +47,18 @@ pub fn config_name_in(rel: &str) -> Option<&'static str> {
 /// with `/`) is a config name, compared ignoring case.
 pub fn is_config_bearing(rel: &str) -> bool {
     config_name_in(rel).is_some()
+}
+
+/// A config id (Conventions): kebab-case, lowercase ASCII letters and
+/// digits in one or more words joined by single hyphens, with no leading or
+/// trailing hyphen. So no space, `/`, control, format or bidi character can
+/// be in one. The one rule am-config validates config ids with, and am-engine
+/// and am-store check a document id against (story 3.21).
+pub fn is_config_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.split('-').all(|w| {
+            !w.is_empty()
+                && w.chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        })
 }

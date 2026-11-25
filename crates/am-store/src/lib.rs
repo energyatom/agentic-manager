@@ -64,6 +64,15 @@
 //! image's taint; the row's text stays on the image, and its prompt part is
 //! fenced, never trusted. [`Reader::row_snapshot`] is the row's current
 //! after-image, the one content reader the engine names.
+//!
+//! Epic 3 story 21, "Document versions and Draft items" (AD-10, AD-28,
+//! AD-29, AD-35, AD-43; migration 0012): an attempt journals the document
+//! it versions when it starts; its success
+//! ([`WriteCommand::SettleAndFinishDocumentStep`]) stores its Markdown once,
+//! as its output, numbers the version per document, and raises one Draft
+//! item, in one transaction (see `documents`). `document_versions` is
+//! append-only; a version and its Draft carry the attempt's taint. Only a
+//! person dismisses a Draft, through [`Writer::resolve_inbox_item`].
 #![forbid(unsafe_code)]
 
 use std::collections::BTreeMap;
@@ -78,6 +87,7 @@ use serde_json::{Value, json};
 
 pub mod audit;
 mod config_history;
+mod documents;
 mod fsx;
 pub mod legacy;
 mod migrations;
@@ -88,6 +98,7 @@ pub mod user;
 
 pub use audit::{ChainBreak, ChainOk, ConfigNote, verify_jsonl};
 pub use config_history::StoreConfigHistory;
+pub use documents::{DOCUMENT_MAX_BYTES, DocumentVersionRecord, markdown_refusal};
 pub use fsx::stream_copy;
 pub use migrations::{AppliedMigration, OpenReport, PRE_MIGRATION_KEPT, SCHEMA_VERSION};
 use project::ProjectLock;
@@ -209,6 +220,19 @@ pub enum StoreError {
     /// row.
     #[error("{0}")]
     RowRefused(String),
+    /// Story 3.21 (review round 2): a document step's finish expected the
+    /// version number `expected`, and the document's next one is `next`
+    /// (another finish took it first, or the number was never the next);
+    /// nothing was written. The engine reads the number again and tries
+    /// once more.
+    #[error(
+        "refused: the next version of the document `{document_id}` is {next}, not {expected}; nothing was changed"
+    )]
+    StaleVersion {
+        document_id: String,
+        expected: i64,
+        next: i64,
+    },
     #[error("no pending config intent {0}")]
     NoConfigIntent(String),
 }
@@ -279,8 +303,9 @@ pub enum WriteCommand {
     /// Story 3.6, the store slice (AD-21): `writes` is what the attempt may
     /// write, journaled on it in the same transaction and never changed:
     /// the seat that runs it (the one `Actor::Seat` that writes its rows)
-    /// and the one table it may write (`None`: no row). A document is
-    /// refused in words until story 3.6b.
+    /// and the one table it may write (`None`: no row). Story 3.21: and
+    /// the one document it versions (`None`: none), which needs the seat
+    /// too; set once (migration 0012's triggers).
     StartAttempt {
         step_run_id: String,
         inputs: Vec<StepInput>,
@@ -337,6 +362,35 @@ pub enum WriteCommand {
         step_run_id: String,
         status: String,
         output: Option<String>,
+    },
+    /// Story 3.21 (AD-8, AD-10, AD-28, AD-29, AD-43; owner Q5 to Q8): a
+    /// document step's success, in one transaction: the call settles, the
+    /// `running` attempt finishes `succeeded` with `output` (the Markdown,
+    /// stored once, there), the version `version_id` of `document_id` is
+    /// numbered (the document's newest + 1: one per succeeded attempt) and
+    /// stored with the attempt's run, number, taint and byte count, and
+    /// `item` (a Draft whose payload is the attempt) is raised with at least
+    /// that taint. `expected_version` is the number the caller read as next
+    /// and words the Draft with: one that is not the document's newest + 1
+    /// is [`StoreError::StaleVersion`] (review round 2). Refused with
+    /// nothing written: an actor other than
+    /// `Actor::System` (AD-28), a `document_id` other than the one the
+    /// attempt journaled when it started (or an attempt that journaled
+    /// none), Markdown that [`markdown_refusal`] refuses, an item that is not
+    /// a Draft on the attempt. Audited `model_call.settled+step.finished`
+    /// (3.5's `output_sha256`), `document.versioned` (ids, the version, the
+    /// taint, the bytes; never the Markdown, no hash of it) and
+    /// `inbox.created`.
+    SettleAndFinishDocumentStep {
+        call_id: String,
+        usage: Option<Usage>,
+        cost_micro_usd: Option<i64>,
+        step_run_id: String,
+        output: String,
+        version_id: String,
+        document_id: String,
+        expected_version: i64,
+        item: NewInboxItem,
     },
     /// Story 3.3 (AD-36): settle the producing attempt's call and end the
     /// attempt `looped_back` with `output` (which holds its reasons) stored,
@@ -523,6 +577,7 @@ impl WriteCommand {
             WriteCommand::StartStep { .. }
             | WriteCommand::StartAttempt { .. }
             | WriteCommand::SettleAndLoopBack { .. }
+            | WriteCommand::SettleAndFinishDocumentStep { .. }
             | WriteCommand::PauseStep { .. }
             | WriteCommand::FailWithItem { .. }
             | WriteCommand::FailBeforeStart { .. }
@@ -699,8 +754,8 @@ pub struct StepInput {
 /// What a step attempt may write (story 3.6, the store slice; AD-21,
 /// RULE-8), journaled when it starts and never changed: `seat` is the seat
 /// that runs it (a blank one is journaled as none), `table` the one config
-/// table it may write (`None`: none).
-/// `document` is refused in words until story 3.6b versions documents.
+/// table it may write (`None`: none); since story 3.21 `document` is the
+/// one document it versions (`None`: none).
 /// Read back with [`Reader::attempt_writes`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AttemptWrites {
@@ -860,6 +915,16 @@ impl Writer {
     /// ```compile_fail
     /// # fn f(w: am_store::Writer) -> Result<(), am_store::StoreError> {
     /// w.resolve_inbox_item(am_domain::Actor::System { component: "engine".into() }, "i", am_domain::Decision::Approve, None)
+    /// # }
+    /// ```
+    ///
+    /// nor does a seat dismissing a Draft (story 3.6b, owner Q8: only a
+    /// person dismisses one):
+    ///
+    /// ```compile_fail
+    /// # fn f(w: am_store::Writer) -> Result<(), am_store::StoreError> {
+    /// let seat = am_domain::Actor::Seat { seat: "seat-writer".into(), run: uuid::Uuid::nil(), step: "summarise".into() };
+    /// w.resolve_inbox_item(seat, "i", am_domain::Decision::Dismiss, None)
     /// # }
     /// ```
     ///
@@ -1153,6 +1218,7 @@ pub(crate) fn execute(
         WriteCommand::PauseStep { .. }
             | WriteCommand::FailWithItem { .. }
             | WriteCommand::FailBeforeStart { .. }
+            | WriteCommand::SettleAndFinishDocumentStep { .. }
     ) && !matches!(actor, Actor::System { .. })
     {
         return Err(StoreError::Invalid(format!(
@@ -1174,6 +1240,7 @@ pub(crate) fn execute(
     match cmd {
         WriteCommand::FinishStep { step_run_id, .. }
         | WriteCommand::SettleAndFinishStep { step_run_id, .. }
+        | WriteCommand::SettleAndFinishDocumentStep { step_run_id, .. }
         | WriteCommand::SettleAndLoopBack { step_run_id, .. }
         | WriteCommand::PauseStep { step_run_id, .. }
         | WriteCommand::FailWithItem { step_run_id, .. } => {
@@ -1306,11 +1373,9 @@ pub(crate) fn execute(
             status,
             output,
         } => {
-            require(
-                &step_of(tx, step_run_id)?,
-                &[StepStatus::Running],
-                "finishes",
-            )?;
+            let step = step_of(tx, step_run_id)?;
+            require(&step, &[StepStatus::Running], "finishes")?;
+            documents::refuse_other_success(tx, &step, status)?;
             finish_step(tx, step_run_id, status, output, &now)?;
         }
         WriteCommand::SettleAndFinishStep {
@@ -1321,14 +1386,39 @@ pub(crate) fn execute(
             status,
             output,
         } => {
-            require(
-                &step_of(tx, step_run_id)?,
-                &[StepStatus::Running],
-                "finishes",
-            )?;
+            let step = step_of(tx, step_run_id)?;
+            require(&step, &[StepStatus::Running], "finishes")?;
+            documents::refuse_other_success(tx, &step, status)?;
             call_of_step(tx, call_id, step_run_id)?;
             settle(tx, call_id, *usage, *cost_micro_usd)?;
             finish_step(tx, step_run_id, status, output, &now)?;
+        }
+        WriteCommand::SettleAndFinishDocumentStep {
+            call_id,
+            usage,
+            cost_micro_usd,
+            step_run_id,
+            output,
+            version_id,
+            document_id,
+            expected_version,
+            item,
+        } => {
+            built = Some(documents::settle_and_finish(
+                tx,
+                &documents::DocumentFinish {
+                    call_id,
+                    usage: *usage,
+                    cost_micro_usd: *cost_micro_usd,
+                    step_run_id,
+                    output,
+                    version_id,
+                    document_id,
+                    expected_version: *expected_version,
+                    item,
+                },
+                &now,
+            )?);
         }
         WriteCommand::SettleAndLoopBack {
             call_id,
@@ -1374,6 +1464,9 @@ pub(crate) fn execute(
                 "waits for a person",
             )?;
             run_open_for(tx, &step)?;
+            // Review round 3 (G1): a document attempt never waits on a
+            // Review, whose approve would finish it with no version.
+            documents::refuse_review_on_document(tx, &step, item.kind)?;
             let mut entries = Vec::new();
             // AD-8 has no edge from `queued` to `waiting_human`: a queued
             // step starts first (its inputs, taint and `started_at`), then
@@ -2084,7 +2177,7 @@ fn no_step_waits(tx: &rusqlite::Transaction, run_id: &str) -> Result<(), StoreEr
 /// its `step.started` entry. The attempt's taint is at least that of every
 /// input already journaled for it (a loop-back target's `loop_back` input).
 /// Story 3.6: `writes`, when given, is journaled on the attempt (a gate's
-/// start and `StartStep` journal none).
+/// start and `StartStep` journal none); story 3.21: its document too.
 fn start_attempt(
     tx: &rusqlite::Transaction,
     step_run_id: &str,
@@ -2117,9 +2210,10 @@ fn start_attempt(
         .map(|w| w.seat.as_str())
         .filter(|seat| !seat.trim().is_empty());
     let table = writes.and_then(|w| w.table.as_deref());
+    let document = writes.and_then(|w| w.document.as_deref());
     tx.execute(
-        "UPDATE step_runs SET status = 'running', taint = MAX(taint, ?3), started_at = COALESCE(started_at, ?2), updated_at = ?2, seat = ?4, writes_table = ?5 WHERE id = ?1",
-        params![step_run_id, now, flag(taint), seat, table],
+        "UPDATE step_runs SET status = 'running', taint = MAX(taint, ?3), started_at = COALESCE(started_at, ?2), updated_at = ?2, seat = ?4, writes_table = ?5, writes_document = ?6 WHERE id = ?1",
+        params![step_run_id, now, flag(taint), seat, table, document],
     )?;
     insert_parts(tx, step_run_id, 0, prompt, now)?;
     Ok((
@@ -2130,12 +2224,21 @@ fn start_attempt(
 }
 
 /// Story 3.6 (AD-21): what an attempt may write. A table is a config id
-/// and needs the seat that writes it; a document is 3.6b's.
+/// and needs the seat that writes it; so does a document (story 3.21).
 fn check_writes(writes: &AttemptWrites) -> Result<(), StoreError> {
-    if writes.document.is_some() {
-        return Err(StoreError::Invalid(
-            "refused: a step attempt writes no document until story 3.6b versions documents; nothing was changed".into(),
-        ));
+    if let Some(document) = &writes.document {
+        // Review round 2: the one config-id rule (am-domain's), as the
+        // validator and the engine apply it.
+        if !am_domain::config_names::is_config_id(document) {
+            return Err(StoreError::Invalid(
+                "refused: an attempt's document is named by its config id, kebab-case (lowercase letters and digits joined by hyphens), and this one is not; nothing was changed".into(),
+            ));
+        }
+        if writes.seat.trim().is_empty() {
+            return Err(StoreError::Invalid(
+                "refused: an attempt that versions a document names the seat that writes it; nothing was changed".into(),
+            ));
+        }
     }
     if let Some(table) = &writes.table {
         if table.trim().is_empty() || table.contains(char::is_control) {
@@ -2423,6 +2526,9 @@ fn loop_back(
     back: Back<'_>,
     now: &str,
 ) -> Result<usize, StoreError> {
+    // Review round 2: a document attempt ends only with its version, or
+    // fails; it never loops back.
+    documents::refuse_other_success(tx, producer, "looped_back")?;
     let target: Option<i64> = tx
         .query_row(
             "SELECT seq FROM step_runs WHERE run_id = ?1 AND step_key = ?2 LIMIT 1",
@@ -2518,6 +2624,11 @@ fn create_item(
     item: &NewInboxItem,
     now: &str,
 ) -> Result<Entry, StoreError> {
+    // Review round 2 (AD-28, AD-29): a Draft is raised only with the
+    // version its attempt wrote.
+    if item.kind == InboxKind::Draft {
+        documents::refuse_draft_without_version(tx, step)?;
+    }
     let mut taint = item.taint.raise(step_of(tx, &step.id)?.taint);
     if let Some(payload) = &item.payload {
         taint = taint.raise(producer_in_run(tx, payload, &step.run_id)?);
@@ -2643,10 +2754,10 @@ fn check_note(decision: Decision, note: Option<&str>) -> Result<(), StoreError> 
 fn resolved_from(kind: InboxKind) -> Option<&'static str> {
     match kind {
         InboxKind::Approval => Some("4.8"),
-        InboxKind::Draft => Some("3.6"),
         InboxKind::BudgetAsk => Some("4.3"),
         InboxKind::Proposal => Some("4.10"),
-        InboxKind::Review | InboxKind::Question | InboxKind::Failure => None,
+        // Story 3.21 (owner Q8): a Draft is dismissed, by a person only.
+        InboxKind::Review | InboxKind::Question | InboxKind::Failure | InboxKind::Draft => None,
     }
 }
 
@@ -2831,6 +2942,9 @@ fn apply_resolution(
             decision.as_str()
         )),
         Decision::Approve => {
+            // Review round 3 (G1): a backstop; a document attempt succeeds
+            // only with its version.
+            documents::refuse_other_success(tx, &gate, "succeeded")?;
             finish_step(tx, &gate.id, "succeeded", &None, now)?;
             Ok(vec![finished("succeeded")])
         }
@@ -3887,6 +4001,131 @@ mod tests {
         w.send(person, resolve()).unwrap();
         assert_eq!(r.inbox_item("i1").unwrap().unwrap().status, "resolved");
         assert_eq!(r.steps("r1").unwrap()[1].status, "running");
+    }
+
+    /// Story 3.21, row 39 (owner Q8; AD-15, AD-28): a document step's Draft
+    /// is dismissed only by a person. The crate-private resolve, sent
+    /// through the writer as the engine or as a seat of the run, is refused
+    /// in the writer with nothing written: the Draft stays open with no
+    /// decision and no resolver, and no audit entry is added. The same
+    /// dismiss from a person commits.
+    #[test]
+    fn a_non_human_resolve_of_a_draft_is_refused_in_the_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("state.db")).unwrap();
+        let w = store.writer();
+        let engine = Actor::System {
+            component: "engine".into(),
+        };
+        let run = uuid::Uuid::now_v7();
+        w.exec(
+            engine.clone(),
+            WriteCommand::CreateRun {
+                run_id: run.to_string(),
+                workflow: "wf".into(),
+                origin: "manual".into(),
+                steps: vec!["summarise".into()],
+                config_hash: None,
+            },
+        )
+        .unwrap();
+        let r = store.reader().unwrap();
+        let step = r.steps(&run.to_string()).unwrap()[0].id.clone();
+        w.exec(
+            engine.clone(),
+            WriteCommand::StartAttempt {
+                step_run_id: step.clone(),
+                inputs: vec![],
+                taint: Taint::Clean,
+                prompt: vec![],
+                writes: AttemptWrites {
+                    seat: "seat-writer".into(),
+                    table: None,
+                    document: Some("summary-note".into()),
+                },
+            },
+        )
+        .unwrap();
+        w.exec(
+            engine.clone(),
+            WriteCommand::ReserveCall {
+                step_run_id: step.clone(),
+                call_id: "c1".into(),
+                call_seq: 1,
+                reserved_micro_usd: 0,
+                rate_snapshot: "none".into(),
+                taint: Taint::Clean,
+                purpose: CallPurpose::Turn,
+                prompt: vec![],
+            },
+        )
+        .unwrap();
+        w.exec(
+            engine.clone(),
+            WriteCommand::SettleAndFinishDocumentStep {
+                call_id: "c1".into(),
+                usage: None,
+                cost_micro_usd: None,
+                step_run_id: step.clone(),
+                output: "# Note\n\nOne line.\n".into(),
+                version_id: new_id(),
+                document_id: "summary-note".into(),
+                expected_version: 1,
+                item: NewInboxItem {
+                    id: "i1".into(),
+                    kind: InboxKind::Draft,
+                    payload: Some(step.clone()),
+                    taint: Taint::Clean,
+                    title: "Draft: summary-note version 1".into(),
+                    body: "Step `summarise` wrote version 1 of summary-note.".into(),
+                    max_returns: None,
+                },
+            },
+        )
+        .unwrap();
+        let dismiss = || {
+            Command::Resolve(Resolve {
+                item_id: "i1".into(),
+                decision: Decision::Dismiss,
+                note: None,
+            })
+        };
+        let entries = |r: &Reader| {
+            let mut out = Vec::new();
+            r.export_audit_jsonl(&mut out).unwrap();
+            out.split(|b| *b == b'\n').filter(|l| !l.is_empty()).count()
+        };
+        let before = entries(&r);
+        for actor in [
+            engine,
+            Actor::Seat {
+                seat: "seat-writer".into(),
+                run,
+                step: "summarise".into(),
+            },
+        ] {
+            let refused = w.send(actor.clone(), dismiss());
+            assert!(
+                matches!(&refused, Err(StoreError::Invalid(words)) if words.contains("only a person")),
+                "{actor:?}: {refused:?}"
+            );
+            let item = r.inbox_item("i1").unwrap().unwrap();
+            assert_eq!(item.kind, InboxKind::Draft);
+            assert_eq!(
+                (item.status.as_str(), item.decision, item.resolved_by),
+                ("open", None, None),
+                "{actor:?}"
+            );
+            assert_eq!(entries(&r), before, "{actor:?}: nothing audited");
+        }
+        let person = Actor::Human {
+            person: "owner".into(),
+            hat: am_domain::REVIEWER_HAT.into(),
+        };
+        w.send(person, dismiss()).unwrap();
+        let item = r.inbox_item("i1").unwrap().unwrap();
+        assert_eq!(item.status, "resolved");
+        assert_eq!(item.decision, Some(Decision::Dismiss));
     }
 
     #[test]

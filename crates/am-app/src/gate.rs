@@ -28,10 +28,12 @@
 //!    unsettled or tool call in flight; review R2). Reject and dismiss
 //!    need none of them.
 //!
-//! Each open item (Review, then Question, then Failure; oldest first) is
-//! shown on the terminal with its id, run, workflow, step and attempt, the
-//! engine's words and, for a Review, the returns so far and the output it
-//! carries (model text): every line behind the prefix `  | `, every hidden
+//! Each open item (Review, then Question, then Failure, then Draft; oldest
+//! first) is shown on the terminal with its id, run, workflow, step and
+//! attempt, the engine's words and, for a Review, the returns so far and
+//! the output it carries (model text); for a Draft (story 3.21), its
+//! document id and version and the Markdown it carries (model text, never
+//! rendered): every line behind the prefix `  | `, every hidden
 //! character (a control character but newline and tab, a format,
 //! separator or tag character) shown as `\u{XXXX}` with a count line, and
 //! runs of blank lines collapsed (review R7). A tainted Review says, above that output and again at the
@@ -45,7 +47,8 @@
 //! Return answers (R11): `a` approve, `r`
 //! return (past `max_returns` a warning first, confirmed by `y`; then the
 //! note), `j` reject (confirmed by typing `reject`), `d` dismiss (a
-//! Failure), `answer` (a Question; then the answer), `s` skip. An empty
+//! Failure or a Draft; a Draft takes nothing else, story 3.21, owner Q8),
+//! `answer` (a Question; then the answer), `s` skip. An empty
 //! line, anything else, Ctrl-C, the end of input or the time limit writes
 //! nothing for that item; Ctrl-C, the end of input and the limit also end
 //! the command (exit 1). `Terminal::interrupted` is asked just before each
@@ -361,14 +364,15 @@ fn one_line(text: &str) -> String {
         .replace('\t', "\\u{0009}")
 }
 
-/// The order items are shown in: Review, Question, Failure, then the kinds
-/// this version does not resolve; oldest first within each.
+/// The order items are shown in: Review, Question, Failure, Draft, then the
+/// kinds this version does not resolve; oldest first within each.
 fn urgency(kind: InboxKind) -> u8 {
     match kind {
         InboxKind::Review => 0,
         InboxKind::Question => 1,
         InboxKind::Failure => 2,
-        _ => 3,
+        InboxKind::Draft => 3,
+        _ => 4,
     }
 }
 
@@ -376,10 +380,10 @@ fn urgency(kind: InboxKind) -> u8 {
 fn later_story(kind: InboxKind) -> Option<&'static str> {
     match kind {
         InboxKind::Approval => Some("4.8"),
-        InboxKind::Draft => Some("3.6"),
         InboxKind::BudgetAsk => Some("4.3"),
         InboxKind::Proposal => Some("4.10"),
-        InboxKind::Review | InboxKind::Question | InboxKind::Failure => None,
+        // Story 3.21 (owner Q8): a Draft is dismissed, as a Failure is.
+        InboxKind::Review | InboxKind::Question | InboxKind::Failure | InboxKind::Draft => None,
     }
 }
 
@@ -553,6 +557,9 @@ impl Gate<'_> {
                 ));
             }
         }
+        if item.kind == InboxKind::Draft {
+            text.push_str(&self.draft_text(reader, item, &steps)?);
+        }
         self.show(&text);
         if let Some(story) = later_story(item.kind) {
             self.show(&format!(
@@ -593,7 +600,14 @@ impl Gate<'_> {
             (InboxKind::Review, "r") => self.return_it(reader, item, &run, &key, queue).await,
             (InboxKind::Review, "j") => self.reject(reader, item, &key),
             (InboxKind::Question, "answer") => self.answer(item, &key),
-            (InboxKind::Failure, "d") => self.dismiss(item),
+            (InboxKind::Failure | InboxKind::Draft, "d") => self.dismiss(item),
+            // Story 3.21 (owner Q8): a Draft is only dismissed.
+            (InboxKind::Draft, "a" | "r" | "j" | "answer") => {
+                self.show(
+                    "A Draft takes one decision, d (dismiss): Agentic Manager never sends it, so it is not approved, returned, rejected or answered; nothing was written.\n",
+                );
+                Ok(Next::Go)
+            }
             (_, "") => {
                 self.show("An empty line decides nothing; nothing was written.\n");
                 Ok(Next::Go)
@@ -606,6 +620,45 @@ impl Gate<'_> {
                 Ok(Next::Go)
             }
         }
+    }
+
+    /// Story 3.21 (AD-28, AD-29): what a Draft shows below the engine's
+    /// words: its document id and version (from the version its attempt
+    /// wrote), that it came from untrusted content when it is tainted, and
+    /// the Markdown its attempt stored (model text: neutralised, never
+    /// rendered or fetched).
+    fn draft_text(
+        &self,
+        reader: &Reader,
+        item: &InboxItemRow,
+        steps: &[am_store::StepRow],
+    ) -> Result<String, String> {
+        let mut text = String::new();
+        let payload = item.payload.as_deref().unwrap_or(&item.step_run_id);
+        match reader
+            .document_version_of(payload)
+            .map_err(|e| e.to_string())?
+        {
+            Some(v) => text.push_str(&format!(
+                "  document {}  version {}  run {}\n",
+                one_line(&v.document_id),
+                v.version,
+                v.run_id
+            )),
+            None => text.push_str("  no version of a document names this item's step run\n"),
+        }
+        if item.taint.is_tainted() {
+            text.push_str(&format!("  {UNTRUSTED_ABOVE}\n"));
+        }
+        if let Some(step) = steps.iter().find(|s| s.id == payload) {
+            text.push_str(&format!(
+                "  --- the draft written by step `{}` attempt {} ---\n{}",
+                step.step_key,
+                step.attempt,
+                payload_block(step.output.as_deref().unwrap_or(""))
+            ));
+        }
+        Ok(text)
     }
 
     /// Check 5 (Question 2): the run goes on only on the snapshot it
@@ -785,7 +838,8 @@ impl Gate<'_> {
         Ok(Next::Go)
     }
 
-    /// `d`: a Failure is dismissed; nothing else changes (Question 3).
+    /// `d`: a Failure or (story 3.21) a Draft is dismissed; nothing else
+    /// changes (Question 3).
     fn dismiss(&mut self, item: &InboxItemRow) -> Result<Next, String> {
         if self.interrupted() {
             return Ok(Next::Stop(EXIT_ERRORS));

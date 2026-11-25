@@ -8,14 +8,16 @@
 //! On a stream copy of `fixtures/projects/rows-documents` (teams `core` and
 //! `side`; seat `writer` of `core` with the Tables capability on; tables
 //! `entries` of `core` and `others` of `side`; workflow `record`: `collect`
-//! declares `table: entries`, `plain` declares nothing), run in process
-//! through `am_app::cli::run` with am-testkit's `FakeLlm` serving every
-//! model:
+//! declares `table: entries`, `plain` declares nothing, `summarise`
+//! declares `document: summary-note`), run in process through
+//! `am_app::cli::run` with am-testkit's `FakeLlm` serving every model:
 //!
 //! - `collect` is offered exactly am-tools' `table_write` spec for
 //!   `entries` as the fixture declares it (every column, type, required
 //!   flag and status value), and its row lands as the seat `writer`;
-//!   `plain` is offered no tool;
+//!   `plain` and `summarise` are offered no tool;
+//! - (story 3.6b) `summarise` declares `document: summary-note` and leaves
+//!   version 1 of it and one Draft item;
 //! - a `table_write` asked for by `plain` is refused by ToolGate ("declares
 //!   no table") and the run fails;
 //! - a step that declares another team's table is a config error: nothing
@@ -38,11 +40,12 @@ use am_app::cli::{RunContext, run};
 use am_app::runtime::Places;
 use am_config::ModelRef;
 use am_domain::rows::{ColumnKind, ColumnSpec, DeclaredTable, RowTool};
-use am_domain::{Actor, LlmProvider, RuntimeLayout};
+use am_domain::{Actor, InboxKind, LlmProvider, RuntimeLayout};
 use am_store::Reader;
 use am_testkit::{FakeLlm, FakeProjectIdentity, FakeTerminal, ScriptedTurn};
 use am_tools::table_write::TableWrite;
 
+const MARKDOWN: &str = "# Summary note\n\n- one entry recorded\n";
 const INSERT: &str = r#"{"table":"entries","data":{"ref":"r-1","title":"from the command line"}}"#;
 
 struct Env {
@@ -169,6 +172,8 @@ async fn plan_of_maps_grants_team_table_and_the_row_tool() {
         ScriptedTurn::text("recording").tool_call("table_write", INSERT),
         ScriptedTurn::text("recorded"),
         ScriptedTurn::text("One entry was recorded."),
+        // Story 3.6b: the fixture's `summarise` writes the summary note.
+        ScriptedTurn::text(MARKDOWN),
     ]));
 
     let ran = env.run(&root, &llm).await;
@@ -214,8 +219,48 @@ async fn plan_of_maps_grants_team_table_and_the_row_tool() {
     assert_eq!(attempt_writes.table.as_deref(), Some("entries"));
 }
 
+/// Story 3.6b (rows 23 and 34, the document half): the plan maps the
+/// declared document. `summarise` is offered no tool and leaves version 1
+/// of `summary-note`, its output the Markdown, with one Draft item on its
+/// attempt; the run succeeds.
+#[tokio::test]
+async fn plan_of_maps_the_document_step() {
+    let env = env();
+    let root = env.fixture();
+    let llm = Arc::new(FakeLlm::new(vec![
+        ScriptedTurn::text("nothing to record"),
+        ScriptedTurn::text("Nothing was recorded."),
+        ScriptedTurn::text(MARKDOWN),
+    ]));
+
+    let ran = env.run(&root, &llm).await;
+
+    assert_eq!(ran.code, 0, "{}", ran.all());
+    assert!(
+        llm.requests()[2].tools.is_empty(),
+        "no tool for a document step"
+    );
+    let reader = env.reader(&root).expect("the run's journal");
+    let run_row = reader.runs().unwrap().remove(0);
+    assert_eq!(run_row.status, "succeeded");
+    let summarise = reader
+        .steps(&run_row.id)
+        .unwrap()
+        .into_iter()
+        .find(|s| s.step_key == "summarise")
+        .unwrap();
+    let versions = reader.document_versions("summary-note").unwrap();
+    assert_eq!(versions.len(), 1, "{versions:#?}");
+    assert_eq!(versions[0].step_run_id, summarise.id);
+    assert_eq!(summarise.output.as_deref(), Some(MARKDOWN));
+    let items = reader.inbox_items(&run_row.id).unwrap();
+    assert_eq!(items.len(), 1, "{items:#?}");
+    assert_eq!(items[0].kind, InboxKind::Draft);
+    assert_eq!(items[0].payload.as_deref(), Some(summarise.id.as_str()));
+}
+
 /// Row 34 (owner Q1): only the step that declares a table is offered
-/// `table_write`: `collect` is, `plain` is not. A
+/// `table_write`: `collect` is, `plain` and `summarise` are not. A
 /// `table_write` that `plain`'s model asks for anyway is refused by
 /// ToolGate in its words (`plain` "declares no table"); the run fails and
 /// no row of `plain`'s is written.
@@ -226,12 +271,16 @@ async fn agentic_run_offers_table_write_only_to_a_declaring_step() {
     let ok = Arc::new(FakeLlm::new(vec![
         ScriptedTurn::text("nothing to record"),
         ScriptedTurn::text("Nothing was recorded."),
+        ScriptedTurn::text(MARKDOWN),
     ]));
 
     let ran = first.run(&root, &ok).await;
 
     assert_eq!(ran.code, 0, "{}", ran.all());
-    assert_eq!(offered(&ok), vec![vec!["table_write".to_string()], vec![]]);
+    assert_eq!(
+        offered(&ok),
+        vec![vec!["table_write".to_string()], vec![], vec![]]
+    );
 
     let root = second.fixture();
     let asks = Arc::new(FakeLlm::new(vec![
@@ -271,7 +320,8 @@ async fn agentic_run_offers_table_write_only_to_a_declaring_step() {
 /// `collect` writes a row whose title holds a canary; `plain`, the step
 /// after it, journals no `row` edge and no `from_row`, its prompt holds no
 /// `row:` part, and neither request holds the canary (only `collect`'s own
-/// replayed call does, in its second request).
+/// replayed call does, in its second request). Story 3.6b: the fixture's
+/// `summarise` runs after `plain`, and neither does its request.
 #[tokio::test]
 async fn agentic_run_leaves_the_row_input_slot_empty() {
     const CANARY: &str = "canary-cli-row-0c3e";
@@ -282,6 +332,7 @@ async fn agentic_run_leaves_the_row_input_slot_empty() {
         ScriptedTurn::text("recording").tool_call("table_write", &insert),
         ScriptedTurn::text("recorded"),
         ScriptedTurn::text("One entry was recorded."),
+        ScriptedTurn::text(MARKDOWN),
     ]));
 
     let ran = env.run(&root, &llm).await;
@@ -309,7 +360,11 @@ async fn agentic_run_leaves_the_row_input_slot_empty() {
         }
     }
     let requests = llm.requests();
-    assert_eq!(requests.len(), 3, "collect's two turns, then plain's");
+    assert_eq!(
+        requests.len(),
+        4,
+        "collect's two turns, then plain's and summarise's"
+    );
     assert!(
         !format!("{:?}", requests[0]).contains(CANARY),
         "collect's first request"
@@ -318,6 +373,11 @@ async fn agentic_run_leaves_the_row_input_slot_empty() {
         !format!("{:?}", requests[2]).contains(CANARY),
         "plain's request holds no row text: {:#?}",
         requests[2]
+    );
+    assert!(
+        !format!("{:?}", requests[3]).contains(CANARY),
+        "summarise's request holds no row text: {:#?}",
+        requests[3]
     );
 }
 

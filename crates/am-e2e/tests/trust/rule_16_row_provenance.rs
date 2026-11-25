@@ -8,10 +8,11 @@
 //!   call sequence and the tool call it finished; the row's version is its
 //!   newest after-image's, and each succeeded `table_write` call has its
 //!   after-image (`Reader::row_written_at`).
-//! - `row.written` entries hold ids, the op, the version, the call
-//!   sequence, counts and the taint; a canary in row data is in no entry,
-//!   and neither is its hash.
-//! - The chain verifies after row writes, in the store and in the export.
+//! - `row.written` and `document.versioned` entries hold ids, the op, the
+//!   version, the call sequence, counts and the taint; a canary in row data
+//!   and in a document's Markdown is in no entry, and neither is its hash.
+//! - The chain verifies after row and document writes, in the store and in
+//!   the export.
 //! - No new hash argument of free text: the only `*_sha256` argument of a
 //!   run is 3.5's `output_sha256`, each the existing helper's hash of text
 //!   the journal stores.
@@ -33,6 +34,8 @@ use tokio_util::sync::CancellationToken;
 
 /// In a row's data (a text column and a JSON column).
 const ROW_CANARY: &str = "canary-row-content-2c44";
+/// In a document's Markdown.
+const MD_CANARY: &str = "canary-markdown-content-e815";
 
 /// An audit argument as a number, whether the writer stored it as a JSON
 /// number or as its decimal text.
@@ -53,9 +56,35 @@ async fn run(p: &Project, steps: Vec<StepPlan>) -> RunOutcome {
     .unwrap()
 }
 
+/// The Markdown note `summarise` writes, holding [`MD_CANARY`].
+fn markdown() -> String {
+    format!("# Note\n\nThe secret line: {MD_CANARY}.\n")
+}
+
 /// `collect` inserts two rows and updates the first (canaries in its data),
 /// then `summarise` writes a note.
 async fn rows_and_a_note(p: &Project) -> RunOutcome {
+    rows_then(
+        p,
+        step("summarise", texts(&["Three changes were recorded."])),
+    )
+    .await
+}
+
+/// As [`rows_and_a_note`], but `summarise` declares [`DOCUMENT`] and writes
+/// [`markdown`] (story 3.6b, the document half of row 22).
+async fn rows_and_a_document(p: &Project) -> RunOutcome {
+    let markdown = markdown();
+    rows_then(
+        p,
+        documenting(step("summarise", texts(&[markdown.as_str()])), DOCUMENT),
+    )
+    .await
+}
+
+/// `collect` inserts two rows and updates the first (canaries in its
+/// data), then `last` runs.
+async fn rows_then(p: &Project, last: StepPlan) -> RunOutcome {
     let collect = Live::new(
         &p.db,
         vec![
@@ -77,14 +106,7 @@ async fn rows_and_a_note(p: &Project) -> RunOutcome {
             say("recorded"),
         ],
     );
-    let outcome = run(
-        p,
-        vec![
-            writing(step("collect", collect)),
-            step("summarise", texts(&["Three changes were recorded."])),
-        ],
-    )
-    .await;
+    let outcome = run(p, vec![writing(step("collect", collect)), last]).await;
     assert_eq!(outcome.status, "succeeded", "{outcome:?}");
     outcome
 }
@@ -168,12 +190,13 @@ async fn every_row_change_has_an_after_image_naming_run_step_and_seat() {
 
 /// Row 22: the audit log holds ids, never content. `row.written` targets
 /// `row:entries/<row id>` with the op, the version, the attempt, the call
-/// sequence and the taint. Neither the canary, nor its hash, nor the hash
-/// of a row's data is in the export.
+/// sequence and the taint; `document.versioned` names the document with
+/// its version, byte count and taint. Neither canary, nor its hash, nor
+/// the hash of a row's data is in the export.
 #[tokio::test]
 async fn audit_holds_ids_never_row_content() {
     let p = project();
-    rows_and_a_note(&p).await;
+    rows_and_a_document(&p).await;
     let j = journal(&p.db);
     let attempt = j.attempt("collect", 1);
 
@@ -194,12 +217,26 @@ async fn audit_holds_ids_never_row_content() {
         assert_eq!(args["step_run_id"], json!(attempt.id), "{entry}");
         assert!(audited_clean(&args["taint"]), "{entry}");
     }
-    let export = serde_json::to_string(&j.audit).unwrap();
-    assert!(!export.contains(ROW_CANARY), "the canary in the audit log");
-    assert!(
-        !export.contains(&sha256_hex(ROW_CANARY)),
-        "the canary's hash in the audit log"
+    let versioned = j.entries("document.versioned");
+    assert_eq!(versioned.len(), 1, "{versioned:#?}");
+    let entry = &versioned[0];
+    assert!(entry.to_string().contains(DOCUMENT), "{entry}");
+    assert_eq!(number(&entry["args"]["version"]), Some(1), "{entry}");
+    assert!(audited_clean(&entry["args"]["taint"]), "{entry}");
+    assert_eq!(
+        number(&entry["args"]["bytes"]),
+        Some(markdown().len() as i64),
+        "{entry}"
     );
+
+    let export = serde_json::to_string(&j.audit).unwrap();
+    for canary in [ROW_CANARY, MD_CANARY] {
+        assert!(!export.contains(canary), "`{canary}` in the audit log");
+        assert!(
+            !export.contains(&sha256_hex(canary)),
+            "the hash of `{canary}` in the audit log"
+        );
+    }
     for row in &rows {
         assert!(
             !export.contains(&sha256_hex(&row.data)),
@@ -211,12 +248,12 @@ async fn audit_holds_ids_never_row_content() {
     }
 }
 
-/// Row 22: after row writes the chain verifies in the store, and the
-/// export verifies on its own.
+/// Row 22: after row and document writes the chain verifies in the store,
+/// and the export verifies on its own.
 #[tokio::test]
-async fn the_chain_verifies_after_row_writes() {
+async fn the_chain_verifies_after_row_and_document_writes() {
     let p = project();
-    rows_and_a_note(&p).await;
+    rows_and_a_document(&p).await;
     let reader = Reader::open(&p.db).unwrap();
 
     assert_eq!(reader.verify_audit_chain().unwrap(), None);
@@ -225,20 +262,23 @@ async fn the_chain_verifies_after_row_writes() {
     let ok = am_store::verify_jsonl(out.as_slice()).unwrap();
     assert_eq!((ok.entries, ok.head), (count, head));
     let text = String::from_utf8(out).unwrap();
-    assert!(
-        text.contains("\"row.written\""),
-        "row.written is in the chain"
-    );
+    for action in [
+        "\"row.written\"",
+        "\"document.versioned\"",
+        "\"inbox.created\"",
+    ] {
+        assert!(text.contains(action), "{action} is in the chain");
+    }
 }
 
 /// Row 22 (AD-32's keyed-hash rule, 2026-11-24): across a run that writes
-/// rows, the only hash argument is the existing
+/// rows and a document, the only hash argument is the existing
 /// `output_sha256`, each value the existing helper's hash of text the
 /// journal stores (a step's output); no new `*_sha256` key appears.
 #[tokio::test]
 async fn no_new_sha256_arg_of_free_text() {
     let p = project();
-    rows_and_a_note(&p).await;
+    rows_and_a_document(&p).await;
     let j = journal(&p.db);
     let mut stored: Vec<String> = j
         .steps

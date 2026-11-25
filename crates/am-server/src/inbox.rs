@@ -148,10 +148,10 @@ impl Refusal {
 fn later_story(kind: InboxKind) -> Option<&'static str> {
     match kind {
         InboxKind::Approval => Some("4.8"),
-        InboxKind::Draft => Some("3.6"),
         InboxKind::BudgetAsk => Some("4.3"),
         InboxKind::Proposal => Some("4.10"),
-        InboxKind::Review | InboxKind::Question | InboxKind::Failure => None,
+        // Story 3.21 (owner Q8): a Draft is dismissed, as a Failure is.
+        InboxKind::Review | InboxKind::Question | InboxKind::Failure | InboxKind::Draft => None,
     }
 }
 

@@ -44,6 +44,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0009_prompt_parts.sql"),
     include_str!("../migrations/0010_rows.sql"),
     include_str!("../migrations/0011_row_inputs.sql"),
+    include_str!("../migrations/0012_document_versions.sql"),
 ];
 
 /// The schema version this binary knows.

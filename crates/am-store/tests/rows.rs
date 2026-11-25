@@ -21,8 +21,8 @@
 //! - Each row stores its own taint on write, the highest of the attempt's
 //!   committed taint, the write's and the row's; it only rises, and each
 //!   after-image records it. `FinishToolCall` journals `untrusted`.
-//! - The read path is 3.6c's (`tests/row_inputs.rs`). A `document` value in
-//!   an attempt's writes is refused until 3.6b. Audit entries hold ids, versions and counts, never row data; the
+//! - The read path is 3.6c's (`tests/row_inputs.rs`); documents are 3.6b's
+//!   (`tests/documents.rs`). Audit entries hold ids, versions and counts, never row data; the
 //!   receipt a result is rebuilt from holds no data either.
 //!
 //! The pinned API is in the store plan's Implementation Notes, "API the
@@ -53,8 +53,6 @@ const TABLE: &str = "entries";
 const OTHER_TABLE: &str = "others";
 /// The seat every attempt runs on.
 const SEAT: &str = "seat-writer";
-/// A document id, which this slice refuses (3.6b versions documents).
-const DOCUMENT: &str = "summary-note";
 
 /// Canaries no audit entry may hold (AD-25).
 const CANARY_DATA: &str = "canary-row-data-5d1f07";
@@ -1723,33 +1721,6 @@ fn a_tainted_attempts_row_stores_its_taint() {
             assert!(audited_clean(&e["args"]["taint"]), "{e}");
         }
     }
-}
-
-/// Row 28, the store half: an attempt's writes may name a document only
-/// from 3.6b on. `StartAttempt` with `writes.document` set is refused in
-/// words naming 3.6b; the attempt stays queued and nothing is written.
-#[test]
-fn a_document_value_is_refused_until_3_6b() {
-    let r = rig();
-    let queued = r.latest(&r.run, "collect");
-    let before = r.state();
-
-    let refused = r
-        .start_with(
-            &r.run,
-            "collect",
-            writes(None, Some(DOCUMENT)),
-            Taint::Clean,
-            vec![],
-            vec![],
-        )
-        .expect_err("a document is 3.6b's");
-
-    let words = refused.to_string();
-    assert!(words.contains("3.6b"), "names 3.6b: {words}");
-    assert_eq!(r.state(), before, "nothing written");
-    assert_eq!(r.step(&queued.id).status, "queued");
-    assert_eq!(r.reader().attempt_writes(&queued.id).unwrap(), None);
 }
 
 /// Row 44 (AD-8; AD-10 as amended, with Winston's wording "on its tool

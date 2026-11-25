@@ -2474,3 +2474,129 @@ async fn titles_and_bodies_are_shown_escaped() {
         "{shown}"
     );
 }
+
+// ----------------------------------------------------------- story 3.6b
+//
+// Epic 3 story 6 (AD-15, AD-28, AD-29; plan matrix row 30, owner Q8): a
+// document step's Draft item is shown by `agentic gate` with its document
+// id, version, run and the Markdown (control characters neutralised), and
+// `d` dismisses it through 3.4's Human-only resolve as You (Reviewer);
+// approve, return, reject and answer are not its choices. The run is not
+// affected. On a stream copy of `fixtures/projects/rows-documents`
+// (workflow `record`: `collect`, `plain`, then `summarise`, which declares
+// `document: summary-note`). Written before the Draft is resolvable.
+
+/// The note `summarise` writes: Markdown with an escape sequence and a
+/// bell (model text, so it is shown neutralised).
+const NOTE_MD: &str = "# Summary note\n\n- one entry \u{1b}[31mrecorded\u{1b}[0m\u{7}\n";
+
+/// `agentic run record` on a copy of `rows-documents`, which succeeds and
+/// leaves one open Draft item: the copy's root, the run and the item.
+async fn draft_run(env: &Env) -> (PathBuf, String, String) {
+    let root = env.copy_of("rows-documents");
+    let llm = texts(&["nothing to record", "Nothing was recorded.", NOTE_MD]);
+    let ran = env.run(&root, "record", llm).await;
+    assert_eq!(ran.code, 0, "{}", ran.all());
+    let run = env.runs(&root).remove(0).id;
+    let items = env.items(&root);
+    assert_eq!(items.len(), 1, "{items:#?}");
+    assert_eq!(items[0].kind, InboxKind::Draft);
+    assert_eq!(
+        env.run_status(&root, &run),
+        "succeeded",
+        "a Draft never blocks the run"
+    );
+    (root, run, items[0].id.clone())
+}
+
+/// Row 30 (owner Q8): the Draft is shown with its id, the document id
+/// `summary-note`, its version, the run and the Markdown's visible words,
+/// with no raw control character; `d` dismisses it: the item is resolved
+/// `dismiss` by You (Reviewer), one `inbox.resolved` entry; no step and not
+/// the run changes; exit 0.
+#[tokio::test]
+async fn a_draft_is_listed_and_dismissed() {
+    let env = env();
+    let (root, run, item) = draft_run(&env).await;
+    let before = (env.steps(&root, &run), env.run_status(&root, &run));
+    let t = FakeTerminal::new();
+    t.line("d");
+
+    let ran = env.gate(&root, &[], &t, texts(&["never"])).await;
+
+    assert_eq!(ran.code, 0, "{}", ran.all());
+    let shown = t.shown();
+    for word in [
+        item.as_str(),
+        run.as_str(),
+        "summary-note",
+        "Summary note",
+        "recorded",
+    ] {
+        assert!(shown.contains(word), "shows `{word}`:\n{shown}");
+    }
+    // Review round 2, fix 4 (C2; tester, 2026-11-25): the one line that names
+    // the document, its version and the run, exactly; a clean Draft has no
+    // untrusted marker.
+    let line = format!("document summary-note  version 1  run {run}");
+    assert!(
+        shown.lines().any(|l| l.trim() == line),
+        "shows `{line}`:\n{shown}"
+    );
+    assert!(!shown.contains(MARKER), "a clean Draft:\n{shown}");
+    let controls: Vec<char> = shown
+        .chars()
+        .filter(|c| c.is_control() && *c != '\n' && *c != '\t')
+        .collect();
+    assert!(controls.is_empty(), "neutralised: {controls:?}");
+    let row = env.item(&root, &item);
+    assert_eq!(row.status, "resolved");
+    assert_eq!(row.decision, Some(Decision::Dismiss));
+    assert_eq!(row.note, None);
+    assert!(by_reviewer(row.resolved_by.as_deref().unwrap()));
+    assert_eq!(
+        (env.steps(&root, &run), env.run_status(&root, &run)),
+        before
+    );
+    let resolved = env.resolved_entries(&root);
+    assert_eq!(resolved.len(), 1, "{resolved:#?}");
+    assert!(by_reviewer(&resolved[0]), "{}", resolved[0]);
+    env.assert_closed(&root);
+}
+
+/// Row 30: a Draft takes dismiss only. `a` (approve), `r` (return), `j`
+/// (reject) and `answer` on it decide nothing: the item stays open, no
+/// `inbox.resolved` entry, the run as it was.
+#[tokio::test]
+async fn a_draft_takes_no_approve() {
+    let env = env();
+    let (root, run, item) = draft_run(&env).await;
+    let before = (env.items(&root), env.steps(&root, &run));
+    for choice in ["a", "r", "j", "answer"] {
+        let t = FakeTerminal::new();
+        t.line(choice);
+        t.line("a reason");
+        t.line("reject");
+
+        let ran = env.gate(&root, &[], &t, texts(&["never"])).await;
+
+        assert!(t.shown().contains(&item), "{choice}: {}", t.shown());
+        assert!(
+            t.shown().contains("d to dismiss"),
+            "{choice}: the Draft's choice is dismiss:\n{}",
+            t.shown()
+        );
+        env.assert_open(&root, &item);
+        assert_eq!(
+            (env.items(&root), env.steps(&root, &run)),
+            before,
+            "{choice}"
+        );
+        assert!(
+            env.resolved_entries(&root).is_empty(),
+            "{choice}: {}",
+            ran.all()
+        );
+        env.assert_closed(&root);
+    }
+}
