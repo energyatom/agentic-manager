@@ -44,7 +44,7 @@ step produce: prompt call 0 part 3 backstory instruction `Backstory` taint 0 byt
 step produce: prompt call 0 part 4 skill instruction `skill:plain-report` taint 0 bytes 341 sha256 d73e32b06c2e
 step produce: prompt call 0 part 5 step instruction `Step instruction` taint 0 bytes 232 sha256 f987abcdcefa
 step produce: model call 1 <id-3> turn settled, tokens 1200/90
-step produce: ledger call 1 reserved 0 settled 0 settled
+step produce: ledger call 1 local reserved INR 0 USD 0 settled INR 0 USD 0 settled, rate snapshot 1323f85eb009
 step produce: tool call (none)
 step produce: output Document A is written from the processed rows of Table T1, naming the item_id of each row it uses.
 step produce: item (none)
@@ -64,7 +64,7 @@ step consolidate: prompt call 0 part 3 backstory instruction `Backstory` taint 0
 step consolidate: prompt call 0 part 4 step instruction `Step instruction` taint 0 bytes 135 sha256 2b2339c5df21
 step consolidate: prompt call 0 part 5 trusted trusted `step:produce@1` taint 0 bytes 0 sha256 -
 step consolidate: model call 1 <id-5> turn settled, tokens 900/70
-step consolidate: ledger call 1 reserved 0 settled 0 settled
+step consolidate: ledger call 1 local reserved INR 0 USD 0 settled INR 0 USD 0 settled, rate snapshot 1323f85eb009
 step consolidate: tool call (none)
 step consolidate: output D1's opinion has one labelled section per branch and says where the branches disagree.
 step consolidate: item (none)
@@ -85,7 +85,7 @@ step report: prompt call 0 part 4 skill instruction `skill:plain-report` taint 0
 step report: prompt call 0 part 5 step instruction `Step instruction` taint 0 bytes 107 sha256 60da325e3a22
 step report: prompt call 0 part 6 trusted trusted `step:consolidate@1` taint 0 bytes 0 sha256 -
 step report: model call 1 <id-7> turn settled, tokens 1100/110
-step report: ledger call 1 reserved 0 settled 0 settled
+step report: ledger call 1 local reserved INR 0 USD 0 settled INR 0 USD 0 settled, rate snapshot 1323f85eb009
 step report: tool call (none)
 step report: output The draft of Report R1 leads with the decision the Owner needs, then lists each point with the document it comes from.
 step report: item (none)

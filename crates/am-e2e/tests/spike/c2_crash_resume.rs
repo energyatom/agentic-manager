@@ -127,7 +127,10 @@ fn kill_9_mid_call_then_resume_loses_only_the_in_flight_call() {
     assert_eq!(ledger.len(), calls.len());
     assert!(ledger.iter().all(|l| l.state == "settled"));
     let wf = am_app::spike::spike_workflow(STEPS);
-    let per_call = wf.price.cost(100, 20);
+    // Story 3.7: am-domain's one money function prices the spike's calls.
+    let per_call = am_domain::money::cost(&wf.price, &wf.rate, 100, 20)
+        .unwrap()
+        .usd_micro;
     let mut expected_total = 0;
     for l in &ledger {
         let call = calls.iter().find(|c| c.id == l.model_call_id).unwrap();

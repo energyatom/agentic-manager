@@ -1,0 +1,6 @@
+schema_version: 2
+accounts:
+  - id: cloud
+    provider: anthropic
+    name: Cloud account
+    secret_ref: cloud

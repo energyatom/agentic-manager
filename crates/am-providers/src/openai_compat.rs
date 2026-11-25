@@ -302,13 +302,23 @@ fn on_data(
                 .to_string(),
         ));
     }
+    // Story 3.7, M1 (AD-9): usage only when both counts are valid
+    // non-negative integers; an empty, partial or malformed usage is no
+    // usage (the call settles at its reservation), never a made-up 0.
     if let Some(u) = v.get("usage").filter(|u| !u.is_null()) {
-        let usage = Usage {
-            input_tokens: u["prompt_tokens"].as_u64().unwrap_or(0),
-            output_tokens: u["completion_tokens"].as_u64().unwrap_or(0),
+        st.usage = match (
+            u.get("prompt_tokens").and_then(Value::as_u64),
+            u.get("completion_tokens").and_then(Value::as_u64),
+        ) {
+            (Some(input_tokens), Some(output_tokens)) => Some(Usage {
+                input_tokens,
+                output_tokens,
+            }),
+            _ => None,
         };
-        st.usage = Some(usage);
-        sink.on_event(StreamEvent::Usage(usage));
+        if let Some(usage) = st.usage {
+            sink.on_event(StreamEvent::Usage(usage));
+        }
     }
     if let Some(choice) = v["choices"].get(0) {
         let delta = &choice["delta"];

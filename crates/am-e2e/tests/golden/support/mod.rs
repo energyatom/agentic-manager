@@ -2066,11 +2066,23 @@ pub fn render_journal(
                 opt(&c.input_tokens),
                 opt(&c.output_tokens)
             ));
+            // Story 3.7 (row 28): local or priced, both currencies (the
+            // company's, then USD) and the rate snapshot's first 12 hex
+            // digits (a price file's sha256, or `none`).
             for l in j.ledger.iter().filter(|l| l.model_call_id == c.id) {
+                let currency = l.currency.as_deref().unwrap_or("-");
+                let snapshot: String = l.rate_snapshot.chars().take(12).collect();
+                let local = match l.local {
+                    Some(true) => "local",
+                    Some(false) => "priced",
+                    None => "-",
+                };
                 put(format!(
-                    "ledger call {} reserved {} settled {} {}",
+                    "ledger call {} {local} reserved {currency} {} USD {} settled {currency} {} USD {} {}, rate snapshot {snapshot}",
                     c.call_seq,
+                    opt(&l.reserved_micro_company),
                     l.reserved_micro_usd,
+                    opt(&l.settled_micro_company),
                     opt(&l.settled_micro_usd),
                     l.state
                 ));

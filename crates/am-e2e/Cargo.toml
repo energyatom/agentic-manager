@@ -211,6 +211,13 @@ path = "tests/engine/rows_idempotent.rs"
 name = "documents_versions"
 path = "tests/engine/documents_versions.rs"
 
+# Epic 3 story 7: each call reserved before it is made and settled in USD
+# and the company currency; local calls at 0; the week, the snapshot, the
+# counting rule and the cleanup's settlement.
+[[test]]
+name = "cost_ledger"
+path = "tests/engine/cost_ledger.rs"
+
 [[test]]
 name = "capabilities_tables_grant"
 path = "tests/trust/capabilities_tables_grant.rs"

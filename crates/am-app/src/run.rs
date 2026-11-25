@@ -68,7 +68,9 @@
 //! their steps (story 3.3: `attempt <n>` and the attempt's state) and
 //! their Inbox items (kind, id and status; story 3.4: a resolved one's
 //! decision and who resolved it, never a note; a run left ready after a
-//! decision says so). It
+//! decision says so) and, since story 3.7, their spend: each run's and
+//! attempt's settled amounts in the company currency and USD with tokens,
+//! then a section by week, team and seat (`spend`). It
 //! reads without the project's lock ([`crate::runtime::find_runtime`], a
 //! read-only connection), so it works while a run or `serve` holds the
 //! project, and it has no terminal rule.
@@ -408,9 +410,14 @@ fn schema_of(
 /// gives for that model, and (story 3.5) the seat's prompt slots and the
 /// step's output schema. A workflow with a step that declares a run-graph
 /// key gives no plan (see [`not_honoured`]). The plan runs on `clock`, the
-/// context's own (story 3.24).
+/// context's own (story 3.24). Story 3.7 (AD-9, AD-16): each step that calls
+/// a model is priced from `snapshot` (local or the price file's terms, by
+/// its Account's provider in this Mac's `accounts`), and the run's rate,
+/// timezone and week start come from it too; an unpriced cloud model or a
+/// missing rate gives no plan ([`crate::prices`]).
 pub(crate) fn plan_of(
     snapshot: &ConfigSnapshot,
+    accounts: &am_config::user_accounts::LoadedAccounts,
     workflow: &str,
     providers: &Providers,
     clock: Arc<dyn Clock>,
@@ -450,6 +457,8 @@ pub(crate) fn plan_of(
         }
     }
     let mut steps = Vec::new();
+    // Story 3.7: a seat whose calls cost money, for the rate's check.
+    let mut cloud_seat = None;
     for step in &wf.steps {
         let Some(seat_id) = step.seat.as_deref() else {
             return Err(format!(
@@ -506,6 +515,8 @@ pub(crate) fn plan_of(
                 // Story 3.22: no config key names rows a step reads yet
                 // (3.15 and 7.2 fill the slot).
                 row_inputs: Vec::new(),
+                // Story 3.7: a gate makes no call, so it has no price.
+                price: None,
             });
             continue;
         }
@@ -515,6 +526,10 @@ pub(crate) fn plan_of(
                 step.id
             ));
         };
+        let price = crate::prices::step_price(snapshot, accounts, seat_id, model, not_done)?;
+        if !price.local && cloud_seat.is_none() {
+            cloud_seat = Some(seat_id.to_string());
+        }
         let provider = providers(model).map_err(|why| format!("{why}. {not_done}"))?;
         let output_schema = schema_of(snapshot, step, workflow, not_done)?;
         let hand_off = match &step.loop_back {
@@ -546,8 +561,10 @@ pub(crate) fn plan_of(
             // Story 3.22: no config key names rows a step reads yet (3.15
             // and 7.2 fill the slot).
             row_inputs: Vec::new(),
+            price: Some(price),
         });
     }
+    let money = crate::prices::run_money(snapshot, cloud_seat.as_deref(), not_done)?;
     // Owner Q1: am-tools' `table_write`; only a step whose seat is granted
     // it and that declares a table is offered it (the engine's ToolGate).
     let row_tool: Arc<dyn RowTool> = Arc::new(TableWrite::new());
@@ -557,6 +574,7 @@ pub(crate) fn plan_of(
         steps,
         clock,
         row_tool: Some(row_tool),
+        money,
     })
 }
 
@@ -706,8 +724,10 @@ async fn start(
     // The owner's files may have changed since check 3 (the open can wait
     // on a migration): what the pinned snapshot holds decides.
     no_pinned_owner_child(&snapshot)?;
+    let accounts = crate::prices::this_macs_accounts(&ctx.places);
     let plan = plan_of(
         &snapshot,
+        &accounts,
         workflow,
         &ctx.providers,
         ctx.clock.clone(),
@@ -925,8 +945,11 @@ fn ready_to_continue(run: &RunRow, steps: &[StepRow], items: &[InboxItemRow]) ->
 type RunLines = (RunRow, Vec<StepRow>, Vec<InboxItemRow>);
 
 /// The runs of the project at `project`, newest first, each with its steps
-/// and its Inbox items.
-fn read_runs(places: &Places, project: &Path) -> Result<Vec<RunLines>, String> {
+/// and its Inbox items, and (story 3.7) every model call's spend.
+fn read_runs(
+    places: &Places,
+    project: &Path,
+) -> Result<(Vec<RunLines>, Vec<am_store::SpendRow>), String> {
     let layout = crate::runtime::find_runtime(places, project).map_err(|e| e.to_string())?;
     let db = layout.state_db();
     if !db.is_file() {
@@ -952,7 +975,8 @@ fn read_runs(places: &Places, project: &Path) -> Result<Vec<RunLines>, String> {
         let items = reader.inbox_items(&run.id).map_err(|e| e.to_string())?;
         all.push((run, steps, items));
     }
-    Ok(all)
+    let spend = reader.spend().map_err(|e| e.to_string())?;
+    Ok((all, spend))
 }
 
 /// `agentic status [--project <folder>]`: `args` are the words after
@@ -960,7 +984,9 @@ fn read_runs(places: &Places, project: &Path) -> Result<Vec<RunLines>, String> {
 /// 12 characters of its snapshot hash, duration), and under it each step
 /// attempt (key, `attempt <n>`, status, duration, or `waiting` for a step
 /// that waits for a person) and each Inbox item (kind, id, status, and a
-/// resolved one's decision and resolver). Reads only, without the project's lock and with
+/// resolved one's decision and resolver). Story 3.7 (owner Q12): each run
+/// and attempt line ends with its settled spend, and a spend section by
+/// week, team and seat follows the runs (see [`crate::spend`]). Reads only, without the project's lock and with
 /// any stdin. Returns 0 (also with no runs), 2 for bad usage, 1 when the
 /// project has no runtime folder or database on this Mac, or one this
 /// version has not migrated yet, each in words on `err`.
@@ -970,8 +996,8 @@ pub fn status(args: &[String], places: &Places, out: &mut dyn Write, err: &mut d
         Ok(_) => return usage(err, STATUS_USAGE, "status takes no argument but --project"),
         Err(why) => return usage(err, STATUS_USAGE, &why),
     };
-    let runs = match read_runs(places, &project) {
-        Ok(runs) => runs,
+    let (runs, spend) = match read_runs(places, &project) {
+        Ok(read) => read,
         Err(why) => {
             let _ = writeln!(
                 err,
@@ -986,9 +1012,19 @@ pub fn status(args: &[String], places: &Places, out: &mut dyn Write, err: &mut d
         return EXIT_OK;
     }
     for (run, steps, items) in &runs {
-        let _ = writeln!(out, "{}", run_line(run));
+        let _ = writeln!(
+            out,
+            "{}{}",
+            run_line(run),
+            crate::spend::run_suffix(spend.iter().filter(|s| s.run_id == run.id))
+        );
         for step in steps {
-            let _ = writeln!(out, "{}", step_line(step));
+            let _ = writeln!(
+                out,
+                "{}{}",
+                step_line(step),
+                crate::spend::attempt_suffix(spend.iter().filter(|s| s.step_run_id == step.id))
+            );
         }
         for item in items {
             let _ = writeln!(out, "{}", item_line(item));
@@ -999,6 +1035,9 @@ pub fn status(args: &[String], places: &Places, out: &mut dyn Write, err: &mut d
                 "    ready to continue (resume arrives with story 3.9; `agentic gate` continues only a run it resolves)"
             );
         }
+    }
+    for line in crate::spend::section(&spend) {
+        let _ = writeln!(out, "{line}");
     }
     EXIT_OK
 }
@@ -1125,7 +1164,18 @@ mod tests {
             Arc::new(|_model: &ModelRef| Ok(Arc::new(NoModelAtGate) as Arc<dyn LlmProvider>));
         let clock = SetClock::at("2026-11-25T09:00:00Z");
 
-        let plan = plan_of(&snapshot, "hello", &providers, clock.clone(), NOT_STARTED).unwrap();
+        // Story 3.7: the fixture's seat is on a reserved local Account, so
+        // no Account of this Mac is read.
+        let accounts = am_config::user_accounts::LoadedAccounts::default();
+        let plan = plan_of(
+            &snapshot,
+            &accounts,
+            "hello",
+            &providers,
+            clock.clone(),
+            NOT_STARTED,
+        )
+        .unwrap();
 
         let at = |t: &str| t.parse::<jiff::Timestamp>().unwrap();
         assert_eq!(plan.clock.now(), at("2026-11-25T09:00:00Z"));

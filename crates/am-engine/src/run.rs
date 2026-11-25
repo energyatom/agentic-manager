@@ -99,14 +99,28 @@
 //! (story 3.8 adds Failure items for those); the failed turn's text is not
 //! stored, and later steps stay queued.
 //!
-//! Not here: full labelled prompt assembly (story 5), amounts (story 7: the
-//! reservation is zero), retries and fallback (story 8), resume (story 9).
-//! The spike's resumable driver stays in [`crate::journal`].
+//! Story 3.7 (AD-8, AD-9, AD-16; owner Q1, Q2, Q11, Q14, Q15): each call
+//! is reserved before it is made, from its request's counted prompt tokens
+//! ([`crate::count`]), the step's `max_output_tokens` and the step's price
+//! terms with the run's rate, both read from the pinned snapshot when the
+//! plan was built ([`StepPlan::price`], [`RunPlan::money`]); the writer
+//! computes the amounts. The reservation journals the budget week (the run
+//! clock's instant in the company's timezone and `week_start`) and the
+//! seat's team. Each settlement carries the provider's usage only; the
+//! writer prices it at the reserved terms, or at the reservation without
+//! usage. A step that calls a model and has no price is refused before any
+//! row. After a store error, the cleanup marks the open call lost, once, so
+//! no reservation stays open. No cap is checked (epic 4).
+//!
+//! Not here: full labelled prompt assembly (story 5), retries and fallback
+//! (story 8), resume (story 9). The spike's resumable driver stays in
+//! [`crate::journal`].
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use am_domain::money::{CallPrice, Rate};
 use am_domain::rows::{DeclaredTable, RowInput, RowTool};
 use am_domain::{
     Actor, AuditEvent, AuditSink, ChatOutcome, ChatRequest, Clock, EventSink, InboxKind,
@@ -126,10 +140,6 @@ use crate::row_inputs;
 use crate::row_writer::StoreRowWriter;
 use crate::schema::{self, Compiled, OutputSchema};
 use crate::toolgate::{CallPlace, GateError, GateOutput, StepTools, TABLE_WRITE, ToolGate};
-
-/// The rate-snapshot id of a zero reservation: no price was read (amounts
-/// arrive with the cost ledger, story 7).
-const NO_RATE_SNAPSHOT: &str = "none";
 
 /// How long a call cancelled at its wall-clock cap may take to stop before
 /// it is settled at its reservation anyway.
@@ -226,6 +236,23 @@ pub struct StepPlan {
     /// the after-image it read and a fenced part that taints the attempt.
     /// The shipped plan leaves it empty (3.15 and 7.2 fill it from config).
     pub row_inputs: Vec<RowInput>,
+    /// Story 3.7 (AD-9, AD-16; owner Q1, Q8): the price terms of the
+    /// step's model, read from the pinned snapshot when the plan was built
+    /// (a model on this Mac: [`CallPrice::local`]). `None` only on a gate,
+    /// which makes no call; any other step without one is refused before
+    /// any row.
+    pub price: Option<CallPrice>,
+}
+
+/// Story 3.7 (AD-9, AD-16; owner Q6, Q11): the run's money, from its
+/// pinned snapshot: the company currency's rate (with the price file's
+/// snapshot id and date), and the timezone and `week_start` a reservation's
+/// budget week is computed in.
+#[derive(Debug, Clone)]
+pub struct RunMoney {
+    pub rate: Rate,
+    pub timezone: jiff::tz::TimeZone,
+    pub week_start: jiff::civil::Weekday,
 }
 
 /// A run to make: the workflow's steps in order, built from one config
@@ -244,6 +271,9 @@ pub struct RunPlan {
     /// (am-tools', which am-app hands in: am-engine may not depend on
     /// am-tools, AD-4); `None`: no step writes a row.
     pub row_tool: Option<Arc<dyn RowTool>>,
+    /// Story 3.7: the rate, timezone and week start every reservation of
+    /// the run is priced and dated with.
+    pub money: RunMoney,
 }
 
 /// How a run ended, or where it waits. A failed run is an outcome, not an
@@ -281,6 +311,18 @@ pub enum RunError {
     /// written.
     #[error("step `{step}` cannot run: {why}")]
     Writes { step: String, why: String },
+    /// Story 3.7 (AD-9): a step that calls a model has no price, so its
+    /// calls cannot be reserved; nothing was written.
+    #[error(
+        "step `{0}` cannot run: it calls a model and has no price, so its calls cannot be reserved (AD-9); nothing was written"
+    )]
+    Unpriced(String),
+    /// Story 3.7, review M6 (AD-9): a step whose calls cost money, in a run
+    /// whose company currency has no rate; nothing was written.
+    #[error(
+        "step `{step}` cannot run: its calls cost money and the run has no rate for the company currency {currency}, so they cannot be reserved (AD-9); nothing was written"
+    )]
+    Unrated { step: String, currency: String },
     /// The run could not be created: the journal holds nothing of it.
     #[error(transparent)]
     Store(#[from] StoreError),
@@ -466,6 +508,8 @@ async fn run_on(
     }
     // Story 3.6: what each step declares it writes, before any row.
     check_writes(plan)?;
+    // Story 3.7: every step that calls a model has its price.
+    check_prices(plan)?;
     // Story 3.5: every step's schema is compiled before any row is written.
     let schemas = compile_schemas(plan)?;
     let run_id = new_id();
@@ -494,6 +538,28 @@ async fn run_on(
         tools: &tools,
     };
     run.drive_to_outcome(Progress::default()).await
+}
+
+/// Story 3.7 (AD-9): refuses a plan, before anything is written, whose step
+/// calls a model (any step but a gate) and has no price, or (review M6)
+/// whose step's calls cost money when the run has no rate.
+fn check_prices(plan: &RunPlan) -> Result<(), RunError> {
+    for step in &plan.steps {
+        if matches!(step.hand_off, HandOff::Gate { .. }) {
+            continue;
+        }
+        match &step.price {
+            None => return Err(RunError::Unpriced(step.key.clone())),
+            Some(price) if !price.local && plan.money.rate.company_micro_per_usd.is_none() => {
+                return Err(RunError::Unrated {
+                    step: step.key.clone(),
+                    currency: plan.money.rate.currency.clone(),
+                });
+            }
+            Some(_) => {}
+        }
+    }
+    Ok(())
 }
 
 /// Story 3.6 (AD-21, AD-36): refuses a plan, before anything is written,
@@ -602,6 +668,7 @@ pub async fn continue_run(
         return Err(RunError::NoSteps(plan.workflow.clone()));
     }
     check_writes(plan)?;
+    check_prices(plan)?;
     let schemas = compile_schemas(plan)?;
     let reader = store.reader()?;
     let Some(run) = reader.run(run_id)? else {
@@ -938,6 +1005,12 @@ impl Run<'_> {
             }
             Err(source) => {
                 let to_record = progress.to_record();
+                // Story 3.7 (owner Q14, DR-109): the open step's open call is
+                // marked lost, once, so its reservation settles and none is
+                // left open for ever.
+                if let Some(step_run_id) = &progress.open_step {
+                    self.settle_open_calls(step_run_id);
+                }
                 if let Some(step_run_id) = progress.open_step {
                     let _ = self.exec(
                         engine(),
@@ -967,6 +1040,21 @@ impl Run<'_> {
                     source: Box::new(source),
                 })
             }
+        }
+    }
+
+    /// Story 3.7 (owner Q14): after a store error, each call of the step
+    /// attempt `step_run_id` still open is marked lost (settled at its
+    /// reservation). Best effort, like the cleanup's other commands: the
+    /// store may refuse them too.
+    fn settle_open_calls(&self, step_run_id: &str) {
+        let open = self
+            .store
+            .reader()
+            .and_then(|r| r.calls_for_step(step_run_id))
+            .map(|calls| calls.into_iter().filter(|c| !c.settled));
+        for call in open.into_iter().flatten() {
+            let _ = self.exec(engine(), WriteCommand::MarkLost { call_id: call.id });
         }
     }
 
@@ -1398,19 +1486,6 @@ impl Run<'_> {
                 Some(parts) => (CallPurpose::Repair, parts),
                 None => (CallPurpose::Turn, Vec::new()),
             };
-            self.exec(
-                engine(),
-                WriteCommand::ReserveCall {
-                    step_run_id: row.id.clone(),
-                    call_id: call_id.clone(),
-                    call_seq: made + 1,
-                    reserved_micro_usd: 0,
-                    rate_snapshot: NO_RATE_SNAPSHOT.into(),
-                    taint: carry,
-                    purpose,
-                    prompt: own_parts,
-                },
-            )?;
             let request = ChatRequest {
                 model: step.model.clone(),
                 system: system.clone(),
@@ -1423,6 +1498,21 @@ impl Run<'_> {
                 },
                 max_output_tokens: step.max_output_tokens,
             };
+            // Story 3.7 (AD-8, AD-9): reserved from this request's counted
+            // prompt tokens, before it is sent.
+            self.exec(
+                engine(),
+                self.reservation(
+                    step,
+                    row,
+                    &call_id,
+                    made + 1,
+                    &request,
+                    carry,
+                    purpose,
+                    own_parts,
+                )?,
+            )?;
             let (turn, timed_out) = self.call_within(step, request, deadline).await;
             if timed_out {
                 let usage = turn.as_ref().ok().and_then(|out| out.usage);
@@ -1449,11 +1539,7 @@ impl Run<'_> {
                         step,
                         row,
                         carry,
-                        Some(CallSettlement {
-                            call_id,
-                            usage,
-                            cost_micro_usd: None,
-                        }),
+                        Some(CallSettlement { call_id, usage }),
                         None,
                         cap,
                         progress,
@@ -1463,11 +1549,7 @@ impl Run<'_> {
                     step,
                     row,
                     carry,
-                    Some(CallSettlement {
-                        call_id,
-                        usage,
-                        cost_micro_usd: None,
-                    }),
+                    Some(CallSettlement { call_id, usage }),
                     None,
                     Cap::WallClock(step.limits.wall_clock),
                     progress,
@@ -1493,7 +1575,6 @@ impl Run<'_> {
                     Some(CallSettlement {
                         call_id,
                         usage: out.usage,
-                        cost_micro_usd: None,
                     }),
                     None,
                     Cap::Schema {
@@ -1515,7 +1596,6 @@ impl Run<'_> {
                     let settle = CallSettlement {
                         call_id: call_id.clone(),
                         usage: out.usage,
-                        cost_micro_usd: None,
                     };
                     if repaired {
                         return self.fail_with_item(
@@ -1571,7 +1651,6 @@ impl Run<'_> {
                         WriteCommand::SettleCall {
                             call_id,
                             usage: out.usage,
-                            cost_micro_usd: None,
                         },
                     )?;
                     // The repair's parts: the invalid reply (the attempt's
@@ -1627,7 +1706,6 @@ impl Run<'_> {
                     Some(CallSettlement {
                         call_id,
                         usage: out.usage,
-                        cost_micro_usd: None,
                     }),
                     None,
                     Cap::Iterations(step.limits.iterations),
@@ -1639,7 +1717,6 @@ impl Run<'_> {
                 WriteCommand::SettleCall {
                     call_id,
                     usage: out.usage,
-                    cost_micro_usd: None,
                 },
             )?;
             let mut results = Vec::new();
@@ -1893,6 +1970,47 @@ impl Run<'_> {
         }
     }
 
+    /// Story 3.7 (AD-9; owner Q1, Q2, Q11, Q15): the command that reserves
+    /// the call `call_id` of `request`: the request's counted prompt tokens,
+    /// its `max_output_tokens`, the step's price and the run's rate, the
+    /// week the run's clock is in (company time) and the seat's team.
+    #[allow(clippy::too_many_arguments)]
+    fn reservation(
+        &self,
+        step: &StepPlan,
+        row: &StepRow,
+        call_id: &str,
+        call_seq: i64,
+        request: &ChatRequest,
+        carry: Taint,
+        purpose: CallPurpose,
+        prompt: Vec<NewPromptPart>,
+    ) -> Result<WriteCommand, StoreError> {
+        let price = step.price.clone().ok_or_else(|| {
+            StoreError::Invalid(format!(
+                "step `{}` calls a model and has no price; nothing was reserved",
+                step.key
+            ))
+        })?;
+        let money = &self.plan.money;
+        let week =
+            am_domain::week::budget_week(self.plan.clock.now(), &money.timezone, money.week_start);
+        Ok(WriteCommand::ReserveCall {
+            step_run_id: row.id.clone(),
+            call_id: call_id.to_string(),
+            call_seq,
+            price,
+            rate: money.rate.clone(),
+            counted_input_tokens: crate::count::prompt_tokens(request),
+            max_output_tokens: request.max_output_tokens,
+            week: week.key(),
+            team: step.seat_team.clone(),
+            taint: carry,
+            purpose,
+            prompt,
+        })
+    }
+
     /// A turn that ended without asking for tools: its step's hand-off.
     fn end_turn(
         &self,
@@ -1927,7 +2045,6 @@ impl Run<'_> {
                 Some(CallSettlement {
                     call_id,
                     usage: out.usage,
-                    cost_micro_usd: None,
                 }),
                 Some(out.text),
                 Cap::LoopBack {
@@ -1944,7 +2061,6 @@ impl Run<'_> {
             WriteCommand::SettleAndLoopBack {
                 call_id,
                 usage: out.usage,
-                cost_micro_usd: None,
                 step_run_id: row.id.clone(),
                 output: out.text,
                 to: to.clone(),
@@ -1972,7 +2088,6 @@ impl Run<'_> {
             WriteCommand::SettleAndFinishStep {
                 call_id,
                 usage: out.usage,
-                cost_micro_usd: None,
                 step_run_id: row.id.clone(),
                 status: "succeeded".into(),
                 output: Some(out.text),
@@ -2011,7 +2126,6 @@ impl Run<'_> {
                 Some(CallSettlement {
                     call_id,
                     usage: out.usage,
-                    cost_micro_usd: None,
                 }),
                 None,
                 Cap::Document {
@@ -2050,7 +2164,6 @@ impl Run<'_> {
                 WriteCommand::SettleAndFinishDocumentStep {
                     call_id: call_id.clone(),
                     usage: out.usage,
-                    cost_micro_usd: None,
                     step_run_id: row.id.clone(),
                     output: out.text.clone(),
                     version_id: new_id(),
@@ -2078,7 +2191,6 @@ impl Run<'_> {
             Some(CallSettlement {
                 call_id,
                 usage: out.usage,
-                cost_micro_usd: None,
             }),
             None,
             Cap::VersionTaken {
@@ -2106,7 +2218,6 @@ impl Run<'_> {
             Some((call_id, usage)) => WriteCommand::SettleAndFinishStep {
                 call_id,
                 usage,
-                cost_micro_usd: None,
                 step_run_id: row.id.clone(),
                 status: "failed".into(),
                 output: None,
@@ -2384,6 +2495,17 @@ impl Cap {
 mod tests {
     use super::*;
 
+    /// Story 3.7: a company in EUR with no price file (no rate, the
+    /// snapshot `none`), on UTC with weeks from Monday; the steps here run
+    /// on this Mac, so their calls cost 0.
+    fn money() -> RunMoney {
+        RunMoney {
+            rate: Rate::none("EUR"),
+            timezone: jiff::tz::TimeZone::UTC,
+            week_start: jiff::civil::Weekday::Monday,
+        }
+    }
+
     /// A plan with no steps is refused before anything is written.
     #[tokio::test]
     async fn a_plan_with_no_steps_creates_no_run() {
@@ -2395,6 +2517,7 @@ mod tests {
             steps: vec![],
             clock: am_testkit::FakeClock::at("2026-11-24T10:00:00Z"),
             row_tool: None,
+            money: money(),
         };
         let refused = run_plan(
             &store,
@@ -2450,9 +2573,11 @@ mod tests {
                 table: None,
                 document: None,
                 row_inputs: vec![],
+                price: Some(CallPrice::local()),
             }],
             clock: am_testkit::FakeClock::at("2026-11-24T10:00:00Z"),
             row_tool: None,
+            money: money(),
         }
     }
 
@@ -2610,8 +2735,12 @@ mod tests {
                 step_run_id: step.clone(),
                 call_id: call.clone(),
                 call_seq: 1,
-                reserved_micro_usd: 0,
-                rate_snapshot: NO_RATE_SNAPSHOT.into(),
+                price: CallPrice::local(),
+                rate: Rate::none("EUR"),
+                counted_input_tokens: 0,
+                max_output_tokens: 0,
+                week: "2026-11-23".into(),
+                team: "core".into(),
                 taint: Taint::Clean,
                 purpose: CallPurpose::Turn,
                 prompt: vec![],
@@ -2627,7 +2756,6 @@ mod tests {
             WriteCommand::SettleAndFinishDocumentStep {
                 call_id: call,
                 usage: None,
-                cost_micro_usd: None,
                 step_run_id: step.clone(),
                 output: "# Another run's note\n".into(),
                 version_id: new_id(),

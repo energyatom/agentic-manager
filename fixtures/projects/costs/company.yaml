@@ -1,0 +1,11 @@
+schema_version: 2
+name: Costs
+description: A synthetic project whose cloud and local seats spend in the company currency (epic 3 story 7). Every price and rate in it is a fake test value.
+timezone: America/New_York
+currency: EUR
+week_start: monday
+teams:
+  - id: core
+    name: Core team
+  - id: side
+    name: Side team

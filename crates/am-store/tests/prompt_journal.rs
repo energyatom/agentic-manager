@@ -569,7 +569,6 @@ impl Rig {
         self.exec(WriteCommand::SettleAndFinishStep {
             call_id: "call-a".into(),
             usage: None,
-            cost_micro_usd: None,
             step_run_id: self.a.clone(),
             status: "succeeded".into(),
             output: Some(output.into()),
@@ -612,8 +611,12 @@ impl Rig {
             step_run_id: step.into(),
             call_id: call.into(),
             call_seq: seq,
-            reserved_micro_usd: 0,
-            rate_snapshot: "none".into(),
+            price: am_domain::money::CallPrice::local(),
+            rate: am_domain::money::Rate::none("EUR"),
+            counted_input_tokens: 0,
+            max_output_tokens: 0,
+            week: "2026-11-23".into(),
+            team: "core".into(),
             taint: Taint::Clean,
             purpose,
             prompt,
@@ -624,7 +627,6 @@ impl Rig {
         self.exec(WriteCommand::SettleCall {
             call_id: call.into(),
             usage: None,
-            cost_micro_usd: None,
         })
         .unwrap();
     }
@@ -1275,7 +1277,6 @@ fn audit_args_hold_counts_and_purpose_never_text() {
     r.exec(WriteCommand::SettleAndFinishStep {
         call_id: "call-2".into(),
         usage: None,
-        cost_micro_usd: None,
         step_run_id: r.b.clone(),
         status: "succeeded".into(),
         output: Some(output.clone()),

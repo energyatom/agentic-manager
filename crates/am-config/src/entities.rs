@@ -70,6 +70,21 @@ pub struct Prices {
     pub updated: Option<String>,
     pub models: Vec<ModelPrice>,
     pub services: Vec<ServicePrice>,
+    /// Company-currency units per USD (story 3.7, owner Q6), dated by
+    /// `updated`.
+    pub rates: Vec<CurrencyRate>,
+    /// The lowercase sha256 hex of the file's bytes as loaded: the run's
+    /// rate-snapshot id. `None` with no file.
+    pub sha256: Option<String>,
+}
+
+/// One `rates:` entry of `models/prices.yaml`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CurrencyRate {
+    /// The ISO 4217 code, never `USD`.
+    pub currency: String,
+    /// Company micro-units per USD (0.92 is 920,000).
+    pub micros_per_usd: i64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
