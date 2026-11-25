@@ -190,6 +190,7 @@ async fn run(args: &[String]) -> i32 {
         identity,
         terminal,
         providers: am_app::cli::unwired_providers(),
+        clock: am_app::cli::system_clock(),
     };
     am_app::cli::run(args, ctx, &mut std::io::stdout(), &mut std::io::stderr()).await
 }
@@ -214,6 +215,7 @@ async fn gate(args: &[String]) -> i32 {
         identity,
         terminal,
         providers: am_app::cli::unwired_providers(),
+        clock: am_app::cli::system_clock(),
     };
     am_app::cli::gate(args, ctx, &mut std::io::stdout(), &mut std::io::stderr()).await
 }

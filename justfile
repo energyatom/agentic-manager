@@ -4,7 +4,7 @@
 # AD-12 fixed hosts and the egress seam guard), am-store's doctests
 # (the `compile_fail` proof that a write needs an Actor, story 1.6) and `agentic validate`
 # over the valid fixture projects (story 1.4; story 3.3 adds hand-offs/) and
-# templates/ (story 1.5).
+# templates/ (story 1.5). Story 3.24: `test` runs am-e2e's `golden_so_far`.
 # `just supply-chain` runs the licence, bans and sources policy (cargo-deny)
 # and cargo-audit.
 

@@ -70,7 +70,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use am_domain::{
-    Decision, HumanActor, InboxKind, ProjectIdentity, REVIEWER_HAT, Terminal, TerminalError,
+    Clock, Decision, HumanActor, InboxKind, ProjectIdentity, REVIEWER_HAT, Terminal, TerminalError,
 };
 use am_engine::run::{RunError, RunPlan, continue_run};
 use am_store::{InboxItemRow, Reader, RunRow};
@@ -104,8 +104,9 @@ const PAYLOAD_PREFIX: &str = "  | ";
 const INTERRUPT_POLL: Duration = Duration::from_millis(100);
 
 /// What `agentic gate` runs with. `main` builds it with the owner's real
-/// terminal, the OS identity adapter and the binary's provider factory,
-/// which wires no provider yet; tests pass am-testkit's fakes.
+/// terminal, the OS identity adapter, the binary's provider factory, which
+/// wires no provider yet, and the system clock; tests pass am-testkit's
+/// fakes.
 pub struct GateContext {
     pub places: Places,
     /// Supplies the open's identity checks and the host recorded in the
@@ -114,6 +115,8 @@ pub struct GateContext {
     /// The owner's terminal: every decision is read from it.
     pub terminal: Box<dyn Terminal>,
     pub providers: Providers,
+    /// The continued run's clock (story 3.24), as [`crate::run::RunContext`]'s.
+    pub clock: Arc<dyn Clock>,
 }
 
 /// Whether the CLI resolves an item that carries untrusted content (AD-15,
@@ -636,7 +639,13 @@ impl Gate<'_> {
                 run.config_hash.as_deref().unwrap_or("no snapshot")
             ));
         }
-        let plan = plan_of(&snapshot, &run.workflow, &self.ctx.providers, KEPT)?;
+        let plan = plan_of(
+            &snapshot,
+            &run.workflow,
+            &self.ctx.providers,
+            self.ctx.clock.clone(),
+            KEPT,
+        )?;
         let reader = self.reader()?;
         match am_engine::run::ready_to_go_on(&reader, &run.id) {
             Ok(_) => Ok(plan),

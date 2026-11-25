@@ -3,7 +3,7 @@ title: 'Golden run so far on every PR'
 type: feature
 ticket: 24
 created: '2026-11-25'
-status: approved
+status: built
 baseline_revision: '7611520aaa472b6d0f7057e9665dd9663ae669fd'
 after: [23]
 route: full
@@ -11,8 +11,8 @@ route_source: auto
 risk: medium
 review: quick
 review_source: pinned
-lenses_ran: []
-review_loop_iteration: 0
+lenses_ran: [correctness]
+review_loop_iteration: 1
 followup_review_recommended: false
 context:
   - '{project-root}/docs/owner-standing-rules.md'
@@ -49,7 +49,7 @@ deferred: []
   - `branches`: a fan-out with `seats` and `max_parallel`, for 3.14;
   - `consolidate`: `join` for 3.14 and `handoff` for 3.15;
   - `report`: `handoff`, with `review` nested, for 3.15 and 3.16;
-  - `approve`: a Human seat with no `gate:` (Design Notes, gap G1).
+  - `approve`: a Human seat with no `gate:` (Design Notes, gap G1; register DR-137, target 3.13).
 - Story 3.1's rule refuses the whole run before any row, so the real F1 cannot start until 3.14, 3.15 and 3.16 have all landed.
 - **What is left up to there:**
   - **the real F1:** no run, no step runs, no rows or history, no Inbox items, no ledger entries and no model call;
@@ -107,7 +107,7 @@ deferred: []
   - FakeClock through `RunContext.clock`;
   - `FakeProjectIdentity` and `FakeTerminal`;
   - a temporary HOME per stage;
-  - no network, no real model and no keychain.
+  - no real model, and no network or keychain wired on the run's path (structural, review R6).
 - **Fixtures own the vocabulary (AD-23):**
   - no seat, team, table, document, workflow or step id of the sample appears in `crates/`, comments included;
   - no "F1" token appears anywhere in `crates/` (DR-016): say "the sample's report flow";
@@ -126,7 +126,7 @@ deferred: []
   - a difference at the first green run is triaged and recorded in Implementation Notes: was the expectation wrong, or the code?
 - **Stable:** two passes in two temporary folders give the same normalised snapshot (row 7).
 - **One story, one squash commit, on Opus.** Stop and report if the code passes about 4,000 lines.
-- **Register (quality plan part 2):** this story's rows (Design Notes) go into `docs/deferred-register.md` in its commit.
+- **Register (quality plan part 2):** this story adds no register row (review R3). Its gaps are rows PR #42 added or restated: G1 is DR-137 and G3 is DR-173 (Design Notes, "Register rows").
 
 **Never:**
 - **No product behaviour change:**
@@ -234,7 +234,7 @@ deferred: []
   - recipes unchanged: `check` L17 → `test` L29-L30 (`cargo nextest run`) runs the target;
   - one header comment line;
   - the `validate` list L82 stays free of `fixtures/golden/`.
-- **`docs/deferred-register.md`:** new rows.
+- **`docs/deferred-register.md`:** no change (review R3: the gaps are DR-137 and DR-173, on main since PR #42).
 - **`.github/workflows/ci.yml`:** no change.
 
 ## Tasks & Acceptance
@@ -250,7 +250,7 @@ deferred: []
   - Log the red run.
 - [ ] **am-app:** `RunContext.clock`, `system_clock()`, the `plan_of` parameter, the run and gate call sites, `main.rs`, and the module docs.
 - [ ] **Green:** triage any snapshot difference, and record it.
-- [ ] **Wrap-up:** register rows; the justfile comment; time recorded (row 20).
+- [ ] **Wrap-up:** the justfile comment; time recorded (row 20). No register row (review R3).
 - [ ] **Size (owner):** one squash commit. Stop and report if the code passes about 4,000 lines.
 
 **Acceptance Criteria:**
@@ -261,7 +261,7 @@ deferred: []
   - the copy runs on scripted FakeLlm to its stop, with the snapshot of step-run states, rows and history, Inbox items and ledger entries;
   - a planted change to one script's output, or to the copy's first step, fails with a diff naming the step;
   - the denylist passes;
-  - no network or keychain is touched.
+  - no network or keychain is wired on the run's path (structural, review R6).
 - **The owner's conditions:** rows 11–13 pass, and the sample is unchanged (`git diff --stat templates/` is empty).
 - **The workspace:** `just check` is green. Merge only with both CI jobs green after review triage.
 
@@ -304,17 +304,20 @@ deferred: []
 | 3.17 | — | The snapshot gains lineage |
 | 3.13 | Runs to the Owner's gate; `agentic gate` answers it | The list is empty and the copy equals F1, so the copy is deleted; `just golden` |
 
-### Gaps found (register rows below)
+### Gaps found (their register rows: review R3)
 
 - **G1:** F1's `approve` runs on the Human seat `owner` with no `gate:`.
   - `plan_of` (L493-L497) refuses a step that is not a gate on a seat with no model.
   - The reference workload calls step 7 a "human gate in the Inbox".
+  - Register DR-137 (target 3.13; restated by PR #42): 3.13 gives `approve` `gate: review`, so `golden.json` tags the removed step `approve` with 3.13.
 - **G2 (manager, 2026-11-25):** no F1 run writes rows: its first step produces Document A.
   - Rows reach the golden with F2 into F1 (epic 4 story 13).
   - Until then the `rows` and `history` lines read `(none)`.
+  - No register row: Sofia's replan (PR #42, epic Notes 2026-11-25) owns it in story 3.20, which declares `table: table-t1` on `produce`; "not a gap".
 - **G3:** from 9.10 a project's first writer open creates its backup key in the keychain (AD-32; DR-170).
   - The golden opens fresh copies on every PR.
   - So 9.10 must make the open's key store a port that the golden fakes, with a counting `FakeSecretStore` and a zero-keychain assertion.
+  - Register DR-173 (targets 9.10 and 12.16; added by PR #42).
 
 ### The copy, the removed list and the drift check (owner conditions)
 
@@ -346,14 +349,16 @@ deferred: []
   - It has no `AuthRef` and runs on a `FakeEgress` with no route.
   - Row 16 asserts that the egress recorded no request.
 
-### No network, no keychain (row 16)
+### No network, no keychain (row 16; structural, review R6)
+
+Both claims are structural: they rest on how the run is wired (its only providers, no secret port), not on a count of sockets or keychain calls.
 
 - **Network:** `agentic run`'s only provider source is `RunContext.providers`; the binary wires `unwired_providers` (`run.rs` L128). In the golden, that source is the router or the tripwire. Validate and the open make no request.
 - **Keychain:**
   - Validate, the open and `agentic run` take no `SecretStore` at this baseline.
   - The rig builds `RunContext` with an exhaustive literal, so a later secret field fails to compile there.
   - The tripwire carries no `AuthRef`.
-  - A zero-count `FakeSecretStore` would be wired to nothing today. It joins with the first secret port on this path (G3), and that story asserts zero reads.
+  - A zero-count `FakeSecretStore` would be wired to nothing today. It joins with the first secret port on this path (G3, DR-173), and that story asserts zero reads.
 
 ### Snapshot format (rows 4–6)
 
@@ -417,14 +422,18 @@ deferred: []
 7. Open-time lines and audit entries are left out of the snapshot.
 8. There is no timing assertion.
 
-### Register rows (added in this story's commit; ids from DR-172)
+### Register rows (review R3: none added)
 
-| Kind | Item | Target | Must close |
+This story adds no row to `docs/deferred-register.md`. Each gap points at the row PR #42 added or restated (read from `origin/main`):
+
+| Gap | Register | Target | Note |
 |---|---|---|---|
-| deferred | G1: F1's `approve` has no `gate:` on a Human seat. `agentic run` will refuse it once F1's run-graph keys are honoured | 3.16 (assumed) | yes (assumed) |
-| deferred | G2: no F1 run writes rows, so the golden's rows and history stay empty until F2 runs into F1 (manager, 2026-11-25) | 4.13 (assumed) | no (assumed) |
-| deferred | G3: from 9.10 the first open creates a keychain backup key. The golden's fresh copies need a faked key store and a zero-keychain assertion | 9.10 | yes |
-| deferred | The cut-down F1 copy in `fixtures/golden/so-far/`: each F1 story shrinks its removed list, and 3.13 deletes it once the copy matches F1 (owner, 2026-11-25) | 3.13 | yes |
+| G1: F1's `approve` has no `gate:` on a Human seat | DR-137 | 3.13 | Restated by #42 against reference-workload F1 step 7; `golden.json` tags `approve` 3.13 |
+| G2: no F1 run writes rows | none | 3.20 | Not a gap (Sofia, #42): 3.20 declares `table: table-t1` on `produce` |
+| G3: from 9.10 the first open creates a keychain backup key | DR-173 | 9.10, 12.16 | Added by #42 (owner question) |
+| The cut-down copy: the list only shrinks, 3.13 deletes it | none | 3.13 | 3.13's restated ticket and the epic Notes rule (#42); the drift and put-back tests enforce it |
+
+#42's other rows are not this story's: DR-172 (the 3.4 race fix) and DR-174 to DR-176 (3.23's review items).
 
 ## Questions for the owner
 
@@ -467,7 +476,7 @@ All FakeLlm and FakeClock; no network, no real model, no keychain. Each red reas
 | `the_copy_is_the_real_flow_minus_the_removed_list` | same | 11 (with its planted drift cases) | Same E0560 |
 | `the_removed_list_is_what_the_real_flow_refuses` | same | 12 | Same E0560 |
 | `the_copy_is_a_fixture_never_a_template` | same | 13 | Same E0560 |
-| `it_opens_no_network_and_reads_no_key` | same | 16 | Same E0560 |
+| `no_network_or_keychain_is_wired_on_the_runs_path` (renamed from `it_opens_no_network_and_reads_no_key`, review R6) | same | 16 | Same E0560 |
 | `golden_targets_listed` | `crates/am-e2e/tests/trust_targets.rs` | 18 | Green on arrival; logged |
 | `golden_so_far_runs_in_just_check` | same | 14 | Green on arrival; logged |
 | `plan_of_runs_on_the_contexts_clock` | `crates/am-app/src/run.rs` `mod tests` (test-only lines) | 19 | Does not compile: E0061, `plan_of` takes 4 arguments but 5 were supplied |
@@ -501,7 +510,7 @@ Red-run commands: `cargo nextest run -p am-e2e --test golden_so_far --test trust
   - `golden.json`: about 25.
   - Five scripts: about 35.
   - `snapshot.txt`: about 55–75.
-- **Register:** 4 rows.
+- **Register:** none (review R3).
 
 ## Verification
 
@@ -517,3 +526,191 @@ Red-run commands: `cargo nextest run -p am-e2e --test golden_so_far --test trust
 - Merge only with both CI jobs green after review triage.
 
 ## Implementation Notes
+
+### Tests first (tester, 2026-11-25)
+
+**Written:**
+- `crates/am-e2e/tests/golden/golden_so_far.rs`: the ten tests of the Tests-first list (rows 1 to 17).
+- `crates/am-e2e/tests/golden/support/mod.rs` (a folder, so not a target): the golden rig (loaders, the router and factory, the drift and fixture-only checks, `pass`, the renderer, the normaliser, the compare and its diff).
+- `crates/am-e2e/tests/trust_targets.rs`: `golden_targets_listed` (row 18) and `golden_so_far_runs_in_just_check` (row 14).
+- `crates/am-e2e/Cargo.toml`: the `[[test]]` target `golden_so_far`, no `required-features`.
+- `crates/am-app/src/run.rs`, inside `#[cfg(test)] mod tests` only: `plan_of_runs_on_the_contexts_clock` (row 19). This is the one `src/` file touched, as the Boundaries allow; no line outside `mod tests` changed.
+- The literal sweep: `clock` in every `RunContext` literal of `run_cli.rs` (2, and the doc block), `run_prompt.rs`, `run_rows.rs`, `gate_cli.rs`, `gate_tty.rs` and the engine rig; and in `gate_cli.rs`'s `GateContext` literal and doc block (see below).
+- Fixtures, in `fixtures/golden/so-far/`: `workflow.yaml` (the copy), `golden.json` (the removed list, the FakeClock instant, where the stories are listed), `scripts/<seat>.json` (five: two turns for the D2 head, one for the D1 head, none for the three branch seats) and `snapshot.txt` (hand-written).
+
+**Readings and decisions (tester):**
+- **The removed list follows Q3 and Sofia's replan (PR #42), not the Code Map's `removed_steps_from`.** `golden.json` holds `removed_keys` (`{step, key, until}`) and `removed_steps` (`{step, until, why}`), each `until` a list of `<epic>.<id>` stories: `produce.handoff` 3.15; `consolidate.join` 3.14; `consolidate.handoff` 3.15; `report.handoff` 3.15, 3.16; step `branches` 3.14; step `approve` 3.13 (Sofia's note: "3.14 for `branches` and `consolidate.join`, 3.15 and 3.16 for the hand-offs and the review inside `report`'s, then 3.13 for `approve`"). So the copy runs three steps (`produce`, `consolidate`, `report`), not one: the run succeeds with three model calls, and the D2 head's script has two turns. The "Today's expected shape" in Design Notes (one turn) is superseded by Q3.
+- **`GateContext` gains `clock` too.** The Code Map's `gate.rs` line, `plan_of(…, self.ctx.clock.clone(), KEPT)`, needs it (`self.ctx` is a `GateContext`), and row 19 says "for run and for gate continue"; the sweep list named only `RunContext` literals. The tests pin `GateContext { …, clock }`; `main.rs`'s `GateContext` literal (L212) needs the field too.
+- **Prompt lines carry a fingerprint.** Each `prompt` line has `sha256 <first 12 hex digits of the part's text>` (or `-` for a part with no text) besides `bytes`. Found at the by-hand check: an equal-length word change in the copy's first instruction (`the` to `all`) failed the drift test but not a bytes-only snapshot. Both now fail naming the step.
+- **A pass copies the sample with `copy_files`, not `am_testkit::copy_tree`.** `copy_tree` syncs each of the sample's 32 files to disk, about 150 ms a copy and five copies a pass; the target took 7.1 s wall. `copy_files` (engine rig, beside `Cli::copy_from`) reads and writes each file (never `std::fs::copy`) and syncs nothing; `copy_of` is unchanged. The target now takes 1.1 s.
+- **Words.** No golden source spells a sample id, step ids included; a test (`spelled_ids`, row 15) scans `tests/golden/` for the flow, its steps, the scripted seats and the sample's folder name. The sources say "the real flow" and "the copy", never the flow's name, and avoid the bare step words.
+- **Keychain.** No secret port exists on this path at this baseline, so a counting `FakeSecretStore` would be wired to nothing; row 16 is structural (the rig's `run_flow` builds `RunContext` field by field) plus the egress and factory checks, and a tripwire self-check (a fallback model goes to the tripwire, whose egress records one request with no `auth`). A runtime count of keychain calls waits for G3.
+- **Row 13:** `agentic validate --template fixtures/golden/so-far/` exits 1 (`company.yaml:1: missing company.yaml`).
+
+### API the tests fix
+
+```text
+am_app::cli::RunContext  { places, identity, terminal, providers, clock: Arc<dyn am_domain::Clock> }
+am_app::cli::GateContext { places, identity, terminal, providers, clock: Arc<dyn am_domain::Clock> }
+am_app::cli::system_clock() -> Arc<dyn am_domain::Clock>   // re-exported from crate::run; reads the system time
+crate::run::plan_of(snapshot, workflow, providers, clock: Arc<dyn Clock>, not_done) -> Result<RunPlan, String>
+    // the plan's clock is the context's (the same Arc: a later FakeClock::set shows through)
+tests/engine/support: pub const CLOCK; Cli::copy_from(&Path) -> PathBuf; pub fn copy_files(from, to)
+fixtures/golden/so-far/golden.json: { about, clock, stories: { tickets, epic }, removed_keys: [{ step, key, until: [..] }],
+    removed_steps: [{ step, until: [..], why }] }   // unknown keys refused
+fixtures/golden/so-far/scripts/<seat>.json: { turns: [{ step, text, usage: [in, out], tool_calls?: [{ name, arguments }] }] }
+```
+
+### Red run (2026-11-25)
+
+On `story/3-24` at the plan commit, before any non-test `src/` change. The shared `CARGO_TARGET_DIR`; no clean, no workspace copy.
+
+```text
+$ cargo nextest run -p am-e2e --test golden_so_far --test trust_targets
+error[E0560]: struct `RunContext` has no field named `clock`
+   --> crates/am-e2e/tests/golden/../engine/support/mod.rs:595:13
+error[E0560]: struct `RunContext` has no field named `clock`
+   --> crates/am-e2e/tests/golden/support/mod.rs:525:9
+error: could not compile `am-e2e` (test "golden_so_far") due to 2 previous errors
+
+$ cargo nextest run -p am-e2e --test trust_targets          # green on arrival
+PASS golden_targets_listed; PASS golden_so_far_runs_in_just_check; (and the 3 existing) 5 passed
+
+$ cargo nextest run -p am-app                               # stops at the first targets; the full list:
+$ cargo build -p am-app --tests --keep-going
+error[E0560]: struct `RunContext` has no field named `clock`   gate_tty.rs:135, run_rows.rs:105, run_prompt.rs:129,
+                                                               gate_cli.rs:339, run_cli.rs:405, run_cli.rs:1511
+error[E0560]: struct `GateContext` has no field named `clock`  gate_cli.rs:370
+error[E0061]: this function takes 4 arguments but 5 arguments were supplied   src/run.rs:1083 (plan_of, L399)
+error[E0425]: cannot find function `system_clock` in module `crate::cli`     src/run.rs:1094
+
+$ cargo build -p am-e2e --tests --keep-going
+25 targets fail (golden_so_far and every target that includes the engine rig), each with E0560 only
+```
+
+Every golden test's red reason is the plan's: E0560 (`RunContext` has no field `clock`). The am-app unit test's is E0061 and, because it also pins `system_clock()`, E0425.
+
+**Green on arrival (logged):** `golden_targets_listed`, `golden_so_far_runs_in_just_check`. `cargo xtask denylist`, `runtime-paths`, `seam-guard` and `fixed-hosts` pass; `cargo fmt --all -- --check` passes.
+
+**Rig dry run (test files only, restored):** to check the rig and the hand-written snapshot before the coder's change, the `clock` line was taken out of the two am-e2e literals (`tests/engine/support/mod.rs`, `tests/golden/support/mod.rs`), from backups restored after; `cargo nextest run -p am-e2e --test golden_so_far`: 10 passed. The hand-written snapshot matched at its first compare, and again after the fingerprints were added (no triage needed). `cargo clippy -p am-e2e --all-targets -- -D warnings` was clean in that state. The by-hand checks of Verification were run then and reverted (`cmp` against backups): one character of the D2 head's first turn fails `golden_so_far` at `step produce` (the output line); one word of the copy's `produce` instruction fails the drift test and `golden_so_far`, both at `produce`.
+
+**Time (row 20):** `cargo nextest run -p am-e2e --test golden_so_far` (dry run, owner's Mac, warm cache): 1.1 s wall for the ten tests in parallel (each one-pass test 0.78 to 0.83 s, the two-pass test 1.09 s, the drift test 0.25 s). Before `copy_files` it was 7.1 s wall (one pass alone 1.1 s). No timing assertion.
+
+**Byte counts and fingerprints of `snapshot.txt`'s prompt lines**, from `templates/samples/company-a/` (seat bodies after the second `---` line; goal and backstory from the frontmatter with `## Goal\n\n` and `## Backstory\n\n`; the skill as `## skill:plain-report\n\n` and its SKILL.md body; the step instructions from `workflows/f1.yaml`):
+
+```sh
+body() { awk 'n>=2{print} /^---$/{n++}' "$1"; }
+body seats/d2-head.md | wc -c                                    # 291; | shasum -a 256 | cut -c1-12: 98227892505b
+printf '%s' "## Goal
+
+$(grep '^goal: ' seats/d2-head.md | sed 's/^goal: //')" | wc -c # 112 dcc58d634cc1 (backstory: 123 f2650eb407eb)
+# d1-head: role 385 79eb56fd7aa8, goal 143 691bc3829440, backstory 132 fcbedef2101c
+{ printf '%s' '## skill:plain-report
+
+'; body skills/plain-report/SKILL.md; } | wc -c                  # 341 d73e32b06c2e
+# step instructions (the `instruction:` value): produce 232 f987abcdcefa, consolidate 135 2b2339c5df21, report 107 60da325e3a22
+```
+
+**Size so far (tests and fixtures; no shipped code yet):** test lines 2,704 (`golden_so_far.rs` 568, the rig 1,919 after `cargo fmt`, `trust_targets.rs` +128, the engine rig +43, the am-app sweep and unit test +46; and the manifest's target, +9), over the plan's 1,250 to 1,400 (the rig's estimate was 750 to 850; rustfmt's layout and the drift and Q3 checks account for most of it); fixtures 183 lines.
+
+**For the coder:** the am-app change is the plan's, plus `GateContext.clock` and `main.rs`'s `GateContext` literal. Expect every test above green with no fixture change; a difference at the green run is triaged here.
+
+### Implementation (2026-11-25)
+
+**The am-app change (the plan's, plus `GateContext.clock`):**
+- `run.rs`: `RunContext` gains `pub clock: Arc<dyn Clock>`; `pub fn system_clock() -> Arc<dyn Clock>` wraps the existing `SystemClock`; `plan_of` takes `clock: Arc<dyn Clock>` and puts it in the `RunPlan` (no clock of its own); `start` passes `ctx.clock.clone()`. Module docs, `RunContext`'s and `plan_of`'s docs name the clock.
+- `gate.rs`: `GateContext` gains `pub clock: Arc<dyn Clock>`; the continue's `plan_of` passes `self.ctx.clock.clone()`; its doc names the system clock.
+- `cli.rs`: re-exports `system_clock`.
+- `main.rs`: the `RunContext` and `GateContext` literals take `clock: am_app::cli::system_clock()`. The scheduler's own `SystemClock` is unchanged.
+- `justfile`: one header comment line (`test` runs am-e2e's `golden_so_far`); no recipe changed.
+
+**One test edit (mechanical; every assertion kept):** `plan_of_runs_on_the_contexts_clock` named `am_testkit` (`fixture`, `FakeClock`), which xtask's release guard `am_app_sources_never_name_the_test_kit` refuses anywhere under `crates/am-app/src`, test modules included; the first `just check` failed there. The test now builds the fixture path from `CARGO_MANIFEST_DIR` and uses a local settable clock (`SetClock`, `at` and `set`, as `FakeClock`'s). The red reasons (E0061, E0425) are unchanged.
+
+**Green:** no fixture, snapshot or golden source changed; the hand-written snapshot matched at the first green run (no triage). `git diff --stat templates/` is empty.
+- `cargo nextest run -p am-e2e --test golden_so_far --test trust_targets`: 15 passed, 1.13 s wall.
+- `cargo nextest run -p am-app`: 384 passed, 1 skipped.
+- `cargo test --doc -p am-app`: ok (0 doctests).
+- `just check`: `Summary [  56.996s] 1571 tests run: 1571 passed, 8 skipped`, then fmt, clippy, doctest, check-deps, check-forbid, denylist, runtime-paths, fixed-hosts, seam-guard and validate all pass (exit 0).
+
+**Time (row 20), inside `just check`:** the ten `golden_so_far` tests ran in parallel with the rest of the suite, each 0.014 s (fixture-only) to 2.04 s (the two-pass test); the one-pass tests 1.20 to 1.40 s; the drift test 0.24 s. About 2 s wall for the target under full load, against 1.1 s alone. No timing assertion.
+
+**Size:** code +42 / −11 lines (`run.rs` +25 −5, `gate.rs` +13 −4, `main.rs` +2, `cli.rs` +1 −1, `justfile` +1 −1). Tests: +16 lines in the am-app unit test (the guard fix) on top of the tester's 2,704.
+
+**Left for wrap-up:** the four register rows (Design Notes) are not yet in `docs/deferred-register.md`. (Superseded by review R3: no register row is added.)
+
+### Review triage round 1 (manager, 2026-11-25)
+
+One Opus review covered correctness and the owner's conditions. What it confirmed:
+- The drift test is byte-exact and compares every field.
+- The restoring stories are right: 3.14, 3.15, 3.16, 3.13.
+- The clock is shared.
+- No sample id appears in `crates/`, and `templates/` is unchanged.
+
+Every fix below is in test code or the plan. They are written as tests, with the red runs logged.
+
+| Id | From | Finding | Decision |
+|----|------|---------|----------|
+| R1 | F1 | "Each later story shrinks the list" is not enforced. `run_graph` lists every declared key, so a stale entry (a key that has become runnable) stays green. | Fix: for each entry, install the copy with only that entry put back and assert that `agentic run` refuses at that entry's step and key, before any run row. No model call. A stale entry then fails and names itself. |
+| R2 | F2 | The planted cases are hard-wired to today's list (`remove(1)`, both kinds required, the first-step plant), so they panic or mislead once 3.15 lands. | Fix: pick the planted targets from the list's shape. A case that no longer applies is skipped, and the skip says so. |
+| R3 | F3 | The plan requires register rows in this story's commit. The sample gaps landed as DR-172 to DR-176 in PR #42. G1 repeats DR-137 with a conflicting target (3.16 here, 3.13 in DR-137 and `golden.json`). | Fix the plan: point G1 at DR-137 (target 3.13) and the other gaps at their DR ids from #42. No new register row. |
+| R4 | F4 | The restoring-story check accepts any epic 3 id, including built stories and the sweep. | Fix: the story must come after entry 24 in `tickets.toml`'s table order and not be built. |
+| R5 | F5 | The snapshot fingerprints only what the journal stores, and step inputs are journaled with no text (AD-43). A wrong or empty hand-on to the next step would not show. | Fix: the FakeLlm router fingerprints each request's parts per step into the snapshot. |
+| R6 | F6 | "No network" rests on how the run is wired, just as "no keychain" does. | Fix the test names and docs to say structural, as the keychain claim already does. |
+| R7 | F7 | `golden_so_far_runs_in_just_check` looks only for the text `#[ignore`. | Fix: also refuse `cfg_attr(…, ignore)` and a file-level `#![cfg(…)]` that drops the target on Linux, and check that am-e2e stays a default workspace member. |
+
+**Accepted:**
+- **D1 (F8):** the nits. `copy_files` skips symbolic links and disk syncs (test-only). The fixtures-only path check cannot fail by construction. The template byte check matches exact bytes.
+- **Note:** the reviewer could not run the Linux job. The PR's Linux CI job is the check.
+
+### Red run round 1 (2026-11-25)
+
+Tester, for the review triage's rows R1 to R7. Test code, fixtures and this plan only; no `src/` change. Each new check was shown red first, on a planted entry, file or stub, then made green. Commands run on `story/3-24` with the shared `CARGO_TARGET_DIR`.
+
+**R4 (restoring stories):** a planted case gave the first key entry `until: ["3.23"]` (built, before 24). `cargo nextest run -p am-e2e --test golden_so_far -E 'test(=the_copy_is_the_real_flow_minus_the_removed_list)'`: red, `an entry naming a built story: no problem found`. Fix: `golden.json`'s `stories` gains `own: 24`; a `StoryBook` reads the table order of `tickets.toml` and the built stories (plans beside it with `status: built` or `done`); a story must be of the epic, after `own` in that order and not built, each worded. New test `a_restoring_story_comes_after_this_one_and_is_not_built` (the repository's book, and a planted book in memory for each message). Note: the sweep (12) is after 24 and unbuilt, so it passes, as R4's rule says.
+
+**R2 (planted cases from the list's shape):** `golden.json` planted with one key entry and no whole step, and `workflow.yaml` with the matching copy (both restored by `cmp`): the drift test was red at its hard-wired assumption (`today the list names keys and whole steps (owner Q3)`), and `remove(1)` would have panicked next. Fix: the cases move into the rig (`planted_drift_cases`), each target picked from the list and the copy (the first key entry, the first whole step, the last kept step, a kept step with a seat), each skip worded. The drift test runs them on the shipped list and on four shapes cut from the real flow in memory (keys only, whole steps only, the first key only, empty). The same plant is now green, printing what it skipped. The row 8 and 10 plants are skipped, in words, when they cannot be made (`plant_skip`); row 2 no longer needs the refusal to name keys (once 3.16 lands it is refused for a seat with no model).
+
+**R5 (request fingerprints):** a new plant, `EmptyHandOn`: the router records every trusted part (a hand-on) as empty. Test `an_empty_hand_on_fails_naming_the_steps_that_receive_it` was red (`an empty hand-on fails the compare: ()`): the snapshot did not see it. Fix: the router records each request part by part (`request_lines`: every system part and message part, its kind, label, bytes and a 12-hex sha256 of its text with ids and times normalised; every part kind matched by name), rendered under each step as `request <seat> turn <n> …`. Rows 8 and 9 now also see the plant at the receiving step's hand-on line and at the sent instruction line; their assertions say so.
+- `snapshot.txt` gained 16 `request` lines, taken from a real run, as the triage allowed. **How they were checked:** each system and `user 1.1 instruction` line has the bytes and sha256 already computed by hand for the prompt lines above it (Byte counts, above). The two hand-ons were recomputed from the scripts: `python3 -I -c "import json,sys;print(json.load(open(sys.argv[1]))['turns'][0]['text'])" scripts/d2-head.json | tr -d '\n' | shasum -a 256 | cut -c1-12` gives `5e3d5955913a` (98 bytes, `step:produce@1`); for `scripts/d1-head.json`, `68b5a78abb6d` (86 bytes, `step:consolidate@1`). Both match.
+
+**R1 (the list only shrinks):** test `each_removed_entry_put_back_alone_is_refused_at_its_step` against a stub `put_back` that accepted everything: red (`a stale entry fails: ()`). Fix: `put_back` cuts the real flow by the list without that one entry, installs it in a fresh copy of the sample and runs `agentic run`. It passes only on exit 1, no run row, no model call (the router served nothing, the tripwire recorded nothing), refused at the entry's step and, for a key, naming that key. All six shipped entries pass (the whole step `approve` is refused for its seat with no model; `branches` for `max_parallel`, `seats`). By hand, `golden.json` planted with `report.instruction` (a key `agentic run` honours), restored by `cmp`: red, `the removed entry `report.instruction` is stale: … it exited 0 with 1 run rows and 3 model calls …`. The test pins the same plant in memory.
+
+**R6 (structural wording):** the test is renamed `no_network_or_keychain_is_wired_on_the_runs_path`. Its doc, the golden target's and the rig's module docs, Boundaries, the verify line and the row 16 Design Note now say the network and keychain claims are structural (the wiring, not a count). The keychain pointer is now DR-173.
+
+**R7 (`just check` guards):** test `the_skip_guards_catch_planted_attributes` against stubs: red (`not caught: "#[test]\n#[ignore]\nfn a() {}"`). Fix: `skipping_attributes` refuses `#[ignore]`, any `cfg_attr(…)` that ignores or names a platform, every file-level `#![cfg(…)]` and an item `cfg(…)` naming a platform (attributes parsed with brackets balanced, comment lines left out). `default_member` requires am-e2e in `default-members` (or in `members` when there is no such list). Each is checked on planted text in memory and on the real files and workspace manifest. By hand, a planted `tests/golden/support/planted.rs` with `#[cfg_attr(not(target_os = "macos"), ignore)]`, then with `#![cfg(target_os = "macos")]`: `golden_so_far_runs_in_just_check` was red for each, naming the attribute; the file was removed and the test is green.
+
+**R3 (plan text):** G1 now points at DR-137 (target 3.13) and G3 at DR-173. G2 has no row: it is owned by 3.20, per Sofia. The copy's deletion is owned by 3.13's restated ticket. The "Register rows" table now maps each gap and adds none. Boundaries, the Code Map, the Tasks and Size say so too. `docs/` is unchanged.
+
+**Green:**
+- `cargo nextest run -p am-e2e --test golden_so_far --test trust_targets`: 19 passed, 1.85 s wall.
+- `just check` (exit 0): `Summary [  61.388s] 1575 tests run: 1575 passed, 8 skipped`. fmt, clippy `-D warnings`, the doctests, check-deps, check-forbid, denylist (280 files clean), runtime-paths, fixed-hosts, seam-guard and validate all pass.
+- Inside `just check`, the 13 golden tests ran in 0.02 to 3.19 s each. The longest is the put-back test: six refused runs plus one planted full run.
+- `git diff --stat templates/ docs/` is empty.
+
+**Size of round 1 (tests and fixtures only):** the rig +512 lines (2,431), `golden_so_far.rs` +45 (613), `trust_targets.rs` +140 (352). Fixtures: `snapshot.txt` +19, `golden.json` +1. No shipped-code line.
+
+## Auto Run Result
+
+**Status:** built (2026-11-25). Planned, tested, built and reviewed on Opus.
+
+**Summary:** `golden_so_far` runs in `just check` on every PR. There is no feature flag, no ignore and no separate recipe, and a check refuses `cfg_attr` ignores, file-level `cfg` and a non-default am-e2e. It does three things:
+- **(1)** Pins the real Company A F1 to its refusal at `produce`/`handoff`: exit 1, no run row, no model call.
+- **(2)** Runs a cut-down F1 copy, kept in `fixtures/golden/so-far/` only and never a template, on scripted FakeLlm through three steps. It compares a normalised snapshot of step-run states, Inbox items, ledger entries, and fingerprints of every request part per step.
+- **(3)** Proves the copy cannot drift. The copy equals F1 minus exactly the listed keys and whole steps. Each entry names an unbuilt restoring story after 3.24. Each entry, put back alone, is still refused at its step and key, so a stale entry fails and names itself.
+
+Planted changes fail with a diff naming the step; the planted cases pick their targets from the list's shape. No network and no keychain are reachable on the run's path; both claims are marked structural until a port exists (DR-173). The Company A sample is unchanged.
+
+**Code:** `RunContext.clock` and `GateContext.clock` share one clock; `system_clock()` reads the real time.
+
+**Size (owner rule):**
+- code: 89 lines;
+- tests: 3,370 lines;
+- fixtures: 203 lines.
+
+The golden target takes about 2 s.
+
+**Review:** one Opus review (correctness and the owner's conditions). R1–R7 are fixed in test code and the plan, each new check shown red first. D1 (nits) is accepted.
+
+**`just check`:** 1575 passed, 8 skipped.
+
+**For later stories:** each F1 story shrinks the removed list and moves both expected results in the same commit. 3.13 deletes the copy.

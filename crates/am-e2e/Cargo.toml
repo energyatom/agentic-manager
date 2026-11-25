@@ -239,6 +239,15 @@ path = "tests/engine/engine_result_journal.rs"
 name = "taint_rows_no_read_path"
 path = "tests/trust/taint_rows_no_read_path.rs"
 
+# Story 3.24 (owner quality plan part 1; AD-33's golden e2e, the Structural
+# Seed's tests/golden/): the sample validated, the real flow's refusal
+# pinned and its cut-down copy run on FakeLlm, on every PR. `just
+# check` runs it with no feature, ignore or recipe (`golden_targets_listed`,
+# `golden_so_far_runs_in_just_check`); its rig lives in tests/golden/support/.
+[[test]]
+name = "golden_so_far"
+path = "tests/golden/golden_so_far.rs"
+
 [dev-dependencies]
 am-app.workspace = true
 # Story 3.2: the error envelope and the run and event DTOs (AD-14).

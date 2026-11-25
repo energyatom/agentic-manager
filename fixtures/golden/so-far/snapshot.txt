@@ -1,0 +1,107 @@
+# golden_so_far (epic 3 story 24): the expected snapshot, written by hand from the story plan and
+# never by the test (it writes its actual snapshot under CARGO_TARGET_TMPDIR). A story that changes
+# what the sample's report flow can run moves these lines in its commit, checked by hand against its
+# matrix (the plan's extension rule). Normalised: ids are <id-N> by first appearance, instants
+# <time>, the config hash and validate's snapshot prefix <config>, the temporary copies <sample>.
+# Each prompt part's byte count and the first 12 hex digits of its text's sha256 are computed by
+# hand from the sample's text (plan, Implementation Notes, with the commands). The `request`
+# lines (review R5) are what the model was sent, part by part, as the FakeLlm router saw it:
+# taken from a real run and checked by hand (the system and instruction parts equal the prompt
+# lines above them; a trusted part is the previous step's output, from its script). Lines
+# starting with # and blank lines are not compared.
+
+validate: exit 0
+validate: workflows/f2-update.yaml:14: warning: step 'update' is a fan-out step that would write a table; a fan-out step cannot write a table until story 3.14, so `agentic run` refuses it
+validate:   fix: keep it until story 3.14 allows `table:` on fan-out steps, or move the writes to a step with one `seat:` and a `table:`
+validate: agentic validate: <sample>: 0 errors, 1 warning (snapshot <config>)
+
+# The real flow, the sample as it is: refused before any run row, the factory never asked.
+stop: step produce
+stop: keys handoff
+stop: exit 1
+stop: runs 0
+stop: asked 0
+stop: err agentic: step `produce` of the workflow `f1` declares `handoff`, which this version of `agentic run` cannot honour yet: it runs each step as one plain model turn and would skip it without saying so. No run was started
+
+# The cut-down copy, installed over the flow's file in a second copy of the sample.
+copy: removed produce.handoff until 3.15
+copy: removed consolidate.join until 3.14
+copy: removed consolidate.handoff until 3.15
+copy: removed report.handoff until 3.15, 3.16
+copy: removed step branches until 3.14
+copy: removed step approve until 3.13
+copy: exit 0
+copy: asked local-lmstudio gpt-oss-20b 3
+copy: out run <id-1> succeeded
+
+run <id-1>: workflow f1, status succeeded, config <config>
+
+step produce: attempt 1 <id-2> succeeded, taint 0
+step produce: input (none)
+step produce: prompt call 0 part 1 role instruction `Role instructions` taint 0 bytes 291 sha256 98227892505b
+step produce: prompt call 0 part 2 goal instruction `Goal` taint 0 bytes 112 sha256 dcc58d634cc1
+step produce: prompt call 0 part 3 backstory instruction `Backstory` taint 0 bytes 123 sha256 f2650eb407eb
+step produce: prompt call 0 part 4 skill instruction `skill:plain-report` taint 0 bytes 341 sha256 d73e32b06c2e
+step produce: prompt call 0 part 5 step instruction `Step instruction` taint 0 bytes 232 sha256 f987abcdcefa
+step produce: model call 1 <id-3> turn settled, tokens 1200/90
+step produce: ledger call 1 reserved 0 settled 0 settled
+step produce: tool call (none)
+step produce: output Document A is written from the processed rows of Table T1, naming the item_id of each row it uses.
+step produce: item (none)
+step produce: row (none)
+step produce: script d2-head turn 1 served, offered []
+step produce: request d2-head turn 1 system 1 instruction bytes 291 sha256 98227892505b
+step produce: request d2-head turn 1 system 2 instruction bytes 112 sha256 dcc58d634cc1
+step produce: request d2-head turn 1 system 3 instruction bytes 123 sha256 f2650eb407eb
+step produce: request d2-head turn 1 system 4 instruction bytes 341 sha256 d73e32b06c2e
+step produce: request d2-head turn 1 user 1.1 instruction bytes 232 sha256 f987abcdcefa
+
+step consolidate: attempt 1 <id-4> succeeded, taint 0
+step consolidate: input step_output from <id-2> `step:produce@1` taint 0
+step consolidate: prompt call 0 part 1 role instruction `Role instructions` taint 0 bytes 385 sha256 79eb56fd7aa8
+step consolidate: prompt call 0 part 2 goal instruction `Goal` taint 0 bytes 143 sha256 691bc3829440
+step consolidate: prompt call 0 part 3 backstory instruction `Backstory` taint 0 bytes 132 sha256 fcbedef2101c
+step consolidate: prompt call 0 part 4 step instruction `Step instruction` taint 0 bytes 135 sha256 2b2339c5df21
+step consolidate: prompt call 0 part 5 trusted trusted `step:produce@1` taint 0 bytes 0 sha256 -
+step consolidate: model call 1 <id-5> turn settled, tokens 900/70
+step consolidate: ledger call 1 reserved 0 settled 0 settled
+step consolidate: tool call (none)
+step consolidate: output D1's opinion has one labelled section per branch and says where the branches disagree.
+step consolidate: item (none)
+step consolidate: row (none)
+step consolidate: script d1-head turn 1 served, offered []
+step consolidate: request d1-head turn 1 system 1 instruction bytes 385 sha256 79eb56fd7aa8
+step consolidate: request d1-head turn 1 system 2 instruction bytes 143 sha256 691bc3829440
+step consolidate: request d1-head turn 1 system 3 instruction bytes 132 sha256 fcbedef2101c
+step consolidate: request d1-head turn 1 user 1.1 instruction bytes 135 sha256 2b2339c5df21
+step consolidate: request d1-head turn 1 user 1.2 trusted `step:produce@1` bytes 98 sha256 5e3d5955913a
+
+step report: attempt 1 <id-6> succeeded, taint 0
+step report: input step_output from <id-4> `step:consolidate@1` taint 0
+step report: prompt call 0 part 1 role instruction `Role instructions` taint 0 bytes 291 sha256 98227892505b
+step report: prompt call 0 part 2 goal instruction `Goal` taint 0 bytes 112 sha256 dcc58d634cc1
+step report: prompt call 0 part 3 backstory instruction `Backstory` taint 0 bytes 123 sha256 f2650eb407eb
+step report: prompt call 0 part 4 skill instruction `skill:plain-report` taint 0 bytes 341 sha256 d73e32b06c2e
+step report: prompt call 0 part 5 step instruction `Step instruction` taint 0 bytes 107 sha256 60da325e3a22
+step report: prompt call 0 part 6 trusted trusted `step:consolidate@1` taint 0 bytes 0 sha256 -
+step report: model call 1 <id-7> turn settled, tokens 1100/110
+step report: ledger call 1 reserved 0 settled 0 settled
+step report: tool call (none)
+step report: output The draft of Report R1 leads with the decision the Owner needs, then lists each point with the document it comes from.
+step report: item (none)
+step report: row (none)
+step report: script d2-head turn 2 served, offered []
+step report: request d2-head turn 2 system 1 instruction bytes 291 sha256 98227892505b
+step report: request d2-head turn 2 system 2 instruction bytes 112 sha256 dcc58d634cc1
+step report: request d2-head turn 2 system 3 instruction bytes 123 sha256 f2650eb407eb
+step report: request d2-head turn 2 system 4 instruction bytes 341 sha256 d73e32b06c2e
+step report: request d2-head turn 2 user 1.1 instruction bytes 107 sha256 60da325e3a22
+step report: request d2-head turn 2 user 1.2 trusted `step:consolidate@1` bytes 86 sha256 68b5a78abb6d
+
+rows table-t1: (none)
+inbox: (none)
+script d1-e1: served 0 of 0
+script d1-e2: served 0 of 0
+script d1-e3: served 0 of 0
+script d1-head: served 1 of 1
+script d2-head: served 2 of 2

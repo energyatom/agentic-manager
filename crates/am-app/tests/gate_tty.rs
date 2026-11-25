@@ -132,6 +132,7 @@ impl Env {
             identity: am_app::identity::system(),
             terminal: Box::new(FakeTerminal::new()),
             providers,
+            clock: am_testkit::FakeClock::at("2026-11-25T09:00:00Z"),
         };
         let argv = vec![
             "gated".to_string(),

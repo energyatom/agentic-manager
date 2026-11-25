@@ -22,7 +22,7 @@ pub use crate::accounts::{AccountsContext, accounts};
 pub use crate::gate::{GateContext, gate};
 /// `agentic run <workflow>` and `agentic status` (epic 3 story 1); see
 /// [`crate::run`].
-pub use crate::run::{Providers, RunContext, run, status, unwired_providers};
+pub use crate::run::{Providers, RunContext, run, status, system_clock, unwired_providers};
 
 /// What the `agentic` binary gives every CLI-class command (AD-15): this
 /// platform's places, the OS identity adapter and the owner's real

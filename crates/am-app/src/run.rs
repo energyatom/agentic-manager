@@ -60,6 +60,9 @@
 //! The binary's factory ([`unwired_providers`]) wires no provider yet and
 //! refuses every model in words; tests pass am-testkit's `FakeLlm` through
 //! [`RunContext`]. No env var, flag or feature swaps a provider in here.
+//! Story 3.24: the run's clock is [`RunContext`]'s `clock` port, shared with
+//! the plan (never a copy); the binary gives [`system_clock`], tests pass
+//! am-testkit's `FakeClock`.
 //!
 //! `status` lists the project's runs, newest first, with every attempt of
 //! their steps (story 3.3: `attempt <n>` and the attempt's state) and
@@ -110,8 +113,8 @@ const NOT_STARTED: &str = "No run was started";
 pub type Providers = Arc<dyn Fn(&ModelRef) -> Result<Arc<dyn LlmProvider>, String> + Send + Sync>;
 
 /// What `agentic run` runs with. `main` builds it with the owner's real
-/// terminal, the OS identity adapter and [`unwired_providers`]; tests pass
-/// am-testkit's fakes.
+/// terminal, the OS identity adapter, [`unwired_providers`] and
+/// [`system_clock`]; tests pass am-testkit's fakes.
 pub struct RunContext {
     pub places: Places,
     /// Supplies the open's identity checks and the host recorded in the
@@ -120,6 +123,9 @@ pub struct RunContext {
     /// Asked only whether it is interactive (AD-15); nothing is read.
     pub terminal: Box<dyn Terminal>,
     pub providers: Providers,
+    /// The run's clock (story 3.24): the plan holds this one, shared, so
+    /// the engine reads the time the context gives.
+    pub clock: Arc<dyn Clock>,
 }
 
 /// The provider factory of the `agentic` binary: it wires no provider yet
@@ -295,6 +301,12 @@ fn not_honoured(step: &am_config::Step) -> Vec<&str> {
 /// guidance note that has expired is absent from the prompt.
 struct SystemClock;
 
+/// The clock the `agentic` binary gives `run` and `gate` (story 3.24): it
+/// reads the system time.
+pub fn system_clock() -> Arc<dyn Clock> {
+    Arc::new(SystemClock)
+}
+
 impl Clock for SystemClock {
     fn now(&self) -> jiff::Timestamp {
         jiff::Timestamp::now()
@@ -395,11 +407,13 @@ fn schema_of(
 /// seat's model and the step's output limit, on the provider the factory
 /// gives for that model, and (story 3.5) the seat's prompt slots and the
 /// step's output schema. A workflow with a step that declares a run-graph
-/// key gives no plan (see [`not_honoured`]).
+/// key gives no plan (see [`not_honoured`]). The plan runs on `clock`, the
+/// context's own (story 3.24).
 pub(crate) fn plan_of(
     snapshot: &ConfigSnapshot,
     workflow: &str,
     providers: &Providers,
+    clock: Arc<dyn Clock>,
     not_done: &str,
 ) -> Result<RunPlan, String> {
     let Some(wf) = snapshot.workflows().get(workflow) else {
@@ -532,7 +546,7 @@ pub(crate) fn plan_of(
         workflow: workflow.to_string(),
         config_hash: snapshot.hash().to_string(),
         steps,
-        clock: Arc::new(SystemClock),
+        clock,
         row_tool: Some(row_tool),
     })
 }
@@ -683,7 +697,13 @@ async fn start(
     // The owner's files may have changed since check 3 (the open can wait
     // on a migration): what the pinned snapshot holds decides.
     no_pinned_owner_child(&snapshot)?;
-    let plan = plan_of(&snapshot, workflow, &ctx.providers, NOT_STARTED)?;
+    let plan = plan_of(
+        &snapshot,
+        workflow,
+        &ctx.providers,
+        ctx.clock.clone(),
+        NOT_STARTED,
+    )?;
     run_plan(
         &opened.store,
         owner(),
@@ -1064,6 +1084,54 @@ mod tests {
         assert_eq!(code, EXIT_OK, "the run is recorded as succeeded");
         assert_eq!(out, "run run-1 succeeded\n");
         assert!(err.contains("the disk is full"), "still said: {err}");
+    }
+
+    /// Story 3.24 (matrix row 19): the plan's clock is the context's clock
+    /// port, the same one (a later `set` shows through), never a clock of
+    /// `plan_of`'s own; `agentic run` and `agentic gate`'s continue both
+    /// build their plan here. The binary's clock
+    /// ([`crate::cli::system_clock`]) reads the system time.
+    #[test]
+    fn plan_of_runs_on_the_contexts_clock() {
+        // am-app/src never names the test kit (xtask's release guard), so
+        // the fixture path and a settable clock are spelled out here.
+        struct SetClock(std::sync::Mutex<jiff::Timestamp>);
+        impl SetClock {
+            fn at(t: &str) -> Arc<Self> {
+                Arc::new(SetClock(std::sync::Mutex::new(t.parse().unwrap())))
+            }
+            fn set(&self, t: &str) {
+                *self.0.lock().unwrap() = t.parse().unwrap();
+            }
+        }
+        impl Clock for SetClock {
+            fn now(&self) -> jiff::Timestamp {
+                *self.0.lock().unwrap()
+            }
+        }
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/projects/one-step");
+        let loaded = am_config::load_in(&root, am_config::LoadOptions::template(&root)).unwrap();
+        let snapshot = loaded.snapshot.expect("the one-step fixture loads");
+        let providers: Providers =
+            Arc::new(|_model: &ModelRef| Ok(Arc::new(NoModelAtGate) as Arc<dyn LlmProvider>));
+        let clock = SetClock::at("2026-11-25T09:00:00Z");
+
+        let plan = plan_of(&snapshot, "hello", &providers, clock.clone(), NOT_STARTED).unwrap();
+
+        let at = |t: &str| t.parse::<jiff::Timestamp>().unwrap();
+        assert_eq!(plan.clock.now(), at("2026-11-25T09:00:00Z"));
+        clock.set("2026-11-26T10:30:00Z");
+        assert_eq!(
+            plan.clock.now(),
+            at("2026-11-26T10:30:00Z"),
+            "the plan holds the context's clock, not a copy"
+        );
+
+        let system = crate::cli::system_clock();
+        let before = jiff::Timestamp::now();
+        let now = system.now();
+        let after = jiff::Timestamp::now();
+        assert!(before <= now && now <= after, "{before} {now} {after}");
     }
 
     #[test]
