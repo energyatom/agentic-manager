@@ -21,9 +21,8 @@
 //! - Each row stores its own taint on write, the highest of the attempt's
 //!   committed taint, the write's and the row's; it only rises, and each
 //!   after-image records it. `FinishToolCall` journals `untrusted`.
-//! - No read path for a step (owner): no `row` input kind and no
-//!   `from_row`. A `document` value in an attempt's writes is refused until
-//!   3.6b. Audit entries hold ids, versions and counts, never row data; the
+//! - The read path is 3.6c's (`tests/row_inputs.rs`). A `document` value in
+//!   an attempt's writes is refused until 3.6b. Audit entries hold ids, versions and counts, never row data; the
 //!   receipt a result is rebuilt from holds no data either.
 //!
 //! The pinned API is in the store plan's Implementation Notes, "API the
@@ -1751,53 +1750,6 @@ fn a_document_value_is_refused_until_3_6b() {
     assert_eq!(r.state(), before, "nothing written");
     assert_eq!(r.step(&queued.id).status, "queued");
     assert_eq!(r.reader().attempt_writes(&queued.id).unwrap(), None);
-}
-
-/// Row 42, the store half (owner: no read path in this slice, not even
-/// test-only): a database made at exactly version 10 has no
-/// `step_inputs.from_row`; an attempt's input of kind `row` is refused in
-/// words (the kinds stay 3.4's four) and nothing is written. That
-/// `StepInput` has no `from_row` field is a `compile_fail` doctest on
-/// `StepInput` itself (am-store's docs). 3.6c supersedes both.
-#[test]
-fn there_is_no_row_input_kind_and_no_from_row_column() {
-    let at_10 = tempfile::tempdir().unwrap();
-    let path_10 = at_10.path().join("state.db");
-    am_store::testing::database_at_version(&path_10, BEFORE_ROWS + 1).unwrap();
-    assert!(
-        !columns(&path_10, "step_inputs").contains(&"from_row".to_string()),
-        "no from_row column"
-    );
-
-    let r = rig_with(&["collect", "check"]);
-    let writer = r.begin(&r.run, "collect", Some(TABLE), None, Taint::Clean);
-    let id = r.insert(&writer, 1, &json!({ "ref": "r-1" }));
-    r.finish(&writer);
-    let queued = r.latest(&r.run, "check");
-    let before = r.state();
-
-    let refused = r
-        .start_with(
-            &r.run,
-            "check",
-            writes(None, None),
-            Taint::Clean,
-            vec![StepInput {
-                kind: "row".into(),
-                from_step_run: None,
-                from_item: None,
-                label: format!("row:{TABLE}/{id}@1"),
-                taint: Taint::Tainted,
-            }],
-            vec![],
-        )
-        .expect_err("no step reads a row in this slice");
-
-    let words = refused.to_string();
-    assert!(words.contains("row"), "{words}");
-    assert!(!words.contains(&id), "no row id in the words: {words}");
-    assert_eq!(r.state(), before, "nothing written");
-    assert_eq!(r.step(&queued.id).status, "queued");
 }
 
 /// Row 44 (AD-8; AD-10 as amended, with Winston's wording "on its tool

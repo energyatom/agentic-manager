@@ -163,6 +163,7 @@ async fn approve_continues_the_run_and_the_next_step_gets_the_reviewed_output() 
             kind: "step_output".into(),
             from_step_run: Some(d.id.clone()),
             from_item: None,
+            from_row: None,
             label: "step:draft@1".into(),
             taint: Taint::Clean,
         }]
@@ -225,6 +226,7 @@ async fn return_queues_the_producer_and_the_gate_with_one_gate_note_input() {
             kind: "gate_note".into(),
             from_step_run: None,
             from_item: Some(item.clone()),
+            from_row: None,
             label: "gate-note:approve@1".into(),
             taint: Taint::Clean,
         }]

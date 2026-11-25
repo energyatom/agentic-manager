@@ -1466,7 +1466,11 @@ const ROW_READERS: [&str; 4] = [
 /// turbofish; as a raw identifier (`r#<name>`); and called by its path.
 /// Each finding names `file:line` of a planted line and, on that same
 /// finding, the exact reader. On the shipped tree no file outside
-/// `crates/am-store/src/` names one.
+/// `crates/am-store/src/` names one. Story 3.6c widens the rule by one
+/// reader and one file, never these four: the snapshot reader
+/// `row_snapshot` stands outside am-store only in
+/// `crates/am-engine/src/row_inputs.rs`, the one read site (matrix row 46;
+/// `the_one_row_read_site_is_the_engines_row_inputs`).
 #[test]
 fn no_shipped_code_reads_row_content() {
     let tmp = store_slice_tree(&[]);
@@ -1574,6 +1578,19 @@ fn no_shipped_code_reads_row_content() {
     assert!(
         elsewhere.is_empty(),
         "no shipped reader of row content outside am-store: {elsewhere:?}"
+    );
+    let snapshot_readers: Vec<&String> = sources
+        .iter()
+        .filter(|(rel, code)| {
+            !rel.starts_with("crates/am-store/src/")
+                && rel != "crates/am-engine/src/row_inputs.rs"
+                && names_token(code, "row_snapshot")
+        })
+        .map(|(rel, _)| rel)
+        .collect();
+    assert!(
+        snapshot_readers.is_empty(),
+        "row_snapshot outside am-store only in the one read site: {snapshot_readers:?}"
     );
 }
 
@@ -2137,7 +2154,10 @@ fn record_refused(what: &str, file: &str, source: &str, record: &str) {
 /// am-providers; a `use` in am-app; a `use … as` alias in am-server; a path
 /// spaced around `::` in am-tools; a path split over lines; a raw
 /// identifier; inside a generic; a `type` alias. On the shipped tree no
-/// file outside `crates/am-store/src/` names either record.
+/// file outside `crates/am-store/src/` names either record. Story 3.6c
+/// adds one record with one more site, never these two: `RowSnapshot`
+/// stands outside am-store only in `crates/am-engine/src/row_inputs.rs`
+/// (matrix row 46).
 #[test]
 fn row_content_is_read_only_in_the_store() {
     let tmp = tempfile::tempdir().unwrap();
@@ -2224,6 +2244,19 @@ fn row_content_is_read_only_in_the_store() {
     assert!(
         elsewhere.is_empty(),
         "no shipped record of row content outside am-store: {elsewhere:?}"
+    );
+    let snapshots: Vec<&String> = sources
+        .iter()
+        .filter(|(rel, code)| {
+            !rel.starts_with("crates/am-store/src/")
+                && rel != "crates/am-engine/src/row_inputs.rs"
+                && names_token(code, "RowSnapshot")
+        })
+        .map(|(rel, _)| rel)
+        .collect();
+    assert!(
+        snapshots.is_empty(),
+        "RowSnapshot outside am-store only in the one read site: {snapshots:?}"
     );
 }
 
@@ -2493,4 +2526,710 @@ fn toolgates_one_port_call_is_inside_fn_write() {
         body.contains(".write_row("),
         "the shipped call is inside fn write"
     );
+}
+
+// ------------------------------------------- story 3.6c, the one read site
+//
+// Story 3.6c ("Rows reaching later steps"; plan matrix row 46; owner Q4's
+// reader condition): the one read path widens the store slice's row-49
+// rule and the ToolGate slice's row-43 record rule by exactly one name
+// each and one file. The store's `Reader::row_snapshot` (a row's current
+// after-image) and its record `RowSnapshot` stand in shipped code only in
+// `crates/am-store/src/` and `crates/am-engine/src/row_inputs.rs`, which
+// reads a step's row inputs at the attempt's start. Every other row-content
+// reader and record stays am-store's alone, in `row_inputs.rs` too; an
+// alias of `RowSnapshot` (`use … as`, `type`) fails in every file, the
+// read site included. Whole-file tokens, as in the rules it widens; tests,
+// comments and literals are not shipped code. Written before the site
+// exists.
+
+/// am-store's snapshot reader and the record it returns (definitions).
+const STORE_SNAPSHOT: &str = "pub struct RowSnapshot {\n    pub seq: i64,\n    pub version: i64,\n    pub data: String,\n    pub taint: Taint,\n}\nimpl Reader {\n    pub fn row_snapshot(&self, table_id: &str, row_id: &str) -> Result<Option<RowSnapshot>, StoreError> {\n        self.current_image(table_id, row_id)\n    }\n}\n";
+
+/// The engine's one read site, as the plan has it: each row input read
+/// through `row_snapshot`, a `row` edge and a fenced part.
+const ROW_INPUTS: &str = "use am_domain::UntrustedData;\nuse am_domain::rows::RowInput;\nuse am_store::{Reader, RowSnapshot, StepInput, StoreError};\npub struct RowRead {\n    pub input: StepInput,\n    pub part: UntrustedData,\n}\npub fn read_rows(reader: &Reader, rows: &[RowInput]) -> Result<Result<Vec<RowRead>, String>, StoreError> {\n    let mut reads = Vec::new();\n    for row in rows {\n        let id = row.row_id.to_string();\n        let found: Option<RowSnapshot> = reader.row_snapshot(&row.table_id, &id)?;\n        let Some(snapshot) = found else {\n            return Ok(Err(format!(\"the table {} holds no row {id}\", row.table_id)));\n        };\n        reads.push(read_of(row, &id, snapshot));\n    }\n    Ok(Ok(reads))\n}\n";
+
+/// The row-43 record tree, plus am-store's snapshot reader, the engine's
+/// read site, and a test, a comment and a literal that name both (in place
+/// of the record tree's `journal.rs`).
+fn read_site_files() -> Vec<(&'static str, &'static str)> {
+    let mut files: Vec<(&'static str, &'static str)> = record_files()
+        .into_iter()
+        .filter(|(f, _)| *f != "crates/am-engine/src/journal.rs")
+        .collect();
+    files.extend([
+        ("crates/am-store/src/snapshot.rs", STORE_SNAPSHOT),
+        ("crates/am-engine/src/row_inputs.rs", ROW_INPUTS),
+        (
+            "crates/am-engine/tests/row_inputs.rs",
+            "fn t(r: &am_store::Reader) -> Option<am_store::RowSnapshot> {\n    r.row_snapshot(\"entries\", \"r-1\").unwrap()\n}\n",
+        ),
+        (
+            "crates/am-engine/src/journal.rs",
+            "// Rows are read in row_inputs.rs through row_snapshot, as a RowSnapshot.\nconst WHY: &str = \"reader.row_snapshot( and RowSnapshot stay in row_inputs.rs\";\nfn version(r: &am_store::RowReceipt) -> i64 {\n    r.version\n}\n",
+        ),
+    ]);
+    files
+}
+
+/// `check-deps` on a tree of [`read_site_files`] with `(file, source)`
+/// planted fails with a finding that names, on one stderr line,
+/// `file:<line>` for a line of `source` holding `token` and the exact
+/// `token`; no other allowed site is a finding.
+fn read_site_refused(what: &str, file: &str, source: &str, token: &str) {
+    let tmp = tempfile::tempdir().unwrap();
+    for (f, text) in read_site_files().iter().filter(|(f, _)| *f != file) {
+        common::write(tmp.path(), f, text);
+    }
+    common::write(tmp.path(), file, source);
+    let out = deps_at(tmp.path());
+    let err = stderr(&out);
+    assert!(!out.status.success(), "{what}: must fail: {err}");
+    let lines = lines_holding(source, &[token]);
+    assert!(!lines.is_empty(), "{what}: the source holds {token}");
+    assert!(
+        err.lines().any(|finding| {
+            lines
+                .iter()
+                .any(|n| finding.contains(&format!("{file}:{n}:")))
+                && names_token(finding, token)
+        }),
+        "{what}: a finding names {file} at a line holding {token} ({lines:?}) and `{token}`: {err}"
+    );
+    for (allowed, _) in read_site_files() {
+        if allowed != file {
+            assert!(
+                !err.contains(allowed),
+                "{what}: an allowed site is not a finding ({allowed}): {err}"
+            );
+        }
+    }
+}
+
+/// Row 46: the one row read site is the engine's `row_inputs.rs`.
+///
+/// - The allowed tree passes: am-store's `row_snapshot` and `RowSnapshot`,
+///   `row_inputs.rs` naming both, a test, a comment and a literal.
+/// - Each planted form fails, naming `file:line` and the exact token:
+///   `row_snapshot` in the engine's driver (`run.rs`), in am-app and in
+///   am-server; split over lines in another engine file; as a function
+///   value in am-providers; in a file of the same name outside am-engine;
+///   another content reader (`table_rows_of`, `row_history_of`) or another
+///   record (`RowRecord`) in `row_inputs.rs`; `RowSnapshot` named in
+///   am-providers; a `use … as` alias of `RowSnapshot` in `row_inputs.rs`
+///   itself; a `type` alias of it in am-app.
+/// - On the shipped tree: `row_inputs.rs` exists and calls
+///   `.row_snapshot(`; it names no `Instruction`, `TrustedInput`, `authored`,
+///   `from_step_output`, `from_owner_note` or `Part::Trusted` (a row is
+///   never trusted, AD-10); am-store defines `fn row_snapshot(`; no shipped
+///   file outside `crates/am-store/src/` and `row_inputs.rs` names
+///   `row_snapshot` or `RowSnapshot`; and `cargo xtask check-deps` passes
+///   on the real workspace.
+#[test]
+fn the_one_row_read_site_is_the_engines_row_inputs() {
+    let tmp = tempfile::tempdir().unwrap();
+    for (f, text) in read_site_files() {
+        common::write(tmp.path(), f, text);
+    }
+    let out = deps_at(tmp.path());
+    assert!(
+        out.status.success(),
+        "the store's snapshot, the one read site, tests, comments and literals pass: {}",
+        stderr(&out)
+    );
+
+    let with = |extra: &str| format!("{ROW_INPUTS}{extra}");
+    for (what, file, source, token) in [
+        (
+            "row_snapshot in the engine's driver",
+            "crates/am-engine/src/run.rs",
+            "fn peek(r: &am_store::Reader, id: &str) -> bool {\n    r.row_snapshot(\"entries\", id).unwrap().is_some()\n}\n".to_string(),
+            "row_snapshot",
+        ),
+        (
+            "row_snapshot in am-app",
+            "crates/am-app/src/run.rs",
+            "fn peek(r: &am_store::Reader, id: &str) -> Option<String> {\n    r.row_snapshot(\"entries\", id).ok().flatten().map(|s| s.data)\n}\n".to_string(),
+            "row_snapshot",
+        ),
+        (
+            "row_snapshot in am-server",
+            "crates/am-server/src/runs.rs",
+            "fn peek(r: &am_store::Reader, id: &str) -> bool {\n    r.row_snapshot(\"entries\", id).unwrap().is_some()\n}\n".to_string(),
+            "row_snapshot",
+        ),
+        (
+            "row_snapshot split over lines in another engine file",
+            "crates/am-engine/src/prompt.rs",
+            "fn peek(reader: &am_store::Reader, id: &str) -> bool {\n    reader\n        .row_snapshot(\"entries\", id)\n        .unwrap()\n        .is_some()\n}\n".to_string(),
+            "row_snapshot",
+        ),
+        (
+            "row_snapshot as a function value in am-providers",
+            "crates/am-providers/src/common.rs",
+            "fn peek(r: &am_store::Reader) -> bool {\n    let f = am_store::Reader::row_snapshot;\n    f(r, \"entries\", \"r-1\").unwrap().is_some()\n}\n".to_string(),
+            "row_snapshot",
+        ),
+        (
+            "a file of the same name outside am-engine",
+            "crates/am-app/src/row_inputs.rs",
+            "fn peek(r: &am_store::Reader, id: &str) -> bool {\n    r.row_snapshot(\"entries\", id).unwrap().is_some()\n}\n".to_string(),
+            "row_snapshot",
+        ),
+        (
+            "another content reader in row_inputs.rs",
+            "crates/am-engine/src/row_inputs.rs",
+            with("fn all(r: &Reader) -> usize {\n    r.table_rows_of(\"entries\").unwrap().len()\n}\n"),
+            "table_rows_of",
+        ),
+        (
+            "the history reader in row_inputs.rs",
+            "crates/am-engine/src/row_inputs.rs",
+            with("fn images(r: &Reader, id: &str) -> usize {\n    r.row_history_of(\"entries\", id).unwrap().len()\n}\n"),
+            "row_history_of",
+        ),
+        (
+            "another record in row_inputs.rs",
+            "crates/am-engine/src/row_inputs.rs",
+            with("fn whole(r: am_store::RowRecord) -> String {\n    r.data\n}\n"),
+            "RowRecord",
+        ),
+        (
+            "RowSnapshot named in am-providers",
+            "crates/am-providers/src/common.rs",
+            "pub(crate) fn render(s: &am_store::RowSnapshot) -> String {\n    s.data.clone()\n}\n".to_string(),
+            "RowSnapshot",
+        ),
+        (
+            "a use-as alias of RowSnapshot in the read site itself",
+            "crates/am-engine/src/row_inputs.rs",
+            with("use am_store::RowSnapshot as Image;\nfn data(i: &Image) -> usize {\n    i.data.len()\n}\n"),
+            "RowSnapshot",
+        ),
+        (
+            "a type alias of RowSnapshot in am-app",
+            "crates/am-app/src/runtime.rs",
+            "type Image = am_store::RowSnapshot;\nfn data(i: &Image) -> usize {\n    i.data.len()\n}\n".to_string(),
+            "RowSnapshot",
+        ),
+    ] {
+        read_site_refused(what, file, &source, token);
+    }
+
+    let site = "crates/am-engine/src/row_inputs.rs";
+    let path = repo_root().join(site);
+    assert!(
+        path.is_file(),
+        "{site} must exist: the one read site (story 3.6c)"
+    );
+    let code = shipped_code(site);
+    assert!(
+        code.contains(".row_snapshot("),
+        "the read site reads through row_snapshot: {code}"
+    );
+    for name in [
+        "Instruction",
+        "TrustedInput",
+        "authored",
+        "from_step_output",
+        "from_owner_note",
+        "Part::Trusted",
+    ] {
+        assert!(
+            !names_token(&code, name),
+            "the read site names no {name}: a row is never trusted (AD-10)"
+        );
+    }
+    let sources = shipped_sources();
+    assert!(
+        sources
+            .iter()
+            .any(|(rel, code)| rel.starts_with("crates/am-store/src/")
+                && code.contains("fn row_snapshot(")),
+        "am-store defines the snapshot reader"
+    );
+    let elsewhere: Vec<(&String, &str)> = sources
+        .iter()
+        .filter(|(rel, _)| !rel.starts_with("crates/am-store/src/") && rel != site)
+        .flat_map(|(rel, code)| {
+            ["row_snapshot", "RowSnapshot"]
+                .into_iter()
+                .filter(|token| names_token(code, token))
+                .map(move |token| (rel, token))
+        })
+        .collect();
+    assert!(
+        elsewhere.is_empty(),
+        "no shipped reader of a snapshot but the one site: {elsewhere:?}"
+    );
+    let out = xtask(&["check-deps"]);
+    assert!(
+        out.status.success(),
+        "the real workspace passes the widened rules: {}",
+        stderr(&out)
+    );
+}
+
+// --------------------------- story 3.22, review triage round 1 (R1, 3.22)
+//
+// Review triage round 1 (manager, 2026-11-25), R1: the read site's own
+// items, `read_rows` and `RowRead` (whose `.part` holds a row's text), are
+// named in shipped code only in their definitions in
+// `crates/am-engine/src/row_inputs.rs` and in the engine's driver,
+// `crates/am-engine/src/run.rs`, which turns each read into a `row` edge
+// and a fenced part. In the driver `read_rows` stands only as a call (never
+// a function value), and neither is renamed (`use … as`, `type`) in any
+// file. The read site calls the store's snapshot reader exactly once
+// (`.row_snapshot(`). Whole-file tokens, as the rules beside them; tests,
+// comments and literals are not shipped code. Written before the rule.
+
+/// The engine's driver as it reads a step's rows: one call of `read_rows`
+/// by path, inside `fn inputs_of` (review triage round 2, T2: named so
+/// since; `fn inputs` before), each read's edge and fenced part handed on.
+const RUN_READS_ROWS: &str = "use crate::row_inputs;\nfn inputs_of(reader: &am_store::Reader, step: &StepPlan) -> Result<(), am_store::StoreError> {\n    match row_inputs::read_rows(reader, &step.row_inputs)? {\n        Ok(reads) => {\n            for read in reads {\n                add(read.input, Part::from(read.part));\n            }\n        }\n        Err(why) => refuse(why),\n    }\n    Ok(())\n}\n";
+
+/// [`read_site_files`] with the driver reading rows, and a test, a comment
+/// and a literal that name `read_rows` and `RowRead`.
+fn read_path_files() -> Vec<(&'static str, &'static str)> {
+    let mut files: Vec<(&'static str, &'static str)> = read_site_files()
+        .into_iter()
+        .filter(|(f, _)| {
+            *f != "crates/am-engine/src/run.rs" && *f != "crates/am-engine/tests/row_inputs.rs"
+        })
+        .collect();
+    files.extend([
+        ("crates/am-engine/src/run.rs", RUN_READS_ROWS),
+        (
+            "crates/am-engine/tests/row_inputs.rs",
+            "use am_engine::row_inputs::{RowRead, read_rows};\nfn t(r: &am_store::Reader, rows: &[am_domain::rows::RowInput]) -> Vec<RowRead> {\n    let f = read_rows;\n    f(r, rows).unwrap().unwrap()\n}\n",
+        ),
+        (
+            "crates/am-engine/src/cancel.rs",
+            "// Rows are read by read_rows into a RowRead, in the driver only.\nconst WHY: &str = \"read_rows( and RowRead stay in run.rs and row_inputs.rs\";\n",
+        ),
+    ]);
+    files
+}
+
+/// The read site with its in-crate tests (review triage round 2, T2: the
+/// module is `pub(crate)`, so its tests are a `#[cfg(test)]` module there,
+/// which calls `read_rows` and names `RowRead`).
+const ROW_INPUTS_WITH_TESTS: &str = "#[cfg(test)]\nmod tests {\n    use super::{RowRead, read_rows};\n    fn t(r: &am_store::Reader, rows: &[am_domain::rows::RowInput]) -> Vec<RowRead> {\n        read_rows(r, rows).unwrap().unwrap()\n    }\n}\n";
+
+/// `check-deps` on a tree of [`read_path_files`] with `(file, source)`
+/// planted fails with a finding that names, on one stderr line,
+/// `file:<line>` for a line of `source` holding `token` and the exact
+/// `token`; no other allowed site is a finding.
+fn read_path_refused(what: &str, file: &str, source: &str, token: &str) {
+    let tmp = tempfile::tempdir().unwrap();
+    for (f, text) in read_path_files().iter().filter(|(f, _)| *f != file) {
+        common::write(tmp.path(), f, text);
+    }
+    common::write(tmp.path(), file, source);
+    let out = deps_at(tmp.path());
+    let err = stderr(&out);
+    assert!(!out.status.success(), "{what}: must fail: {err}");
+    let lines = lines_holding(source, &[token]);
+    assert!(!lines.is_empty(), "{what}: the source holds {token}");
+    assert!(
+        err.lines().any(|finding| {
+            lines
+                .iter()
+                .any(|n| finding.contains(&format!("{file}:{n}:")))
+                && names_token(finding, token)
+        }),
+        "{what}: a finding names {file} at a line holding {token} ({lines:?}) and `{token}`: {err}"
+    );
+    for (allowed, _) in read_path_files() {
+        if allowed != file {
+            assert!(
+                !err.contains(allowed),
+                "{what}: an allowed site is not a finding ({allowed}): {err}"
+            );
+        }
+    }
+}
+
+/// R1: the read site's items stand only at the read site and in the
+/// engine's driver.
+///
+/// - The allowed tree passes: `read_rows` and `RowRead` defined in
+///   `row_inputs.rs` (one `.row_snapshot(` call), `read_rows` called by
+///   path in `run.rs`, a test, a comment and a literal.
+/// - Each planted form fails, naming `file:line` and the exact token:
+///   `read_rows` called in another engine file, in am-app and in
+///   am-server; `RowRead` named in another engine file and in am-server;
+///   a `pub use` re-export of both in the engine's `lib.rs`; a `use … as`
+///   alias of `read_rows` and of `RowRead` in `run.rs`; a `type` alias of
+///   `RowRead` in `row_inputs.rs`; `read_rows` as a function value in
+///   `run.rs` and in another engine file; a second `.row_snapshot(` call in
+///   `row_inputs.rs`.
+/// - On the shipped tree: no file outside `row_inputs.rs` and `run.rs`
+///   names `read_rows` or `RowRead`; every `read_rows` in `run.rs` is a
+///   call; `row_inputs.rs` calls `.row_snapshot(` exactly once; and `cargo
+///   xtask check-deps` passes on the real workspace.
+#[test]
+fn the_read_sites_items_stand_only_in_the_engines_driver() {
+    let tmp = tempfile::tempdir().unwrap();
+    for (f, text) in read_path_files() {
+        common::write(tmp.path(), f, text);
+    }
+    let out = deps_at(tmp.path());
+    assert!(
+        out.status.success(),
+        "the read site, the driver's call, a test, a comment and a literal pass: {}",
+        stderr(&out)
+    );
+
+    let with = |extra: &str| format!("{ROW_INPUTS}{extra}");
+    let driver = |extra: &str| format!("{extra}{RUN_READS_ROWS}");
+    for (what, file, source, token) in [
+        (
+            "read_rows called in another engine file",
+            "crates/am-engine/src/gate.rs",
+            "fn peek(r: &am_store::Reader, rows: &[RowInput]) -> bool {\n    crate::row_inputs::read_rows(r, rows).is_ok()\n}\n".to_string(),
+            "read_rows",
+        ),
+        (
+            "RowRead named in another engine file",
+            "crates/am-engine/src/prompt.rs",
+            "fn shown(read: &crate::row_inputs::RowRead) -> Part {\n    Part::from(read.part.clone())\n}\n".to_string(),
+            "RowRead",
+        ),
+        (
+            "read_rows called in am-app",
+            "crates/am-app/src/run.rs",
+            "fn peek(r: &am_store::Reader, rows: &[am_domain::rows::RowInput]) -> bool {\n    am_engine::row_inputs::read_rows(r, rows).is_ok()\n}\n".to_string(),
+            "read_rows",
+        ),
+        (
+            "read_rows called in am-server",
+            "crates/am-server/src/inbox.rs",
+            "fn peek(r: &am_store::Reader, rows: &[am_domain::rows::RowInput]) -> bool {\n    am_engine::row_inputs::read_rows(r, rows).is_ok()\n}\n".to_string(),
+            "read_rows",
+        ),
+        (
+            "RowRead named in am-server",
+            "crates/am-server/src/runs.rs",
+            "fn shown(read: am_engine::row_inputs::RowRead) -> String {\n    format!(\"{:?}\", read.input)\n}\n".to_string(),
+            "RowRead",
+        ),
+        (
+            "a re-export in the engine's lib.rs",
+            "crates/am-engine/src/lib.rs",
+            "pub mod row_inputs;\npub use row_inputs::{RowRead, read_rows};\n".to_string(),
+            "RowRead",
+        ),
+        (
+            "a use-as alias of read_rows in the driver",
+            "crates/am-engine/src/run.rs",
+            driver("use crate::row_inputs::read_rows as fetch_rows;\n"),
+            "read_rows",
+        ),
+        (
+            "a use-as alias of RowRead in the driver",
+            "crates/am-engine/src/run.rs",
+            driver("use crate::row_inputs::RowRead as Read;\n"),
+            "RowRead",
+        ),
+        (
+            "a type alias of RowRead at the read site",
+            "crates/am-engine/src/row_inputs.rs",
+            with("pub type Read = RowRead;\n"),
+            "RowRead",
+        ),
+        (
+            "read_rows as a function value in the driver",
+            "crates/am-engine/src/run.rs",
+            driver("fn reader() -> fn(&am_store::Reader, &[RowInput]) -> Reads {\n    row_inputs::read_rows\n}\n"),
+            "read_rows",
+        ),
+        (
+            "read_rows as a function value in another engine file",
+            "crates/am-engine/src/scheduler.rs",
+            "fn later() -> usize {\n    let f = crate::row_inputs::read_rows;\n    std::mem::size_of_val(&f)\n}\n".to_string(),
+            "read_rows",
+        ),
+        (
+            "a second .row_snapshot( call at the read site",
+            "crates/am-engine/src/row_inputs.rs",
+            with("fn again(reader: &Reader, id: &str) -> bool {\n    reader.row_snapshot(\"entries\", id).unwrap().is_some()\n}\n"),
+            "row_snapshot",
+        ),
+    ] {
+        read_path_refused(what, file, &source, token);
+    }
+
+    let site = "crates/am-engine/src/row_inputs.rs";
+    let driver_file = "crates/am-engine/src/run.rs";
+    let sources = shipped_sources();
+    let elsewhere: Vec<(&String, &str)> = sources
+        .iter()
+        .filter(|(rel, _)| rel != site && rel != driver_file)
+        .flat_map(|(rel, code)| {
+            ["read_rows", "RowRead"]
+                .into_iter()
+                .filter(|token| names_token(code, token))
+                .map(move |token| (rel, token))
+        })
+        .collect();
+    assert!(
+        elsewhere.is_empty(),
+        "read_rows and RowRead only at the read site and in the driver: {elsewhere:?}"
+    );
+    let run = shipped_code(driver_file);
+    let uses: Vec<&str> = run
+        .match_indices("read_rows")
+        .map(|(at, _)| run[at + "read_rows".len()..].trim_start())
+        .collect();
+    assert!(!uses.is_empty(), "the driver reads rows: {run}");
+    assert!(
+        uses.iter().all(|after| after.starts_with('(')),
+        "every read_rows in the driver is a call"
+    );
+    let read_site = shipped_code(site);
+    assert_eq!(
+        read_site.matches(".row_snapshot(").count(),
+        1,
+        "the read site calls row_snapshot once: {read_site}"
+    );
+    let out = xtask(&["check-deps"]);
+    assert!(
+        out.status.success(),
+        "the real workspace passes: {}",
+        stderr(&out)
+    );
+}
+
+// --------------------------- story 3.22, review triage round 2 (T2, T3)
+//
+// Review triage round 2 (manager, 2026-11-25), T2: the read-site rule
+// counts names, not where they stand. `row_inputs` becomes `pub(crate)`
+// (its tests move into it as a `#[cfg(test)]` module), the store's
+// snapshot is called inside `fn read_rows` itself (no helper wraps it),
+// and in the driver `read_rows(` is called, and `RowRead` named, only
+// inside `fn inputs_of`. T3 (narrowed by the manager): nothing ties the
+// driver's use of a read to the fenced slot-12 path, so `fn inputs_of`
+// names no way to take a part's text out: `content`, `into_content`,
+// `write!` or `{:?}`. Written before the rules.
+
+/// [`read_path_files`] with the read site's in-crate tests.
+fn read_path_files_with_tests() -> Vec<(&'static str, &'static str)> {
+    read_path_files()
+        .into_iter()
+        .map(|(f, text)| {
+            if f == "crates/am-engine/src/row_inputs.rs" {
+                let both: &'static str =
+                    Box::leak(format!("{ROW_INPUTS}{ROW_INPUTS_WITH_TESTS}").into_boxed_str());
+                (f, both)
+            } else {
+                (f, text)
+            }
+        })
+        .collect()
+}
+
+/// `check-deps` on a tree of [`read_path_files_with_tests`] with `(file,
+/// source)` planted fails with a finding that names, on one stderr line,
+/// `file:<line>` for a line of `source` holding `token` and the exact
+/// `token`; no other allowed site is a finding.
+fn placement_refused(what: &str, file: &str, source: &str, token: &str) {
+    let tmp = tempfile::tempdir().unwrap();
+    for (f, text) in read_path_files_with_tests()
+        .iter()
+        .filter(|(f, _)| *f != file)
+    {
+        common::write(tmp.path(), f, text);
+    }
+    common::write(tmp.path(), file, source);
+    let out = deps_at(tmp.path());
+    let err = stderr(&out);
+    assert!(!out.status.success(), "{what}: must fail: {err}");
+    let lines = lines_holding(source, &[token]);
+    assert!(!lines.is_empty(), "{what}: the source holds {token}");
+    assert!(
+        err.lines().any(|finding| {
+            lines
+                .iter()
+                .any(|n| finding.contains(&format!("{file}:{n}:")))
+                && names_token(finding, token)
+        }),
+        "{what}: a finding names {file} at a line holding {token} ({lines:?}) and `{token}`: {err}"
+    );
+    for (allowed, _) in read_path_files_with_tests() {
+        if allowed != file {
+            assert!(
+                !err.contains(allowed),
+                "{what}: an allowed site is not a finding ({allowed}): {err}"
+            );
+        }
+    }
+}
+
+/// The body of `fn <name>(` in `code` (the text between its braces), or
+/// `None`: braces matched, which holds for the flattened code these tests
+/// read.
+fn body_of<'a>(code: &'a str, name: &str) -> Option<&'a str> {
+    let start = code.find(&format!("fn {name}("))?;
+    let open = start + code[start..].find('{')?;
+    let mut depth = 0usize;
+    for (i, c) in code[open..].char_indices() {
+        match c {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(&code[open + 1..open + i]);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// T2: where the read path's calls stand.
+///
+/// - The allowed tree passes: the read site with its in-crate tests, the
+///   snapshot call inside `fn read_rows`, the driver's call inside `fn
+///   inputs_of`.
+/// - Each planted form fails, naming `file:line` and the exact token: the
+///   read site's one `.row_snapshot(` in a helper that `fn read_rows`
+///   calls; the driver's one `read_rows(` in a function that `fn
+///   inputs_of` calls; a driver function, outside `fn inputs_of`, that
+///   returns `RowRead`.
+/// - On the shipped tree: the engine's `lib.rs` declares `pub(crate) mod
+///   row_inputs` and no `pub mod row_inputs`; the read site's tests live
+///   in it (no `crates/am-engine/tests/row_inputs.rs`); its one
+///   `.row_snapshot(` is in `fn read_rows`; every `read_rows` and `RowRead`
+///   of `run.rs` is in `fn inputs_of`; `cargo xtask check-deps` passes.
+#[test]
+fn the_read_paths_calls_stand_in_read_rows_and_inputs_of() {
+    let tmp = tempfile::tempdir().unwrap();
+    for (f, text) in read_path_files_with_tests() {
+        common::write(tmp.path(), f, text);
+    }
+    let out = deps_at(tmp.path());
+    assert!(
+        out.status.success(),
+        "the read site with its tests and the driver's call in inputs_of pass: {}",
+        stderr(&out)
+    );
+
+    let wrapped = "use am_domain::UntrustedData;\nuse am_domain::rows::RowInput;\nuse am_store::{Reader, RowSnapshot, StepInput, StoreError};\npub struct RowRead {\n    pub input: StepInput,\n    pub part: UntrustedData,\n}\nfn snapshot_of(reader: &Reader, table: &str, id: &str) -> Result<Option<RowSnapshot>, StoreError> {\n    reader.row_snapshot(table, id)\n}\npub fn read_rows(reader: &Reader, rows: &[RowInput]) -> Result<Result<Vec<RowRead>, String>, StoreError> {\n    let mut reads = Vec::new();\n    for row in rows {\n        let id = row.row_id.to_string();\n        let Some(snapshot) = snapshot_of(reader, &row.table_id, &id)? else {\n            return Ok(Err(format!(\"the table {} holds no row {id}\", row.table_id)));\n        };\n        reads.push(read_of(row, &id, snapshot));\n    }\n    Ok(Ok(reads))\n}\n";
+    let called_elsewhere = "use crate::row_inputs;\nfn rows_for(reader: &am_store::Reader, step: &StepPlan) -> Result<Result<Reads, String>, am_store::StoreError> {\n    row_inputs::read_rows(reader, &step.row_inputs)\n}\nfn inputs_of(reader: &am_store::Reader, step: &StepPlan) -> Result<(), am_store::StoreError> {\n    match rows_for(reader, step)? {\n        Ok(reads) => {\n            for read in reads {\n                add(read.input, Part::from(read.part));\n            }\n        }\n        Err(why) => refuse(why),\n    }\n    Ok(())\n}\n";
+    let returns_reads = format!(
+        "{RUN_READS_ROWS}fn kept(reads: &mut Vec<row_inputs::RowRead>) -> Vec<row_inputs::RowRead> {{\n    std::mem::take(reads)\n}}\n"
+    );
+    assert_eq!(
+        wrapped.matches(".row_snapshot(").count(),
+        1,
+        "one snapshot call, which the round-1 count rule alone lets pass"
+    );
+    for (what, file, source, token) in [
+        (
+            "a helper that wraps the snapshot call outside fn read_rows",
+            "crates/am-engine/src/row_inputs.rs",
+            wrapped.to_string(),
+            "row_snapshot",
+        ),
+        (
+            "read_rows( called outside fn inputs_of",
+            "crates/am-engine/src/run.rs",
+            called_elsewhere.to_string(),
+            "read_rows",
+        ),
+        (
+            "a driver function that returns RowRead",
+            "crates/am-engine/src/run.rs",
+            returns_reads,
+            "RowRead",
+        ),
+    ] {
+        placement_refused(what, file, &source, token);
+    }
+
+    let lib = shipped_code("crates/am-engine/src/lib.rs");
+    assert!(
+        lib.contains("pub(crate) mod row_inputs;") && !lib.contains("pub mod row_inputs"),
+        "row_inputs is the crate's own: {lib}"
+    );
+    assert!(
+        !repo_root()
+            .join("crates/am-engine/tests/row_inputs.rs")
+            .exists(),
+        "the read site's tests live in it"
+    );
+    let site = shipped_code("crates/am-engine/src/row_inputs.rs");
+    let read = body_of(&site, "read_rows").expect("row_inputs.rs defines read_rows");
+    assert_eq!(read.matches(".row_snapshot(").count(), 1, "{read}");
+    let run = shipped_code("crates/am-engine/src/run.rs");
+    let inputs = body_of(&run, "inputs_of").expect("run.rs defines inputs_of");
+    for token in ["read_rows", "RowRead"] {
+        let all = run.matches(token).count();
+        assert!(all > 0 || token == "RowRead", "the driver reads rows");
+        assert_eq!(
+            inputs.matches(token).count(),
+            all,
+            "every {token} of run.rs is in fn inputs_of"
+        );
+    }
+    let out = xtask(&["check-deps"]);
+    assert!(
+        out.status.success(),
+        "the real workspace passes: {}",
+        stderr(&out)
+    );
+}
+
+/// T3, as the manager narrowed it (2026-11-25): a row's text reaches a
+/// `TrustedInput` only if it is first taken out of its `UntrustedData`, so
+/// `fn inputs_of` names no way to take it out: `content`, `into_content`,
+/// `write!` or `{:?}` (a part's text through `Debug`). A planted driver
+/// naming each, in its row-read loop, fails, naming `file:line` and the
+/// exact form. `TrustedInput` and `from_step_output` are not banned (the
+/// shipped `inputs_of` builds a step output's and a loop-back's), and nor
+/// is `format!`: the shipped `inputs_of` calls it twice for labels
+/// (`format!("step:{}@{}", …)` and `format!("loop-back:{}@{}", …)`). On the
+/// shipped tree `fn inputs_of` names none of the four.
+#[test]
+fn inputs_of_names_no_way_out_of_the_fence() {
+    let plant = |line: &str| {
+        RUN_READS_ROWS.replace(
+            "            for read in reads {\n",
+            &format!("            for read in reads {{\n                {line}\n"),
+        )
+    };
+    assert_ne!(plant("x"), RUN_READS_ROWS, "the plant lands in the loop");
+    for (what, line, token) in [
+        (
+            "the part's content",
+            "let text = read.part.content().clone();",
+            "content",
+        ),
+        (
+            "the part's content, taken",
+            "let text = read.part.clone().into_content();",
+            "into_content",
+        ),
+        (
+            "a write into a sink",
+            "let _ = write!(sink, \"{}\", read.input.label);",
+            "write!",
+        ),
+        (
+            "the part through Debug",
+            "let shown = std::fmt::format(format_args!(\"{:?}\", read.part));",
+            "{:?}",
+        ),
+    ] {
+        placement_refused(what, "crates/am-engine/src/run.rs", &plant(line), token);
+    }
+
+    let run = shipped_code("crates/am-engine/src/run.rs");
+    let inputs = body_of(&run, "inputs_of").expect("run.rs defines inputs_of");
+    for token in ["content", "into_content", "write!", "{:?}"] {
+        assert!(!names_token(inputs, token), "fn inputs_of names no {token}");
+    }
 }

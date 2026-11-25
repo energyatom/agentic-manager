@@ -258,6 +258,7 @@ fn untrusted() -> StepInput {
         kind: "untrusted".into(),
         from_step_run: None,
         from_item: None,
+        from_row: None,
         label: POISON_LABEL.into(),
         taint: Taint::Tainted,
     }
@@ -427,6 +428,7 @@ impl Rig {
                 kind: "step_output".into(),
                 from_step_run: Some(draft.id.clone()),
                 from_item: None,
+                from_row: None,
                 label: format!("step:draft@{}", draft.attempt),
                 taint: draft.taint,
             }],
@@ -1060,6 +1062,7 @@ fn a_gate_note_input_needs_a_human_return() {
             kind: "gate_note".into(),
             from_step_run: None,
             from_item: Some(r.item.clone()),
+            from_row: None,
             label: "gate-note:approve@1".into(),
             taint: Taint::Clean,
         }]
@@ -1109,6 +1112,7 @@ fn a_gate_note_input_needs_a_human_return() {
         kind: "gate_note".into(),
         from_step_run: None,
         from_item: from_item.map(str::to_string),
+        from_row: None,
         label: "gate-note:approve@1".into(),
         taint: Taint::Clean,
     };

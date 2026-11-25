@@ -309,6 +309,7 @@ async fn duplicate_manifest_ids_are_refused() {
             seat_team: "core".into(),
             table: None,
             document: None,
+            row_inputs: vec![],
         }],
         clock: am_testkit::FakeClock::at("2026-11-24T10:00:00Z"),
         row_tool: None,

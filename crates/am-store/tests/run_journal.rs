@@ -944,6 +944,7 @@ fn the_loop_back_input_is_journaled_by_the_loop_back() {
             kind: "loop_back".into(),
             from_step_run: Some(ids[2].clone()),
             from_item: None,
+            from_row: None,
             label: "loop-back:check@1".into(),
             taint: Taint::Tainted,
         }],
@@ -1218,6 +1219,7 @@ fn migration_0008_keeps_every_item_open_with_its_taint() {
             kind: "step_output".into(),
             from_step_run: Some("old-draft".into()),
             from_item: None,
+            from_row: None,
             label: "step:draft@1".into(),
             taint: Taint::Tainted,
         }]

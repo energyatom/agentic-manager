@@ -399,6 +399,7 @@ fn a_resolution_is_audited_as_you_reviewer_without_the_note() {
                 kind: "step_output".into(),
                 from_step_run: Some(draft.clone()),
                 from_item: None,
+                from_row: None,
                 label: "step:draft@1".into(),
                 taint: Taint::Clean,
             }],

@@ -501,6 +501,9 @@ pub(crate) fn plan_of(
                 seat_team: seat.team.clone(),
                 table,
                 document: None,
+                // Story 3.22: no config key names rows a step reads yet
+                // (3.15 and 7.2 fill the slot).
+                row_inputs: Vec::new(),
             });
             continue;
         }
@@ -537,6 +540,9 @@ pub(crate) fn plan_of(
             seat_team: seat.team.clone(),
             table,
             document: None,
+            // Story 3.22: no config key names rows a step reads yet (3.15
+            // and 7.2 fill the slot).
+            row_inputs: Vec::new(),
         });
     }
     // Owner Q1: am-tools' `table_write`; only a step whose seat is granted

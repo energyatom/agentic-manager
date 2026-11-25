@@ -54,6 +54,7 @@ async fn a_tainted_step_taints_every_step_after_it_by_next() {
             kind: "untrusted".into(),
             from_step_run: None,
             from_item: None,
+            from_row: None,
             label: POISON_LABEL.into(),
             taint: Taint::Tainted,
         }]
@@ -64,6 +65,7 @@ async fn a_tainted_step_taints_every_step_after_it_by_next() {
             kind: "step_output".into(),
             from_step_run: Some(a.id.clone()),
             from_item: None,
+            from_row: None,
             label: "step:a@1".into(),
             taint: Taint::Tainted,
         }]
@@ -74,6 +76,7 @@ async fn a_tainted_step_taints_every_step_after_it_by_next() {
             kind: "step_output".into(),
             from_step_run: Some(b.id.clone()),
             from_item: None,
+            from_row: None,
             label: "step:b@1".into(),
             taint: Taint::Tainted,
         }]
@@ -215,6 +218,7 @@ async fn reasons_from_a_tainted_step_are_fenced_and_taint_the_target() {
             kind: "loop_back".into(),
             from_step_run: Some(j.attempt("c", 1).id),
             from_item: None,
+            from_row: None,
             label: "loop-back:c@1".into(),
             taint: Taint::Tainted,
         }]

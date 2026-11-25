@@ -655,6 +655,7 @@ fn step_input(kind: &str, from: Option<&str>, label: &str, taint: Taint) -> Step
         kind: kind.into(),
         from_step_run: from.map(str::to_string),
         from_item: None,
+        from_row: None,
         label: label.into(),
         taint,
     }

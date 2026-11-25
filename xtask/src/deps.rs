@@ -76,10 +76,27 @@
 //!   am-store's source, and only am-store depends on `rusqlite` (normal,
 //!   build or target-specific edges; dev-dependencies are tests), so no
 //!   other crate reads a row and no engine path can pass row content to a
-//!   model call.
+//!   model call but the one read path below.
+//!
+//! Story 3.22, "Rows reaching later steps" (AD-10, AD-43; matrix row 46):
+//! the one read path widens both rules above by one name each and one
+//! file. The store's snapshot reader, `row_snapshot` ([`SNAPSHOT_READER`]),
+//! and its record, `RowSnapshot` ([`SNAPSHOT_RECORD`]), stand in shipped
+//! code only in am-store's source and in am-engine's `row_inputs` module
+//! ([`ROW_READ_SITE`]), which hands a step the rows it reads as fenced
+//! untrusted data. The other readers and records stay am-store's alone,
+//! there too, and an alias of `RowSnapshot` (`use … as`, `type`) fails in
+//! every file. Review triage round 1, R1: that module calls the snapshot
+//! reader exactly once, and its own items, `read_rows` and `RowRead`
+//! ([`READ_ITEMS`]), stand only there (their definitions) and in the
+//! engine's driver ([`ROW_DRIVER`]), where `read_rows` is only ever called;
+//! neither is renamed in any file. Review triage round 2: the module is
+//! `pub(crate)`, its snapshot call stands inside `fn read_rows`, the
+//! driver names both items only inside `fn inputs_of` (T2), and `fn
+//! inputs_of` names no way to take a part's text out of its fence (T3).
 
 use crate::Failure;
-use crate::forbid::{strip_comments_and_strings, unterminated_finding};
+use crate::forbid::{string_literals, strip_comments_and_strings, unterminated_finding};
 use crate::seam_guard::names;
 use crate::shipped::{in_ranges, sources, test_ranges};
 use crate::walk::is_word;
@@ -191,6 +208,27 @@ const GLOBBED_MODULES: [&str; 2] = ["rows", "content"];
 /// The records that carry a row's data (story 3.6, row 43).
 const ROW_RECORDS: [&str; 2] = ["RowRecord", "RowHistoryRecord"];
 
+/// Story 3.22 (row 46): the store's snapshot reader, a row's current
+/// after-image, and the record it returns.
+const SNAPSHOT_READER: &str = "row_snapshot";
+const SNAPSHOT_RECORD: &str = "RowSnapshot";
+
+/// The one shipped file outside am-store that names them: the engine's
+/// read site of the rows a step reads at its start.
+const ROW_READ_SITE: &str = "crates/am-engine/src/row_inputs.rs";
+
+/// Story 3.22, review triage round 1, R1: the read site's own items (a
+/// read's `part` holds a row's text), and the one file besides the read
+/// site that names them, the engine's driver.
+const READ_ITEMS: [&str; 2] = ["read_rows", "RowRead"];
+const ROW_DRIVER: &str = "crates/am-engine/src/run.rs";
+
+/// Story 3.22, review triage round 2: the engine's crate root, which keeps
+/// the read site `pub(crate)` (T2), and the accessors that take a part's
+/// text out of its `UntrustedData`, which `fn inputs_of` never names (T3).
+const ENGINE_LIB: &str = "crates/am-engine/src/lib.rs";
+const FENCE_EXITS: [&str; 2] = ["content", "into_content"];
+
 /// The one SQLite library, and the one crate that may depend on it.
 const SQLITE: &str = "rusqlite";
 const SQLITE_HOME: &str = "am-store";
@@ -255,6 +293,121 @@ fn call_site_findings(root: &Path) -> Vec<String> {
         findings.extend(alias_findings(&source.name, &code, &ALIASED_TYPES));
         findings.extend(port_findings(&source.name, &code));
         findings.extend(record_findings(&source.name, &code));
+        findings.extend(read_path_findings(&source.name, &code, &source.text));
+    }
+    findings
+}
+
+/// Story 3.22, review triage round 1, R1 (AD-10, AD-43): [`READ_ITEMS`]
+/// stand only in [`ROW_READ_SITE`] and [`ROW_DRIVER`], where `read_rows`
+/// is only called (never a function value or an import); neither is
+/// renamed in any file; and the read site calls the snapshot reader
+/// exactly once. Review triage round 2, T2: that call stands inside `fn
+/// read_rows`, both items stand in the driver only inside `fn inputs_of`,
+/// and the engine's `lib.rs` keeps the module the crate's own. T3 (as the
+/// manager narrowed it): `fn inputs_of` names no way to take a part's text
+/// out of its `UntrustedData` ([`FENCE_EXITS`], `write!`, or a `Debug`
+/// placeholder in any string there). `text` is the file as written (its
+/// string literals); each finding names its line and the exact name.
+fn read_path_findings(name: &str, code: &str, text: &str) -> Vec<String> {
+    let mut findings: Vec<String> = alias_lines(code, &READ_ITEMS)
+        .into_iter()
+        .map(|(line, token)| {
+            format!(
+                "{name}:{line}: makes an alias of {token} (`type` or `use … as`); the read site's items are named as themselves, so check-deps sees every use of them (story 3.22: one read path; AD-10)"
+            )
+        })
+        .collect();
+    let called = |at: usize, token: &str| code[at + token.len()..].trim_start().starts_with('(');
+    let within = |span: Option<(usize, usize)>, at: usize| {
+        span.is_some_and(|(from, to)| (from..to).contains(&at))
+    };
+    if name == ROW_READ_SITE {
+        let offsets = token_offsets(code, SNAPSHOT_READER);
+        let read = fn_body(code, "read_rows");
+        let calls = offsets
+            .iter()
+            .filter(|at| {
+                before(code, **at) == Before::Dot
+                    && called(**at, SNAPSHOT_READER)
+                    && within(read, **at)
+            })
+            .count();
+        if offsets.len() > 1 || calls != offsets.len() {
+            let lines: BTreeSet<usize> = offsets.iter().map(|at| line_at(code, *at)).collect();
+            for line in lines {
+                findings.push(format!(
+                    "{name}:{line}: names {SNAPSHOT_READER} again, or not as one method call inside fn read_rows; am-engine's row_inputs module reads a row's after-image with exactly one call of the store's snapshot reader, in fn read_rows itself (story 3.22, review triage rounds 1 and 2, R1 and T2; AD-10, AD-43)"
+                ));
+            }
+        }
+        return findings;
+    }
+    if name == ENGINE_LIB {
+        for at in token_offsets(code, "row_inputs") {
+            let head = code[..at].trim_end();
+            let public = head.strip_suffix("mod").is_some_and(|rest| {
+                !rest.chars().next_back().is_some_and(is_word)
+                    && rest
+                        .trim_end()
+                        .strip_suffix("pub")
+                        .is_some_and(|rest| !rest.chars().next_back().is_some_and(is_word))
+            });
+            if public {
+                findings.push(format!(
+                    "{name}:{}: declares row_inputs `pub`; the read site is the crate's own, `pub(crate) mod row_inputs`, so no other crate reads a row through it (story 3.22, review triage round 2, T2; AD-10)",
+                    line_at(code, at)
+                ));
+            }
+        }
+    }
+    let inputs = if name == ROW_DRIVER {
+        fn_body(code, "inputs_of")
+    } else {
+        None
+    };
+    let mut named: BTreeSet<(usize, &str)> = BTreeSet::new();
+    for token in READ_ITEMS {
+        for at in token_offsets(code, token) {
+            let allowed = within(inputs, at) && (token != "read_rows" || called(at, token));
+            if !allowed {
+                named.insert((line_at(code, at), token));
+            }
+        }
+    }
+    for (line, token) in named {
+        findings.push(format!(
+            "{name}:{line}: names {token}, an item of am-engine's row_inputs module, whose reads carry a row's text; it stands in shipped code only in that module and in the engine's driver, its run module, inside fn inputs_of, where read_rows is only called (story 3.22, review triage rounds 1 and 2, R1 and T2: one read path, fenced and tainting; AD-10, AD-43)"
+        ));
+    }
+    let Some((from, to)) = inputs else {
+        return findings;
+    };
+    let mut exits: BTreeSet<(usize, &str)> = BTreeSet::new();
+    for token in FENCE_EXITS {
+        for at in token_offsets(code, token)
+            .into_iter()
+            .filter(|at| (from..to).contains(at))
+        {
+            exits.insert((line_at(code, at), token));
+        }
+    }
+    for at in token_offsets(code, "write")
+        .into_iter()
+        .filter(|at| (from..to).contains(at) && code[at + 5..].trim_start().starts_with('!'))
+    {
+        exits.insert((line_at(code, at), "write!"));
+    }
+    let lines = line_at(code, from)..=line_at(code, to);
+    for (line, literal) in string_literals(text) {
+        if lines.contains(&line) && (literal.contains(":?}") || literal.contains(":#?}")) {
+            exits.insert((line, "{:?}"));
+        }
+    }
+    for (line, token) in exits {
+        findings.push(format!(
+            "{name}:{line}: names {token} inside fn inputs_of, a way to take a part's text out of its UntrustedData; there a row's text stays fenced, so fn inputs_of names no content, into_content, write! or Debug placeholder (story 3.22, review triage round 2, T3; AD-10)"
+        ));
     }
     findings
 }
@@ -514,10 +667,31 @@ fn globs(flat: &str, module: &str) -> bool {
 }
 
 /// Story 3.6, row 43 (owner condition b): the records that carry a row's
-/// data stand in shipped code only in am-store's source.
+/// data stand in shipped code only in am-store's source. Story 3.22 (row
+/// 46): the snapshot record there and in [`ROW_READ_SITE`], and never
+/// under another name, in any file.
 fn record_findings(name: &str, code: &str) -> Vec<String> {
+    let mut findings: Vec<String> = alias_lines(code, &[SNAPSHOT_RECORD])
+        .into_iter()
+        .map(|(line, token)| {
+            format!(
+                "{name}:{line}: makes an alias of {token} (`type` or `use … as`); the record of a row's current after-image is named as itself, so check-deps sees every use of it (story 3.22: one read site; AD-10)"
+            )
+        })
+        .collect();
     if name.starts_with(ROW_HOME) {
-        return Vec::new();
+        return findings;
+    }
+    if name != ROW_READ_SITE {
+        let lines: BTreeSet<usize> = token_offsets(code, SNAPSHOT_RECORD)
+            .into_iter()
+            .map(|at| line_at(code, at))
+            .collect();
+        for line in lines {
+            findings.push(format!(
+                "{name}:{line}: names {SNAPSHOT_RECORD}, the record of a row's current after-image; it stands in shipped code only in {ROW_HOME} and in am-engine's row_inputs module, the one site that reads a row for a step (story 3.22, owner Q4: a row reaches a model only fenced and tainting; AD-10, AD-43)"
+            ));
+        }
     }
     let mut named: BTreeSet<(usize, &str)> = BTreeSet::new();
     for record in ROW_RECORDS {
@@ -525,14 +699,12 @@ fn record_findings(name: &str, code: &str) -> Vec<String> {
             named.insert((line_at(code, at), record));
         }
     }
-    named
-        .into_iter()
-        .map(|(line, record)| {
-            format!(
-                "{name}:{line}: names {record}, a record that carries a row's data; it stands in shipped code only in {ROW_HOME} (story 3.6, owner condition b: no engine path passes row content to a model call; AD-21)"
-            )
-        })
-        .collect()
+    findings.extend(named.into_iter().map(|(line, record)| {
+        format!(
+            "{name}:{line}: names {record}, a record that carries a row's data; it stands in shipped code only in {ROW_HOME} (story 3.6, owner condition b; story 3.22: a step reads a row only through {SNAPSHOT_RECORD} in am-engine's row_inputs module; AD-21)"
+        )
+    }));
+    findings
 }
 
 /// The byte offsets of `token` in `code`, as a whole token.
@@ -629,8 +801,9 @@ fn resolve_findings(name: &str, code: &str, tests: &[(usize, usize)]) -> Vec<Str
 /// Story 3.6, the store slice (AD-21; rows 48 and 49): outside
 /// [`ROW_HOME`], the token `apply_row_write` (but in [`ROW_WRITER_IMPL`],
 /// the ToolGate slice's one caller) or a [`ROW_READERS`] name anywhere in a
-/// file's code (comments and literals left out). Each finding names its
-/// line and the exact name.
+/// file's code (comments and literals left out); since story 3.22,
+/// [`SNAPSHOT_READER`] outside it and [`ROW_READ_SITE`]. Each finding names
+/// its line and the exact name.
 fn row_findings(name: &str, code: &str) -> Vec<String> {
     if name.starts_with(ROW_HOME) {
         return Vec::new();
@@ -661,8 +834,19 @@ fn row_findings(name: &str, code: &str) -> Vec<String> {
     }
     for (line, reader) in named {
         findings.push(format!(
-            "{name}:{line}: names {reader}, a reader of row content on the store's Reader; no shipped code outside {ROW_HOME} reads a row's data (story 3.6, manager 2026-11-24: no step reads rows before story 3.6c; the data-free row_receipt is allowed; AD-21)"
+            "{name}:{line}: names {reader}, a reader of row content on the store's Reader; no shipped code outside {ROW_HOME} names it (story 3.6, manager 2026-11-24; story 3.22: a step reads a row only through {SNAPSHOT_READER} in am-engine's row_inputs module; the data-free row_receipt is allowed; AD-21)"
         ));
+    }
+    if name != ROW_READ_SITE {
+        let lines: BTreeSet<usize> = token_offsets(code, SNAPSHOT_READER)
+            .into_iter()
+            .map(|at| line_at(code, at))
+            .collect();
+        for line in lines {
+            findings.push(format!(
+                "{name}:{line}: names {SNAPSHOT_READER}, the store's reader of a row's current after-image; it stands in shipped code only in {ROW_HOME} and in am-engine's row_inputs module, the one site that reads a row for a step (story 3.22, owner Q4: a row reaches a model only fenced and tainting; AD-10, AD-43)"
+            ));
+        }
     }
     findings
 }
@@ -798,7 +982,7 @@ pub fn run(metadata: Option<&Path>, root: &Path) -> Result<String, Failure> {
     let calls = call_site_findings(root);
     match check(&doc) {
         Ok(summary) if calls.is_empty() => Ok(format!(
-            "{summary}; only am-engine builds a TrustedInput, and Instruction::authored is called only at its listed sites (AD-10); only the two command handlers name the Inbox resolve and HumanActor outside am-domain and am-store (AD-15); only ToolGate calls the row-writer port and builds an engine result, only the engine's port implementation names the store's row command, and no shipped code outside am-store reads a row (AD-10, AD-21)"
+            "{summary}; only am-engine builds a TrustedInput, and Instruction::authored is called only at its listed sites (AD-10); only the two command handlers name the Inbox resolve and HumanActor outside am-domain and am-store (AD-15); only ToolGate calls the row-writer port and builds an engine result, only the engine's port implementation names the store's row command, and outside am-store only the engine's row_inputs module reads a row, through one row_snapshot call in read_rows, for the engine's driver's inputs_of alone (AD-10, AD-21, AD-43)"
         )),
         Ok(_) => Err(Failure::Findings(calls)),
         Err(Failure::Findings(mut findings)) => {

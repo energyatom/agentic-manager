@@ -37,7 +37,11 @@
 //! in the journal: a clean producer's text is a `TrustedInput`, a tainted
 //! one's is fenced `UntrustedData` that taints the receiver. The request's
 //! one user message holds the instruction, then the trusted inputs, then
-//! the fenced ones.
+//! the fenced ones. Since story 3.22 a step may read rows at its start
+//! (its plan's `row_inputs`, through `row_inputs`): each is a
+//! `row` input naming the after-image it read, with at least that image's
+//! taint, and fenced `UntrustedData` that taints the attempt, whatever the
+//! row's mark (AD-10, AD-43).
 //!
 //! **Hand-offs (AD-36).** `next` is the default. A `loop_back` step's final
 //! message must be a JSON object whose named field is a list of strings
@@ -93,7 +97,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use am_domain::rows::{DeclaredTable, RowTool};
+use am_domain::rows::{DeclaredTable, RowInput, RowTool};
 use am_domain::{
     Actor, AuditEvent, AuditSink, ChatOutcome, ChatRequest, Clock, EventSink, InboxKind,
     Instruction, LlmProvider, Message, Part, ProviderError, Role, StepStatus, StopReason,
@@ -107,6 +111,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::TokenSignal;
 use crate::prompt::{self, Slots, StepPrompt};
+use crate::row_inputs;
 use crate::row_writer::StoreRowWriter;
 use crate::schema::{self, Compiled, OutputSchema};
 use crate::toolgate::{CallPlace, GateError, GateOutput, StepTools, TABLE_WRITE, ToolGate};
@@ -158,15 +163,7 @@ impl Default for Limits {
 /// One step: a bounded loop of model turns on `provider`, or, for a gate,
 /// a wait for a person (its provider is never called).
 ///
-/// Story 3.6's ToolGate slice (owner condition a; matrix row 42): a step
-/// reads no row, so a plan has no row-input slot. Story 3.6c adds one and
-/// removes this tripwire (tests first: written before the slice's fields).
-///
-/// ```compile_fail
-/// let _ = |p: am_engine::run::StepPlan| p.row_inputs;
-/// ```
-///
-/// while the fields that bind a write are read like any other:
+/// The fields that bind a write are read like any other:
 ///
 /// ```
 /// let _ = |p: am_engine::run::StepPlan| (p.grants, p.seat_team, p.table, p.document);
@@ -211,6 +208,11 @@ pub struct StepPlan {
     /// Inert until story 3.6b: any value refuses the plan in words naming
     /// 3.6b.
     pub document: Option<String>,
+    /// Story 3.22 (AD-10, AD-43): the rows the step reads at each attempt's
+    /// start, through `row_inputs`: each is a `row` input naming
+    /// the after-image it read and a fenced part that taints the attempt.
+    /// The shipped plan leaves it empty (3.15 and 7.2 fill it from config).
+    pub row_inputs: Vec<RowInput>,
 }
 
 /// A run to make: the workflow's steps in order, built from one config
@@ -261,7 +263,8 @@ pub enum RunError {
     Tools(String),
     /// Story 3.6 (AD-21, AD-36): what a step declares it writes cannot be
     /// written (a table on a gate, a table of another team than its seat's,
-    /// a document before story 3.6b); nothing was written.
+    /// a document before story 3.6b), or a gate names rows to read (story
+    /// 3.22); nothing was written.
     #[error("step `{step}` cannot run: {why}")]
     Writes { step: String, why: String },
     /// The run could not be created: the journal holds nothing of it.
@@ -482,8 +485,9 @@ async fn run_on(
 /// Story 3.6 (AD-21, AD-36): refuses a plan, before anything is written,
 /// whose step declares a table on a gate (a gate makes no model call) or a
 /// table of another team than its seat's (a seat writes only its own
-/// team's tables), or any document (versioned from story 3.6b on). The
-/// words name config ids only.
+/// team's tables), or any document (versioned from story 3.6b on); since
+/// story 3.22, a gate that names rows to read. The words name config ids
+/// only.
 fn check_writes(plan: &RunPlan) -> Result<(), RunError> {
     for step in &plan.steps {
         let refused = |why: String| RunError::Writes {
@@ -494,6 +498,13 @@ fn check_writes(plan: &RunPlan) -> Result<(), RunError> {
             return Err(refused(format!(
                 "it declares the document `{document}`, and documents are versioned from story 3.6b on, so this version writes none"
             )));
+        }
+        // Story 3.22 (review triage round 1, R3): no model and no person
+        // sees what a gate would read, so a gate reads no row.
+        if matches!(step.hand_off, HandOff::Gate { .. }) && !step.row_inputs.is_empty() {
+            return Err(refused(
+                "it is a gate and names rows to read; a gate makes no model call, so it reads no row".into(),
+            ));
         }
         let Some(table) = &step.table else {
             continue;
@@ -1012,6 +1023,7 @@ impl Run<'_> {
                         kind: "step_output".into(),
                         from_step_run: Some(prev.id.clone()),
                         from_item: None,
+                        from_row: None,
                         label,
                         taint: prev.taint,
                     },
@@ -1063,6 +1075,26 @@ impl Run<'_> {
                 }
             }
         }
+        // Story 3.22 (AD-10, AD-43): the rows the plan names, read now from
+        // their committed after-images through the one read site. Each is a
+        // `row` edge and a fenced part; reading any row taints the attempt,
+        // whatever the row's mark. A row the table does not hold stops the
+        // attempt before it starts, in words naming only store ids.
+        let rows_read = &self.plan.steps[i].row_inputs;
+        if !rows_read.is_empty() {
+            match row_inputs::read_rows(&self.store.reader()?, rows_read)? {
+                Ok(reads) => {
+                    for read in reads {
+                        inputs.taint = inputs.taint.raise(Taint::Tainted);
+                        inputs.add(read.input, Part::from(read.part));
+                    }
+                }
+                Err(why) => {
+                    inputs.refused = Some(why);
+                    return Ok(inputs);
+                }
+            }
+        }
         // The plan's own inputs: untrusted, so every attempt is tainted.
         // Their parts are the assembler's (it fences them last, after the
         // produced ones); only their rows are journaled here.
@@ -1072,6 +1104,7 @@ impl Run<'_> {
                 kind: "untrusted".into(),
                 from_step_run: None,
                 from_item: None,
+                from_row: None,
                 label: data.label().to_string(),
                 taint: Taint::Tainted,
             });
@@ -1142,6 +1175,42 @@ impl Run<'_> {
         }
     }
 
+    /// Step `i`'s attempt `row` does not start: the run stops with one
+    /// Failure item in the engine's words (`why`), never an input's text,
+    /// and the attempt stays queued.
+    fn fail_before_start(
+        &self,
+        step: &StepPlan,
+        row: &StepRow,
+        why: &str,
+        progress: &mut Progress,
+    ) -> Result<StepEnd, StoreError> {
+        progress.reason = Some(format!("step `{}` did not start: {why}", step.key));
+        let item = NewInboxItem {
+            id: new_id(),
+            kind: InboxKind::Failure,
+            payload: None,
+            taint: Taint::Clean,
+            title: format!("Step {} did not start", step.key),
+            body: format!(
+                "Step `{}` did not start, so the run failed: {why}. Step run {} stays queued.",
+                step.key, row.id
+            ),
+            max_returns: None,
+        };
+        let item_id = item.id.clone();
+        progress.finishing = Some("failed");
+        self.exec(
+            engine(),
+            WriteCommand::FailBeforeStart {
+                step_run_id: row.id.clone(),
+                item,
+            },
+        )?;
+        progress.item = Some(item_id);
+        Ok(StepEnd::Failed)
+    }
+
     /// Runs step `i`'s queued attempt `row` to its end, or to its gate.
     async fn run_step(
         &self,
@@ -1151,80 +1220,83 @@ impl Run<'_> {
         progress: &mut Progress,
     ) -> Result<StepEnd, StoreError> {
         let step = &self.plan.steps[i];
-        let inputs = self.inputs_of(i, row, rows)?;
-        if let Some(why) = &inputs.refused {
-            // Fail closed (AD-10 (b)): an attempt whose gate note no person
-            // wrote never starts; the run stops with one Failure item in
-            // the engine's words, never the note (review R5).
-            progress.reason = Some(format!("step `{}` did not start: {why}", step.key));
-            let item = NewInboxItem {
-                id: new_id(),
-                kind: InboxKind::Failure,
-                payload: None,
-                taint: Taint::Clean,
-                title: format!("Step {} did not start", step.key),
-                body: format!(
-                    "Step `{}` did not start, so the run failed: {why}. Step run {} stays queued.",
-                    step.key, row.id
-                ),
-                max_returns: None,
-            };
-            let item_id = item.id.clone();
-            progress.finishing = Some("failed");
-            self.exec(
-                engine(),
-                WriteCommand::FailBeforeStart {
-                    step_run_id: row.id.clone(),
-                    item,
-                },
-            )?;
-            progress.item = Some(item_id);
-            return Ok(StepEnd::Failed);
-        }
-        if let HandOff::Gate { max_returns } = step.hand_off {
-            return self.pause_at_gate(step, row, inputs, max_returns, progress);
-        }
-        let Inputs {
-            rows: journaled,
-            trusted,
-            fenced,
-            taint,
-            ..
-        } = inputs;
-        // Story 3.5 (AD-27): the one assembler builds the request's parts in
-        // AD-27's order, and the journal's record of each, read at the
-        // attempt's start.
-        let assembled = prompt::assemble(
-            Slots {
-                role: step.system.clone(),
-                prompt: step.prompt.clone(),
-                step: step.instruction.clone(),
+        // Story 3.22 (review triage round 1, R7; AD-8, AD-43): the rows a
+        // step reads are read before its start commits, and the store
+        // refuses an edge whose after-image is no longer its row's current
+        // one (`RowRefused`). The inputs are then read again and the start
+        // tried once more; a second refusal fails the step in words.
+        let mut tries = 0;
+        let (system, user, taint) = loop {
+            tries += 1;
+            let inputs = self.inputs_of(i, row, rows)?;
+            if let Some(why) = &inputs.refused {
+                // Fail closed (AD-10): an attempt whose gate note no person
+                // wrote, or whose rows cannot be read (a row the table does
+                // not hold, or one named twice), never starts (story 3.4,
+                // review R5; story 3.22).
+                return self.fail_before_start(step, row, why, progress);
+            }
+            if let HandOff::Gate { max_returns } = step.hand_off {
+                return self.pause_at_gate(step, row, inputs, max_returns, progress);
+            }
+            let Inputs {
+                rows: journaled,
                 trusted,
-                produced_untrusted: fenced,
-                plan_inputs: step.inputs.clone(),
-            },
-            self.plan.clock.now(),
-        );
-        let system = assembled.system;
-        // Committed before the first call (AD-8): the attempt's start, its
-        // inputs, its taint and the prompt it was sent.
-        self.exec(
-            engine(),
-            WriteCommand::StartAttempt {
-                step_run_id: row.id.clone(),
-                inputs: journaled,
+                fenced,
                 taint,
-                prompt: assembled.parts,
-                // Story 3.6 (AD-21): the attempt's seat and the one table
-                // its step declares, which the store checks every row
-                // write against.
-                writes: AttemptWrites {
-                    seat: step.seat.clone(),
-                    table: step.table.as_ref().map(|t| t.id.clone()),
-                    document: None,
+                ..
+            } = inputs;
+            // Story 3.5 (AD-27): the one assembler builds the request's parts
+            // in AD-27's order, and the journal's record of each, read at the
+            // attempt's start (the clock once per try).
+            let assembled = prompt::assemble(
+                Slots {
+                    role: step.system.clone(),
+                    prompt: step.prompt.clone(),
+                    step: step.instruction.clone(),
+                    trusted,
+                    produced_untrusted: fenced,
+                    plan_inputs: step.inputs.clone(),
                 },
-            },
-        )?;
+                self.plan.clock.now(),
+            );
+            // Committed before the first call (AD-8): the attempt's start,
+            // its inputs, its taint and the prompt it was sent.
+            let started = self.exec(
+                engine(),
+                WriteCommand::StartAttempt {
+                    step_run_id: row.id.clone(),
+                    inputs: journaled,
+                    taint,
+                    prompt: assembled.parts,
+                    // Story 3.6 (AD-21): the attempt's seat and the one table
+                    // its step declares, which the store checks every row
+                    // write against.
+                    writes: AttemptWrites {
+                        seat: step.seat.clone(),
+                        table: step.table.as_ref().map(|t| t.id.clone()),
+                        document: None,
+                    },
+                },
+            );
+            match started {
+                Ok(()) => break (assembled.system, assembled.user, taint),
+                Err(StoreError::RowRefused(words)) if !step.row_inputs.is_empty() => {
+                    if tries < 2 {
+                        continue;
+                    }
+                    return self.fail_before_start(
+                        step,
+                        row,
+                        &format!(
+                            "a row it reads changed while it was starting, again after it read its rows a second time ({words})"
+                        ),
+                        progress,
+                    );
+                }
+                Err(e) => return Err(e),
+            }
+        };
         progress.open_step = Some(row.id.clone());
         // A fresh attempt's whole cap, from tokio's clock right after its
         // start committed (review P1; story 3.9's resume will count a
@@ -1232,7 +1304,7 @@ impl Run<'_> {
         let deadline = tokio::time::Instant::now() + step.limits.wall_clock;
         let mut messages = vec![Message {
             role: Role::User,
-            parts: assembled.user,
+            parts: user,
         }];
         let seat = Actor::Seat {
             seat: step.seat.clone(),
@@ -2179,6 +2251,7 @@ mod tests {
                 seat_team: "core".into(),
                 table: None,
                 document: None,
+                row_inputs: vec![],
             }],
             clock: am_testkit::FakeClock::at("2026-11-24T10:00:00Z"),
             row_tool: None,

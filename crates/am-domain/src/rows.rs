@@ -14,16 +14,10 @@
 //! R11 and T6): `Debug` shows their byte lengths only, never a column
 //! name, a value or the table's name.
 //!
-//! Story 3.6's ToolGate slice (owner condition a; matrix row 42): no step
-//! reads a row yet, so this module has no row-input type. Story 3.6c adds
-//! one and removes this tripwire (tests first: written before the
-//! ToolGate slice's types; the implementer may move it).
+//! Story 3.22 adds [`RowInput`], a row a step reads at its start (ids
+//! only).
 //!
-//! ```compile_fail
-//! use am_domain::rows::RowInput;
-//! ```
-//!
-//! while the types a write, its binding and its port take are here:
+//! The types a write, its binding and its port take are here:
 //!
 //! ```
 //! use am_domain::rows::{
@@ -229,6 +223,17 @@ impl fmt::Display for RowWriteError {
             RowWriteError::Refused(words) | RowWriteError::Failed(words) => f.write_str(words),
         }
     }
+}
+
+/// A row a step reads at its start (story 3.22, AD-10, AD-43): the table
+/// by its config id and the row by its id. A plan names it in the step's
+/// row-input slot; the engine reads the row's current after-image and
+/// hands it to the step as fenced untrusted data, which taints the step.
+/// Ids only, never the row's data.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RowInput {
+    pub table_id: String,
+    pub row_id: Uuid,
 }
 
 /// The row-writer port (AD-21 as amended 2026-11-24, owner Q1): a seat's

@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 use am_app::cli::RunContext;
 use am_app::runtime::{OpenRequest, Places, Prompt, open_project};
 use am_config::ModelRef;
-use am_domain::rows::{ColumnKind, ColumnSpec, DeclaredTable};
+use am_domain::rows::{ColumnKind, ColumnSpec, DeclaredTable, RowInput};
 use am_domain::{
     Actor, BoxFuture, CancelSignal, ChatOutcome, ChatRequest, EngineResult, EventSink, Instruction,
     LlmProvider, ModelCapabilities, Part, ProviderError, Role, RuntimeLayout, StopReason, ToolCall,
@@ -93,12 +93,13 @@ pub fn step(key: &str, provider: Arc<dyn LlmProvider>) -> StepPlan {
         provider,
         prompt: am_engine::prompt::StepPrompt::default(),
         output_schema: None,
-        // Story 3.6: no grant, no table, no document; the seat is in team
-        // `core`.
+        // Story 3.6: no grant, no table, no document, no row read; the
+        // seat is in team `core`.
         grants: BTreeSet::new(),
         seat_team: TEAM.into(),
         table: None,
         document: None,
+        row_inputs: vec![],
     }
 }
 
@@ -790,6 +791,21 @@ pub fn writing(step: StepPlan) -> StepPlan {
     StepPlan {
         grants: tables_on(),
         table: Some(entries()),
+        ..step
+    }
+}
+
+/// `step` reading the rows `rows` of `entries` at its start (the row-input
+/// slot, Design Notes 5).
+pub fn reading(step: StepPlan, rows: &[&str]) -> StepPlan {
+    StepPlan {
+        row_inputs: rows
+            .iter()
+            .map(|r| RowInput {
+                table_id: TABLE.into(),
+                row_id: uuid::Uuid::parse_str(r).unwrap(),
+            })
+            .collect(),
         ..step
     }
 }
